@@ -27,11 +27,7 @@ func StartBot(cfg *config.Config) {
 func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
-	updates, err := bot.GetUpdatesChan(u)
-	if err != nil {
-		log.Printf("Failed to get updates for %s: %v", service, err)
-		return
-	}
+	updates := bot.GetUpdatesChan(u)
 
 	for update := range updates {
 		if update.Message == nil {
