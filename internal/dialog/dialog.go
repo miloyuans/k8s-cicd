@@ -3,6 +3,7 @@ package dialog
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 

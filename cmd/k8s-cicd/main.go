@@ -48,7 +48,7 @@ func pollGateway() {
 
 	for range ticker.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		tasks, err := http.FetchTasks(ctx, cfg.GatewayURL)
+		tasks, err := httpclient.FetchTasks(ctx, cfg.GatewayURL)
 		if err != nil {
 			log.Printf("Failed to fetch tasks: %v", err)
 			cancel()

@@ -26,7 +26,7 @@ func main() {
 }
 
 var (
-	taskQueue sync.Map // map[string][]storage.DeployRequest
+	taskQueue sync.Map // map[string][]dialog.DeployRequest
 )
 
 func handleTasks(w http.ResponseWriter, r *http.Request) {
