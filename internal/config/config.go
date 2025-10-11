@@ -1,10 +1,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"log"
 	"path/filepath"
 	"strings"
-	"log"
 
 	"gopkg.in/yaml.v3"
 )
@@ -30,11 +31,13 @@ type Config struct {
 func LoadConfig(filePath string) *Config {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		log.Fatalf("Failed to read config: %v", err)
+		fmt.Fprintf(os.Stderr, "Failed to read config: %v\n", err)
+		os.Exit(1)
 	}
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		log.Fatalf("Failed to unmarshal config: %v", err)
+		fmt.Fprintf(os.Stderr, "Failed to unmarshal config: %v\n", err)
+		os.Exit(1)
 	}
 	if cfg.Namespace == "" {
 		cfg.Namespace = "default"
@@ -69,7 +72,7 @@ func LoadServiceLists(servicesDir string) (map[string][]string, error) {
 			serviceName := strings.TrimSuffix(file.Name(), ".svc.list")
 			data, err := os.ReadFile(filepath.Join(servicesDir, file.Name()))
 			if err != nil {
-				log.Printf("Failed to read service list %s: %v", file.Name(), err)
+				fmt.Printf("Failed to read service list %s: %v\n", file.Name(), err)
 				continue
 			}
 			lines := strings.Split(string(data), "\n")

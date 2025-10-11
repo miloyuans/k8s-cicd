@@ -9,7 +9,6 @@ import (
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/dialog"
 	"k8s-cicd/internal/storage"
-	"k8s-cicd/internal/telegram"
 )
 
 func main() {
@@ -27,7 +26,7 @@ func main() {
 }
 
 var (
-	taskQueue sync.Map // map[string][]DeployRequest
+	taskQueue sync.Map // map[string][]storage.DeployRequest
 )
 
 func handleTasks(w http.ResponseWriter, r *http.Request) {

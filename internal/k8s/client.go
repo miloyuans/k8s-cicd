@@ -3,13 +3,9 @@ package k8s
 import (
 	"context"
 	"fmt"
-	"log"
+	"os"
 	"strings"
-	"time"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"k8s-cicd/internal/config"
-	"k8s-cicd/internal/storage"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -23,8 +19,7 @@ type Client struct {
 	client dynamic.Interface
 }
 
-func NewClient(cfg *config.Config) *Client {
-	kubeconfig := cfg.KubeConfigPath
+func NewClient(kubeconfig string) *Client {
 	if kubeconfig == "" {
 		kubeconfig = clientcmd.RecommendedHomeFile
 	}
@@ -32,17 +27,23 @@ func NewClient(cfg *config.Config) *Client {
 	if err != nil {
 		k8sCfg, err = rest.InClusterConfig()
 		if err != nil {
-			log.Fatalf("Failed to get kube config: %v", err)
+			fmt.Fprintf(os.Stderr, "Failed to get kube config: %v\n", err)
+			os.Exit(1)
 		}
 	}
 	client, err := dynamic.NewForConfig(k8sCfg)
 	if err != nil {
-		log.Fatalf("Failed to create k8s client: %v", err)
+		fmt.Fprintf(os.Stderr, "Failed to create k8s client: %v\n", err)
+		os.Exit(1)
 	}
 	return &Client{client: client}
 }
 
-func (c *Client) GetNewImage(service, version string, namespace string) (string, error) {
+func (c *Client) Client() dynamic.Interface {
+	return c.client
+}
+
+func (c *Client) GetNewImage(service, version, namespace string) (string, error) {
 	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 	dep, err := c.client.Resource(gvr).Namespace(namespace).Get(context.Background(), service, metav1.GetOptions{})
 	if err != nil {
@@ -201,77 +202,4 @@ func (c *Client) getDeploymentEnvs(ctx context.Context, service, namespace strin
 		}
 	}
 	return result
-}
-
-func (c *Client) SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) {
-	token, ok := cfg.TelegramBots[result.Request.Service]
-	if !ok {
-		log.Printf("No bot for service: %s", result.Request.Service)
-		return
-	}
-
-	chatID, ok := cfg.TelegramChats[result.Request.Service]
-	if !ok {
-		log.Printf("No chat for service: %s", result.Request.Service)
-		return
-	}
-
-	bot, err := tgbotapi.NewBotAPI(token)
-	if err != nil {
-		log.Printf("Failed to create bot: %v", err)
-		return
-	}
-
-	var md strings.Builder
-	if result.Success {
-		md.WriteString(fmt.Sprintf(`
-## 🚀 **Deployment Success**
-
-**Service**: *%s*
-**Environment**: *%s*
-**New Version**: *%s*
-**Old Image**: *%s*
-
-✅ Deployment completed successfully!
-
----
-**Deployed at**: %s
-`, result.Request.Service, result.Request.Env, result.Request.Version, result.OldImage,
-			result.Request.Timestamp.Format("2006-01-02 15:04:05")))
-	} else {
-		md.WriteString(fmt.Sprintf(`
-## ❌ **Deployment Failed**
-
-**Service**: *%s*
-**Environment**: *%s*
-**Version**: *%s*
-**Error**: *%s*
-
-### 🔍 **Diagnostics**
-
-**Events**:
-%s
-
-**Environment Variables**:
-`, result.Request.Service, result.Request.Env, result.Request.Version, result.ErrorMsg, result.Events))
-
-		for k, v := range result.Envs {
-			md.WriteString(fmt.Sprintf("• `%s`: %s\n", k, v))
-		}
-
-		md.WriteString(fmt.Sprintf(`
-**Logs**: %s
-
-⚠️ **Rollback completed**
----
-**Failed at**: %s
-`, result.Logs, result.Request.Timestamp.Format("2006-01-02 15:04:05")))
-	}
-
-	msg := tgbotapi.NewMessage(chatID, md.String())
-	msg.ParseMode = "Markdown"
-	_, err = bot.Send(msg)
-	if err != nil {
-		log.Printf("Failed to send telegram message: %v", err)
-	}
 }

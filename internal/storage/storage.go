@@ -2,13 +2,16 @@ package storage
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"k8s-cicd/internal/config"
-	"k8s-cicd/internal/k8s"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
 )
 
 type DeploymentInfo struct {
@@ -17,6 +20,23 @@ type DeploymentInfo struct {
 	Image     string    `json:"image"`
 	Timestamp time.Time `json:"timestamp"`
 	Status    string    `json:"status"`
+}
+
+type DeployRequest struct {
+	Service   string    `json:"service"`
+	Env       string    `json:"env"`
+	Version   string    `json:"version"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+type DeployResult struct {
+	Request   DeployRequest
+	Success   bool
+	ErrorMsg  string
+	OldImage  string
+	Events    string
+	Logs      string
+	Envs      map[string]string
 }
 
 type TelegramMessage struct {
@@ -30,7 +50,7 @@ func EnsureStorageDir() error {
 	return os.MkdirAll("storage", 0755)
 }
 
-func DailyMaintenance(cfg *config.Config, k8sClient *k8s.Client) {
+func DailyMaintenance(cfg *config.Config, client dynamic.Interface) {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 
@@ -38,7 +58,7 @@ func DailyMaintenance(cfg *config.Config, k8sClient *k8s.Client) {
 		now := time.Now()
 		fileName := getDailyFileName(now, "deploy")
 		if _, err := os.Stat(fileName); os.IsNotExist(err) {
-			initDailyFile(fileName, k8sClient, cfg)
+			InitDailyFile(fileName, client, cfg)
 		}
 		cleanupOldFiles("deploy")
 	}
@@ -67,14 +87,14 @@ func getDailyFileName(t time.Time, prefix string) string {
 	return filepath.Join("storage", fmt.Sprintf("%s_%s.json", prefix, t.Format("2006-01-02")))
 }
 
-func initDailyFile(fileName string, k8sClient *k8s.Client, cfg *config.Config) {
-	deployments, err := k8sClient.client.Resource(schema.GroupVersionResource{
+func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config) {
+	deployments, err := client.Resource(schema.GroupVersionResource{
 		Group:    "apps",
 		Version:  "v1",
 		Resource: "deployments",
 	}).Namespace(cfg.Namespace).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
-		log.Printf("Failed to list deployments: %v", err)
+		fmt.Printf("Failed to list deployments: %v\n", err)
 		return
 	}
 
@@ -95,9 +115,9 @@ func initDailyFile(fileName string, k8sClient *k8s.Client, cfg *config.Config) {
 		}
 	}
 
-	data, _ := json.MarshalIndent(inos, "", "  ")
+	data, _ := json.MarshalIndent(infos, "", "  ")
 	os.WriteFile(fileName, data, 0644)
-	log.Printf("Initialized daily file: %s", fileName)
+	fmt.Printf("Initialized daily file: %s\n", fileName)
 }
 
 func cleanupOldFiles(prefix string) {

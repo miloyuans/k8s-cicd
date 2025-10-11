@@ -1,14 +1,15 @@
 package dialog
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/storage"
+	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 type DeployRequest struct {
@@ -28,8 +29,8 @@ type DialogState struct {
 }
 
 var (
-	dialogs    sync.Map // map[int64]*DialogState
-	taskQueue  sync.Map // map[string][]DeployRequest
+	dialogs   sync.Map // map[int64]*DialogState
+	taskQueue sync.Map // map[string][]DeployRequest
 )
 
 func StartDialog(userID, chatID int64, service string, cfg *config.Config) {
@@ -166,9 +167,20 @@ func monitorDialogTimeout(userID, chatID int64, cfg *config.Config) {
 }
 
 func sendMessage(cfg *config.Config, chatID int64, text interface{}) {
-	token, ok := cfg.TelegramBots[cfg.ServiceKeywords[chatID]]
+	service := ""
+	for svc, id := range cfg.TelegramChats {
+		if id == chatID {
+			service = svc
+			break
+		}
+	}
+	if service == "" {
+		log.Printf("No service found for chat %d", chatID)
+		return
+	}
+	token, ok := cfg.TelegramBots[service]
 	if !ok {
-		log.Printf("No bot for chat %d", chatID)
+		log.Printf("No bot for service: %s", service)
 		return
 	}
 	bot, err := tgbotapi.NewBotAPI(token)
@@ -185,7 +197,10 @@ func sendMessage(cfg *config.Config, chatID int64, text interface{}) {
 		msg = t
 	}
 	msg.ParseMode = "Markdown"
-	bot.Send(msg)
+	_, err = bot.Send(msg)
+	if err != nil {
+		log.Printf("Failed to send telegram message: %v", err)
+	}
 }
 
 func contains(slice []string, item string) bool {

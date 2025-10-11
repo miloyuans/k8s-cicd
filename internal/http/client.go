@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
-	"k8s-cicd/internal/dialog"
+	"k8s-cicd/internal/storage"
 )
 
-func FetchTasks(ctx context.Context, gatewayURL string) ([]dialog.DeployRequest, error) {
+func FetchTasks(ctx context.Context, gatewayURL string) ([]storage.DeployRequest, error) {
 	body, _ := json.Marshal(map[string]string{"env": "prod"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatewayURL+"/tasks", bytes.NewBuffer(body))
 	if err != nil {
@@ -28,7 +29,7 @@ func FetchTasks(ctx context.Context, gatewayURL string) ([]dialog.DeployRequest,
 		return nil, fmt.Errorf("gateway returned status: %d", resp.StatusCode)
 	}
 
-	var tasks []dialog.DeployRequest
+	var tasks []storage.DeployRequest
 	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
 		return nil, err
 	}

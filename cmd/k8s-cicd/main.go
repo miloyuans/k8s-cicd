@@ -2,39 +2,22 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"k8s-cicd/internal/config"
-	"k8s-cicd/internal/http"
+	"k8s-cicd/internal/httpclient"
 	"k8s-cicd/internal/k8s"
 	"k8s-cicd/internal/storage"
+	"k8s-cicd/internal/telegram"
 )
-
-type DeployRequest struct {
-	Service   string    `json:"service"`
-	Env       string    `json:"env"`
-	Version   string    `json:"version"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-type DeployResult struct {
-	Request   DeployRequest
-	Success   bool
-	ErrorMsg  string
-	OldImage  string
-	Events    string
-	Logs      string
-	Envs      map[string]string
-}
 
 var (
 	cfg         *config.Config
 	k8sClient   *k8s.Client
-	taskQueue   chan *DeployRequest
+	taskQueue   chan *storage.DeployRequest
 	activeTasks sync.Map
 	wg          sync.WaitGroup
 	globalCounter int64
@@ -42,18 +25,18 @@ var (
 
 func main() {
 	cfg = config.LoadConfig("config.yaml")
-	k8sClient = k8s.NewClient(cfg)
+	k8sClient = k8s.NewClient(cfg.KubeConfigPath)
 
 	if err := storage.EnsureStorageDir(); err != nil {
 		log.Fatalf("Failed to create storage dir: %v", err)
 	}
 
-	taskQueue = make(chan *DeployRequest, 100)
+	taskQueue = make(chan *storage.DeployRequest, 100)
 	for i := 0; i < cfg.MaxConcurrency; i++ {
 		go worker()
 	}
 
-	go storage.DailyMaintenance(cfg, k8sClient)
+	go storage.DailyMaintenance(cfg, k8sClient.Client())
 	go pollGateway()
 
 	select {} // Keep running
@@ -88,21 +71,21 @@ func pollGateway() {
 func worker() {
 	for task := range taskQueue {
 		wg.Add(1)
-		go func(t *DeployRequest) {
+		go func(t *storage.DeployRequest) {
 			defer wg.Done()
 			activeTasks.Store(t.Service, nil)
 
-			result := &DeployResult{
+			result := &storage.DeployResult{
 				Request: *t,
 				Envs:    make(map[string]string),
 			}
 
-			newImage, err := k8sClient.GetNewImage(t.Service, t.Version)
+			newImage, err := k8sClient.GetNewImage(t.Service, t.Version, cfg.Namespace)
 			if err != nil {
 				result.Success = false
 				result.ErrorMsg = err.Error()
 				storage.PersistDeployment(cfg, t.Service, t.Env, "", "failed")
-				go k8sClient.SendTelegramNotification(cfg, result)
+				go telegram.SendTelegramNotification(cfg, result)
 				activeTasks.Delete(t.Service)
 				return
 			}
@@ -112,19 +95,19 @@ func worker() {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 			defer cancel()
 
-			result.Success, result.ErrorMsg, result.OldImage = k8sClient.UpdateDeployment(ctx, t.Service, newImage)
+			result.Success, result.ErrorMsg, result.OldImage = k8sClient.UpdateDeployment(ctx, t.Service, newImage, cfg.Namespace)
 
 			if result.Success {
-				result.Success = k8sClient.WaitForRollout(ctx, t.Service)
+				result.Success = k8sClient.WaitForRollout(ctx, t.Service, cfg.Namespace)
 				if !result.Success {
 					result.ErrorMsg = "Rollout failed or timed out"
-					k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage)
+					k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage, cfg.Namespace)
 				}
 			}
 
 			if !result.Success {
-				result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(ctx, t.Service)
-				k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage)
+				result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(ctx, t.Service, cfg.Namespace)
+				k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage, cfg.Namespace)
 			}
 
 			status := "success"
@@ -133,7 +116,7 @@ func worker() {
 			}
 			storage.PersistDeployment(cfg, t.Service, t.Env, newImage, status)
 
-			go k8sClient.SendTelegramNotification(cfg, result)
+			go telegram.SendTelegramNotification(cfg, result)
 
 			activeTasks.Delete(t.Service)
 		}(task)
