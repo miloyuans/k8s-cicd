@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"log"
 	"path/filepath"
 	"strings"
 
