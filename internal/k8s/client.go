@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"internal/config"
-	"internal/storage"
+	"k8s-cicd/internal/config"
+	"k8s-cicd/internal/storage"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"

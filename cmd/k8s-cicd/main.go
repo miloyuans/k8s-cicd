@@ -8,10 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"internal/config"
-	"internal/http"
-	"internal/k8s"
-	"internal/storage"
+	"k8s-cicd/internal/config"
+	"k8s-cicd/internal/http"
+	"k8s-cicd/internal/k8s"
+	"k8s-cicd/internal/storage"
 )
 
 type DeployRequest struct {

@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"internal/config"
-	"internal/dialog"
-	"internal/storage"
+	"k8s-cicd/internal/config"
+	"k8s-cicd/internal/dialog"
+	"k8s-cicd/internal/storage"
 )
 
 func StartBot(cfg *config.Config) {
