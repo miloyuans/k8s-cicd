@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"k8s-cicd/internal/config"
-	"k8s-cicd/internal/http"
 	"k8s-cicd/internal/k8s"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
