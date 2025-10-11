@@ -8,10 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/yourusername/k8s-cicd/internal/config"
-	"github.com/yourusername/k8s-cicd/internal/http"
-	"github.com/yourusername/k8s-cicd/internal/k8s"
-	"github.com/yourusername/k8s-cicd/internal/storage"
+	"k8s-cicd/internal/config"
+	"k8s-cicd/internal/http"
+	"k8s-cicd/internal/k8s"
+	"k8s-cicd/internal/storage"
 )
 
 type DeployRequest struct {

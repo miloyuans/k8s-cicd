@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/yourusername/k8s-cicd/internal/config"
-	"github.com/yourusername/k8s-cicd/internal/dialog"
-	"github.com/yourusername/k8s-cicd/internal/storage"
-	"github.com/yourusername/k8s-cicd/internal/telegram"
+	"k8s-cicd/internal/config"
+	"k8s-cicd/internal/dialog"
+	"k8s-cicd/internal/storage"
+	"k8s-cicd/internal/telegram"
 )
 
 func main() {
