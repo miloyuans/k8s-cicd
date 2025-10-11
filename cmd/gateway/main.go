@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"sync"
 
-	"k8s-cicd/internal/config"
-	"k8s-cicd/internal/dialog"
-	"k8s-cicd/internal/storage"
-	"k8s-cicd/internal/telegram"
+	"internal/config"
+	"internal/dialog"
+	"internal/storage"
+	"internal/telegram"
 )
 
 func main() {

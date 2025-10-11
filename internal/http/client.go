@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"k8s-cicd/internal/dialog"
+	"internal/dialog"
 )
 
 func FetchTasks(ctx context.Context, gatewayURL string) ([]dialog.DeployRequest, error) {

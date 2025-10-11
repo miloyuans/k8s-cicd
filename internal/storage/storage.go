@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"k8s-cicd/internal/config"
-	"k8s-cicd/internal/k8s"
+	"internal/config"
+	"internal/k8s"
 )
 
 type DeploymentInfo struct {

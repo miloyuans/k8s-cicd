@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"k8s-cicd/internal/config"
-	"k8s-cicd/internal/storage"
+	"internal/config"
+	"internal/storage"
 )
 
 type DeployRequest struct {
