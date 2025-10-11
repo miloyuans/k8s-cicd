@@ -3,11 +3,13 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/yourusername/k8s-cicd/internal/config"
+	"github.com/yourusername/k8s-cicd/internal/storage"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -40,9 +42,9 @@ func NewClient(cfg *config.Config) *Client {
 	return &Client{client: client}
 }
 
-func (c *Client) GetNewImage(service, version string) (string, error) {
+func (c *Client) GetNewImage(service, version string, namespace string) (string, error) {
 	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-	dep, err := c.client.Resource(gvr).Namespace(config.Config.Namespace).Get(context.Background(), service, metav1.GetOptions{})
+	dep, err := c.client.Resource(gvr).Namespace(namespace).Get(context.Background(), service, metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("failed to get deployment: %v", err)
 	}
@@ -68,10 +70,10 @@ func (c *Client) GetNewImage(service, version string) (string, error) {
 	return newImage, nil
 }
 
-func (c *Client) UpdateDeployment(ctx context.Context, service, newImage string) (bool, string, string) {
+func (c *Client) UpdateDeployment(ctx context.Context, service, newImage, namespace string) (bool, string, string) {
 	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 
-	dep, err := c.client.Resource(gvr).Namespace(config.Config.Namespace).Get(ctx, service, metav1.GetOptions{})
+	dep, err := c.client.Resource(gvr).Namespace(namespace).Get(ctx, service, metav1.GetOptions{})
 	if err != nil {
 		return false, fmt.Sprintf("Failed to get deployment: %v", err), ""
 	}
@@ -87,7 +89,7 @@ func (c *Client) UpdateDeployment(ctx context.Context, service, newImage string)
 	unstructured.SetNestedField(container, newImage, "image")
 	unstructured.SetNestedSlice(dep.Object, containers, "spec", "template", "spec", "containers")
 
-	_, err = c.client.Resource(gvr).Namespace(config.Config.Namespace).Update(ctx, dep, metav1.UpdateOptions{})
+	_, err = c.client.Resource(gvr).Namespace(namespace).Update(ctx, dep, metav1.UpdateOptions{})
 	if err != nil {
 		return false, fmt.Sprintf("Failed to update deployment: %v", err), oldImage
 	}
@@ -95,9 +97,9 @@ func (c *Client) UpdateDeployment(ctx context.Context, service, newImage string)
 	return true, "", oldImage
 }
 
-func (c *Client) WaitForRollout(ctx context.Context, service string) bool {
+func (c *Client) WaitForRollout(ctx context.Context, service, namespace string) bool {
 	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-	watcher, err := c.client.Resource(gvr).Namespace(config.Config.Namespace).Watch(ctx, metav1.ListOptions{
+	watcher, err := c.client.Resource(gvr).Namespace(namespace).Watch(ctx, metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("metadata.name=%s", service),
 	})
 	if err != nil {
@@ -128,24 +130,24 @@ func (c *Client) WaitForRollout(ctx context.Context, service string) bool {
 	}
 }
 
-func (c *Client) RestoreDeployment(ctx context.Context, service, oldImage string) {
+func (c *Client) RestoreDeployment(ctx context.Context, service, oldImage, namespace string) {
 	if oldImage == "" {
 		return
 	}
-	c.UpdateDeployment(ctx, service, oldImage)
+	c.UpdateDeployment(ctx, service, oldImage, namespace)
 }
 
-func (c *Client) GetDeploymentDiagnostics(ctx context.Context, service string) (string, string, map[string]string) {
-	events := c.getEvents(ctx, service)
-	logs := c.getPodLogs(ctx, service)
-	envs := c.getDeploymentEnvs(ctx, service)
+func (c *Client) GetDeploymentDiagnostics(ctx context.Context, service, namespace string) (string, string, map[string]string) {
+	events := c.getEvents(ctx, service, namespace)
+	logs := c.getPodLogs(ctx, service, namespace)
+	envs := c.getDeploymentEnvs(ctx, service, namespace)
 
 	return events, logs, envs
 }
 
-func (c *Client) getEvents(ctx context.Context, service string) string {
+func (c *Client) getEvents(ctx context.Context, service, namespace string) string {
 	eventsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "events"}
-	events, err := c.client.Resource(eventsGVR).Namespace(config.Config.Namespace).List(ctx, metav1.ListOptions{
+	events, err := c.client.Resource(eventsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("involvedObject.name=%s", service),
 	})
 	if err != nil {
@@ -160,9 +162,9 @@ func (c *Client) getEvents(ctx context.Context, service string) string {
 	return eventsStr.String()
 }
 
-func (c *Client) getPodLogs(ctx context.Context, service string) string {
+func (c *Client) getPodLogs(ctx context.Context, service, namespace string) string {
 	podsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-	pods, err := c.client.Resource(podsGVR).Namespace(config.Config.Namespace).List(ctx, metav1.ListOptions{
+	pods, err := c.client.Resource(podsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("app=%s", service),
 	})
 	if err != nil || len(pods.Items) == 0 {
@@ -173,9 +175,9 @@ func (c *Client) getPodLogs(ctx context.Context, service string) string {
 	return fmt.Sprintf("Pod: %s - Logs retrieval requires REST client", podName)
 }
 
-func (c *Client) getDeploymentEnvs(ctx context.Context, service string) map[string]string {
+func (c *Client) getDeploymentEnvs(ctx context.Context, service, namespace string) map[string]string {
 	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-	dep, err := c.client.Resource(gvr).Namespace(config.Config.Namespace).Get(ctx, service, metav1.GetOptions{})
+	dep, err := c.client.Resource(gvr).Namespace(namespace).Get(ctx, service, metav1.GetOptions{})
 	if err != nil {
 		return nil
 	}
@@ -201,7 +203,7 @@ func (c *Client) getDeploymentEnvs(ctx context.Context, service string) map[stri
 	return result
 }
 
-func (c *Client) SendTelegramNotification(cfg *config.Config, result *DeployResult) {
+func (c *Client) SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) {
 	token, ok := cfg.TelegramBots[result.Request.Service]
 	if !ok {
 		log.Printf("No bot for service: %s", result.Request.Service)
