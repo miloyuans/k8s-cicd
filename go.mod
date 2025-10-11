@@ -1,4 +1,4 @@
-module github.com/yourusername/k8s-cicd
+module k8s-cicd
 
 go 1.23
 
