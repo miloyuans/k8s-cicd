@@ -17,9 +17,10 @@ func StartBot(cfg *config.Config) {
 	for service, token := range cfg.TelegramBots {
 		bot, err := tgbotapi.NewBotAPI(token)
 		if err != nil {
-			log.Printf("Failed to create bot for %s: %v", service, err)
+			log.Printf("Failed to create bot for service %s: %v", service, err)
 			continue
 		}
+		log.Printf("Started bot for service %s", service)
 		go handleBot(bot, cfg, service)
 	}
 }
@@ -30,46 +31,77 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 	updates := bot.GetUpdatesChan(u)
 
 	for update := range updates {
-		if update.Message == nil {
-			continue
-		}
+		if update.Message != nil {
+			chatID := update.Message.Chat.ID
+			userID := update.Message.From.ID
+			text := update.Message.Text
 
-		chatID := update.Message.Chat.ID
-		userID := update.Message.From.ID
-		text := update.Message.Text
-
-		if cfg.TelegramChats[service] != chatID {
-			continue
-		}
-
-		if text == cfg.TriggerKeyword {
-			dialog.StartDialog(userID, chatID, service, cfg)
-			continue
-		}
-
-		if text == cfg.CancelKeyword {
-			if dialog.CancelDialog(userID, chatID, cfg) {
-				sendMessage(bot, chatID, "对话已取消。\nDialog cancelled.")
+			if cfg.TelegramChats[service] != chatID {
+				log.Printf("Ignoring message from chat %d: not in allowed chats for service %s", chatID, service)
+				continue
 			}
-			continue
-		}
 
-		if dialog.IsDialogActive(userID, chatID) {
-			dialog.ProcessDialog(userID, chatID, text, cfg)
-			continue
-		}
+			if text == cfg.TriggerKeyword {
+				log.Printf("User %d triggered dialog for service %s in chat %d", userID, service, chatID)
+				dialog.StartDialog(userID, chatID, service, cfg)
+				continue
+			}
 
-		if strings.Contains(text, cfg.TriggerKeyword) {
-			storage.PersistTelegramMessage(cfg, storage.TelegramMessage{
-				UserID:    userID,
-				ChatID:    chatID,
-				Content:   text,
-				Timestamp: time.Now(),
-			})
-			dialog.StartDialog(userID, chatID, service, cfg)
-		} else {
-			response := cfg.InvalidResponses[rand.Intn(len(cfg.InvalidResponses))]
-			sendMessage(bot, chatID, response)
+			if text == cfg.CancelKeyword {
+				log.Printf("User %d requested to cancel dialog in chat %d", userID, chatID)
+				if dialog.CancelDialog(userID, chatID, cfg) {
+					sendMessage(bot, chatID, "对话已取消。\nDialog cancelled.")
+				} else {
+					log.Printf("No active dialog to cancel for user %d in chat %d", userID, chatID)
+				}
+				continue
+			}
+
+			if dialog.IsDialogActive(userID, chatID) {
+				log.Printf("Processing dialog input for user %d in chat %d: %s", userID, chatID, text)
+				dialog.ProcessDialog(userID, chatID, text, cfg)
+				continue
+			}
+
+			if strings.Contains(text, cfg.TriggerKeyword) {
+				log.Printf("User %d triggered dialog via keyword for service %s in chat %d", userID, service, chatID)
+				storage.PersistTelegramMessage(cfg, storage.TelegramMessage{
+					UserID:    userID,
+					ChatID:    chatID,
+					Content:   text,
+					Timestamp: time.Now(),
+				})
+				dialog.StartDialog(userID, chatID, service, cfg)
+			} else {
+				response := cfg.InvalidResponses[rand.Intn(len(cfg.InvalidResponses))]
+				log.Printf("Invalid input from user %d in chat %d: %s, responding with: %s", userID, chatID, text, response)
+				sendMessage(bot, chatID, response)
+			}
+		} else if update.CallbackQuery != nil {
+			// Handle Inline Keyboard button clicks
+			chatID := update.CallbackQuery.Message.Chat.ID
+			userID := update.CallbackQuery.From.ID
+			data := update.CallbackQuery.Data
+
+			log.Printf("Received callback query from user %d in chat %d: %s", userID, chatID, data)
+
+			if cfg.TelegramChats[service] != chatID {
+				log.Printf("Ignoring callback from chat %d: not in allowed chats for service %s", chatID, service)
+				continue
+			}
+
+			if dialog.IsDialogActive(userID, chatID) {
+				log.Printf("Processing callback for user %d in chat %d: %s", userID, chatID, data)
+				dialog.ProcessDialog(userID, chatID, data, cfg)
+			} else {
+				log.Printf("No active dialog for user %d in chat %d, ignoring callback: %s", userID, chatID, data)
+			}
+
+			// Answer the callback query to remove the loading state
+			callback := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
+			if _, err := bot.Request(callback); err != nil {
+				log.Printf("Failed to answer callback query for user %d: %v", userID, err)
+			}
 		}
 	}
 }
@@ -77,25 +109,27 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
-	bot.Send(msg)
+	if _, err := bot.Send(msg); err != nil {
+		log.Printf("Failed to send message to chat %d: %v", chatID, err)
+	}
 }
 
 func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) {
 	token, ok := cfg.TelegramBots[result.Request.Service]
 	if !ok {
-		log.Printf("No bot for service: %s", result.Request.Service)
+		log.Printf("No bot configured for service: %s", result.Request.Service)
 		return
 	}
 
 	chatID, ok := cfg.TelegramChats[result.Request.Service]
 	if !ok {
-		log.Printf("No chat for service: %s", result.Request.Service)
+		log.Printf("No chat configured for service: %s", result.Request.Service)
 		return
 	}
 
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		log.Printf("Failed to create bot: %v", err)
+		log.Printf("Failed to create bot for service %s: %v", result.Request.Service, err)
 		return
 	}
 
@@ -148,8 +182,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 
 	msg := tgbotapi.NewMessage(chatID, md.String())
 	msg.ParseMode = "Markdown"
-	_, err = bot.Send(msg)
-	if err != nil {
-		log.Printf("Failed to send telegram message: %v", err)
+	if _, err := bot.Send(msg); err != nil {
+		log.Printf("Failed to send telegram notification to chat %d: %v", chatID, err)
 	}
 }
