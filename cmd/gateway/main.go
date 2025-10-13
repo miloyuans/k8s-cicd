@@ -13,6 +13,7 @@ import (
 	"k8s-cicd/internal/dialog"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
+	"os"
 )
 
 func main() {
@@ -103,16 +104,13 @@ func handleReport(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Organize and store reported data
+		// Read existing data to merge with new report
 		fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
 		if err := storage.EnsureDailyFile(fileName, nil, cfg); err != nil {
 			log.Printf("Failed to ensure deploy file %s: %v", fileName, err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
-
-		storageMutex.Lock()
-		defer storageMutex.Unlock()
 
 		data, err := os.ReadFile(fileName)
 		if err != nil {
@@ -142,17 +140,8 @@ func handleReport(cfg *config.Config) http.HandlerFunc {
 			}
 		}
 
-		newData, err := json.MarshalIndent(existingInfos, "", "  ")
-		if err != nil {
-			log.Printf("Failed to marshal deploy file %s: %v", fileName, err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
-		if err := os.WriteFile(fileName, newData, 0644); err != nil {
-			log.Printf("Failed to write deploy file %s: %v", fileName, err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
+		// Store merged data using storage package
+		storage.UpdateDeploymentInfo(cfg, existingInfos)
 
 		w.WriteHeader(http.StatusOK)
 	}
