@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"k8s-cicd/internal/config"
-	"k8s-cicd/internal/http"
+	k8shttp "k8s-cicd/internal/http"
 	"k8s-cicd/internal/k8s"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
@@ -104,7 +105,7 @@ func retryPendingTasks() {
 	defer cancel()
 
 	for env := range cfg.Environments {
-		tasks, err := http.FetchTasks(ctx, cfg.GatewayURL, env)
+		tasks, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
 		if err != nil {
 			log.Printf("Failed to fetch pending tasks for env %s: %v", env, err)
 			continue
@@ -135,7 +136,7 @@ func pollGateway() {
 		defer cancel()
 
 		for env := range cfg.Environments {
-			tasks, err := http.FetchTasks(ctx, cfg.GatewayURL, env)
+			tasks, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
 			if err != nil {
 				log.Printf("Failed to fetch tasks for env %s: %v", env, err)
 				continue
