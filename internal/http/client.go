@@ -1,7 +1,6 @@
 package http
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,8 +10,7 @@ import (
 )
 
 func FetchTasks(ctx context.Context, gatewayURL string) ([]storage.DeployRequest, error) {
-	body, _ := json.Marshal(map[string]string{"env": "prod"})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatewayURL+"/tasks", bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatewayURL+"/tasks?env=prod", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
