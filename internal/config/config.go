@@ -26,7 +26,7 @@ type Config struct {
 	CancelKeywords     []string          `yaml:"cancel_keyword"`
 	InvalidResponses   []string          `yaml:"invalid_responses"`
 	ServicesDir        string            `yaml:"services_dir"`
-	Environments       []string          `yaml:"environments"`
+	Environments       map[string]string `yaml:"environments"`
 	DialogTimeout      int               `yaml:"dialog_timeout"`
 	StorageDir         string            // Added for configurable storage directory
 }
@@ -41,9 +41,6 @@ func LoadConfig(filePath string) *Config {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to unmarshal config: %v\n", err)
 		os.Exit(1)
-	}
-	if cfg.Namespace == "" {
-		cfg.Namespace = "default"
 	}
 	if cfg.TimeoutSeconds == 0 {
 		cfg.TimeoutSeconds = 300
@@ -72,16 +69,16 @@ func LoadConfig(filePath string) *Config {
 	if cfg.StorageDir == "" {
 		cfg.StorageDir = "storage" // Default, overridden by main.go
 	}
+	if len(cfg.Environments) == 0 {
+		cfg.Environments = make(map[string]string)
+	}
 	return &cfg
 }
 
 func LoadServiceLists(servicesDir string, telegramBots map[string]string) (map[string][]string, error) {
 	if _, err := os.Stat(servicesDir); err == nil {
-		fmt.Printf("Using existing services directory: %s\n", servicesDir)
 	} else if err := os.MkdirAll(servicesDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create services directory %s: %v", servicesDir, err)
-	} else {
-		fmt.Printf("Initialized services directory: %s\n", servicesDir)
 	}
 
 	serviceLists := make(map[string][]string)
@@ -90,11 +87,7 @@ func LoadServiceLists(servicesDir string, telegramBots map[string]string) (map[s
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
 			if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
 				fmt.Printf("Failed to create service list file %s: %v\n", filePath, err)
-			} else {
-				fmt.Printf("Initialized empty service list file: %s\n", filePath)
 			}
-		} else {
-			fmt.Printf("Using existing service list file: %s\n", filePath)
 		}
 
 		data, err := os.ReadFile(filePath)
@@ -110,13 +103,7 @@ func LoadServiceLists(servicesDir string, telegramBots map[string]string) (map[s
 			}
 		}
 		serviceLists[service] = services
-		if len(services) == 0 {
-			fmt.Printf("当前初始化完成，服务列表 %s 为空，请根据实际需求及时更新，因为服务为空，当前无所事事\n", filePath)
-		} else {
-			fmt.Printf("Loaded %d services from %s: %v\n", len(services), filePath, services)
-		}
 	}
-
 	return serviceLists, nil
 }
 

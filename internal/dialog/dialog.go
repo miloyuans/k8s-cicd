@@ -147,7 +147,7 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 		log.Printf("Loaded %d environments for user %d: %v", len(cfg.Environments), userID, cfg.Environments)
 
 		var buttons [][]tgbotapi.InlineKeyboardButton
-		for _, env := range cfg.Environments {
+		for env := range cfg.Environments {
 			buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
 				tgbotapi.NewInlineKeyboardButtonData(env, env),
 			})
@@ -171,7 +171,7 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 			log.Printf("User %d in chat %d moved to version stage with environments: %v", userID, chatID, s.Selected[1:])
 			msg := tgbotapi.NewMessage(chatID, "请输入版本号：\nPlease enter the version:")
 			sendMessage(cfg, chatID, msg)
-		} else if contains(cfg.Environments, text) {
+		} else if _, ok := cfg.Environments[text]; ok {
 			if !contains(s.Selected, text) {
 				s.Selected = append(s.Selected, text)
 				log.Printf("User %d in chat %d added environment: %s", userID, chatID, text)
@@ -198,6 +198,11 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 
 func checkAndConfirm(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
+	if err := storage.EnsureDailyFile(fileName, nil, cfg); err != nil {
+		log.Printf("Failed to ensure deploy file: %v", err)
+		sendMessage(cfg, chatID, "内部错误，无法检查历史记录。\nInternal error, cannot check history.")
+		return
+	}
 	data, err := os.ReadFile(fileName)
 	if err != nil {
 		log.Printf("Failed to read deploy file: %v", err)
@@ -216,14 +221,14 @@ func checkAndConfirm(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	var count int
 	for _, info := range infos {
 		if info.Service == s.Selected[0] && strings.Contains(info.Image, ":"+s.Version) {
-			historyMsg.WriteString(fmt.Sprintf("• %s by %s at %s\n", info.Env, "unknown", info.Timestamp.Format(time.RFC3339)))
+			historyMsg.WriteString(fmt.Sprintf("• %s by %s at %s\n", info.Env, info.UserName, info.Timestamp.Format(time.RFC3339)))
 		}
 		if info.Service == s.Selected[0] && info.Timestamp.Day() == time.Now().Day() {
 			count++
 		}
 	}
 
-	// Get today's submission count and username (assuming username from state)
+	// Get today's submission count and username
 	todayCount := count
 	userName := s.UserName
 

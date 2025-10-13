@@ -30,6 +30,7 @@ func main() {
 	go telegram.StartBot(cfg)
 
 	http.HandleFunc("/tasks", handleTasks(cfg))
+	http.HandleFunc("/report", handleReport(cfg))
 	log.Printf("Gateway server starting on %s", cfg.GatewayListenAddr)
 	log.Fatal(http.ListenAndServe(cfg.GatewayListenAddr, nil))
 }
@@ -41,7 +42,6 @@ var (
 func handleTasks(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clientIP := getClientIP(r)
-		// Only restrict GET requests from k8s-cicd, allow POST without restriction
 		if r.Method == http.MethodGet && !config.IsIPAllowed(clientIP, cfg.AllowedIPs) {
 			log.Printf("Rejected GET request from IP %s: not in allowed_ips", clientIP)
 			http.Error(w, "Forbidden: IP not allowed", http.StatusForbidden)
@@ -74,7 +74,6 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 				return
 			}
 
-			// Log interaction on gateway side
 			storage.PersistInteraction(cfg, map[string]interface{}{
 				"endpoint":  "/tasks",
 				"method":    "GET",
@@ -86,6 +85,76 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 			log.Printf("Method not allowed for request from IP %s: %s", clientIP, r.Method)
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
+	}
+}
+
+func handleReport(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			log.Printf("Method not allowed for /report: %s", r.Method)
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var infos []storage.DeploymentInfo
+		if err := json.NewDecoder(r.Body).Decode(&infos); err != nil {
+			log.Printf("Failed to decode report: %v", err)
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		// Organize and store reported data
+		fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
+		if err := storage.EnsureDailyFile(fileName, nil, cfg); err != nil {
+			log.Printf("Failed to ensure deploy file %s: %v", fileName, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		storageMutex.Lock()
+		defer storageMutex.Unlock()
+
+		data, err := os.ReadFile(fileName)
+		if err != nil {
+			log.Printf("Failed to read deploy file %s: %v", fileName, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		var existingInfos []storage.DeploymentInfo
+		if err := json.Unmarshal(data, &existingInfos); err != nil {
+			log.Printf("Failed to unmarshal deploy file %s: %v", fileName, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		// Merge reported data, updating or appending as needed
+		for _, newInfo := range infos {
+			found := false
+			for i, info := range existingInfos {
+				if info.Service == newInfo.Service && info.Env == newInfo.Env {
+					existingInfos[i] = newInfo
+					found = true
+					break
+				}
+			}
+			if !found {
+				existingInfos = append(existingInfos, newInfo)
+			}
+		}
+
+		newData, err := json.MarshalIndent(existingInfos, "", "  ")
+		if err != nil {
+			log.Printf("Failed to marshal deploy file %s: %v", fileName, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(fileName, newData, 0644); err != nil {
+			log.Printf("Failed to write deploy file %s: %v", fileName, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
 	}
 }
 

@@ -9,8 +9,8 @@ import (
 	"k8s-cicd/internal/storage"
 )
 
-func FetchTasks(ctx context.Context, gatewayURL string) ([]storage.DeployRequest, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatewayURL+"/tasks?env=prod", nil)
+func FetchTasks(ctx context.Context, gatewayURL, env string) ([]storage.DeployRequest, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatewayURL+"/tasks?env="+env, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
