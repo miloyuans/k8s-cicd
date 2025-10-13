@@ -49,7 +49,16 @@ type TelegramMessage struct {
 }
 
 func EnsureStorageDir() error {
-	return os.MkdirAll("storage", 0755)
+	if _, err := os.Stat("storage"); err == nil {
+		fmt.Printf("Using existing storage directory: storage\n")
+		return nil
+	}
+	if err := os.MkdirAll("storage", 0755); err != nil {
+		fmt.Printf("Failed to create storage directory: %v\n", err)
+		return err
+	}
+	fmt.Printf("Initialized storage directory: storage\n")
+	return nil
 }
 
 func DailyMaintenance(cfg *config.Config, client dynamic.Interface) {
@@ -61,6 +70,8 @@ func DailyMaintenance(cfg *config.Config, client dynamic.Interface) {
 		fileName := getDailyFileName(now, "deploy")
 		if _, err := os.Stat(fileName); os.IsNotExist(err) {
 			InitDailyFile(fileName, client, cfg)
+		} else {
+			fmt.Printf("Using existing daily file: %s\n", fileName)
 		}
 		cleanupOldFiles("deploy")
 	}
@@ -74,11 +85,23 @@ func DailyMaintenanceGateway(cfg *config.Config) {
 		now := time.Now()
 		fileName := getDailyFileName(now, "telegram")
 		if _, err := os.Stat(fileName); os.IsNotExist(err) {
-			os.WriteFile(fileName, []byte("[]"), 0644)
+			if err := os.WriteFile(fileName, []byte("[]"), 0644); err != nil {
+				fmt.Printf("Failed to initialize telegram log file %s: %v\n", fileName, err)
+			} else {
+				fmt.Printf("Initialized empty telegram log file: %s\n", fileName)
+			}
+		} else {
+			fmt.Printf("Using existing telegram log file: %s\n", fileName)
 		}
 		fileName = getDailyFileName(now, "interaction")
 		if _, err := os.Stat(fileName); os.IsNotExist(err) {
-			os.WriteFile(fileName, []byte("[]"), 0644)
+			if err := os.WriteFile(fileName, []byte("[]"), 0644); err != nil {
+				fmt.Printf("Failed to initialize interaction log file %s: %v\n", fileName, err)
+			} else {
+				fmt.Printf("Initialized empty interaction log file: %s\n", fileName)
+			}
+		} else {
+			fmt.Printf("Using existing interaction log file: %s\n", fileName)
 		}
 		cleanupOldFiles("telegram")
 		cleanupOldFiles("interaction")
@@ -118,13 +141,17 @@ func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config
 	}
 
 	data, _ := json.MarshalIndent(infos, "", "  ")
-	os.WriteFile(fileName, data, 0644)
+	if err := os.WriteFile(fileName, data, 0644); err != nil {
+		fmt.Printf("Failed to write daily file %s: %v\n", fileName, err)
+		return
+	}
 	fmt.Printf("Initialized daily file: %s\n", fileName)
 }
 
 func cleanupOldFiles(prefix string) {
 	files, err := os.ReadDir("storage")
 	if err != nil {
+		fmt.Printf("Failed to read storage directory: %v\n", err)
 		return
 	}
 
@@ -134,7 +161,11 @@ func cleanupOldFiles(prefix string) {
 			dateStr := strings.TrimSuffix(strings.TrimPrefix(file.Name(), prefix+"_"), ".json")
 			fileDate, err := time.Parse("2006-01-02", dateStr)
 			if err == nil && now.Sub(fileDate) > 30*24*time.Hour {
-				os.Remove(filepath.Join("storage", file.Name()))
+				if err := os.Remove(filepath.Join("storage", file.Name())); err != nil {
+					fmt.Printf("Failed to remove old file %s: %v\n", file.Name(), err)
+				} else {
+					fmt.Printf("Removed old file: %s\n", file.Name())
+				}
 			}
 		}
 	}
@@ -171,7 +202,9 @@ func PersistDeployment(cfg *config.Config, service, env, image, status string) {
 	}
 
 	newData, _ := json.MarshalIndent(infos, "", "  ")
-	os.WriteFile(fileName, newData, 0644)
+	if err := os.WriteFile(fileName, newData, 0644); err != nil {
+		fmt.Printf("Failed to write deployment file %s: %v\n", fileName, err)
+	}
 }
 
 func PersistTelegramMessage(cfg *config.Config, msg TelegramMessage) {
@@ -182,7 +215,9 @@ func PersistTelegramMessage(cfg *config.Config, msg TelegramMessage) {
 
 	messages = append(messages, msg)
 	newData, _ := json.MarshalIndent(messages, "", "  ")
-	os.WriteFile(fileName, newData, 0644)
+	if err := os.WriteFile(fileName, newData, 0644); err != nil {
+		fmt.Printf("Failed to write telegram message file %s: %v\n", fileName, err)
+	}
 }
 
 func LogInteraction(cfg *config.Config, logEntry map[string]interface{}) {
@@ -193,5 +228,7 @@ func LogInteraction(cfg *config.Config, logEntry map[string]interface{}) {
 
 	logs = append(logs, logEntry)
 	newData, _ := json.MarshalIndent(logs, "", "  ")
-	os.WriteFile(fileName, newData, 0644)
+	if err := os.WriteFile(fileName, newData, 0644); err != nil {
+		fmt.Printf("Failed to write interaction log file %s: %v\n", fileName, err)
+	}
 }

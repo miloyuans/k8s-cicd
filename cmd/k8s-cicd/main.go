@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"k8s-cicd/internal/config"
-	"k8s-cicd/internal/http"
+	"k8s-cicd/internal/httpclient"
 	"k8s-cicd/internal/k8s"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
@@ -29,6 +29,11 @@ func main() {
 
 	if err := storage.EnsureStorageDir(); err != nil {
 		log.Fatalf("Failed to create storage dir: %v", err)
+	}
+
+	// Initialize service lists
+	if _, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots); err != nil {
+		log.Printf("Failed to initialize service lists: %v", err)
 	}
 
 	taskQueue = make(chan *storage.DeployRequest, 100)

@@ -65,36 +65,57 @@ func LoadConfig(filePath string) *Config {
 	return &cfg
 }
 
-func LoadServiceLists(servicesDir string) (map[string][]string, error) {
+func LoadServiceLists(servicesDir string, telegramBots map[string]string) (map[string][]string, error) {
 	// Ensure services directory exists
 	if err := os.MkdirAll(servicesDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create services directory %s: %v", servicesDir, err)
+	} else if _, err := os.Stat(servicesDir); err == nil {
+		fmt.Printf("Using existing services directory: %s\n", servicesDir)
 	}
 
+	// Initialize or check service list files for each bot in telegram_bots
 	serviceLists := make(map[string][]string)
-	files, err := os.ReadDir(servicesDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read services directory %s: %v", servicesDir, err)
-	}
+	for service := range telegramBots {
+		filePath := filepath.Join(servicesDir, fmt.Sprintf("%s.svc.list", service))
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+				fmt.Printf("Failed to create service list file %s: %v\n", filePath, err)
+			} else {
+				fmt.Printf("Initialized empty service list file: %s\n", filePath)
+			}
+		} else {
+			fmt.Printf("Using existing service list file: %s\n", filePath)
+		}
 
-	for _, file := range files {
-		if !file.IsDir() && strings.HasSuffix(file.Name(), ".svc.list") {
-			serviceName := strings.TrimSuffix(file.Name(), ".svc.list")
-			data, err := os.ReadFile(filepath.Join(servicesDir, file.Name()))
-			if err != nil {
-				fmt.Printf("Failed to read service list %s: %v\n", file.Name(), err)
-				continue
+		// Read service list file
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			fmt.Printf("Failed to read service list file %s: %v\n", filePath, err)
+			continue
+		}
+		lines := strings.Split(string(data), "\n")
+		var services []string
+		for _, line := range lines {
+			if line = strings.TrimSpace(line); line != "" {
+				services = append(services, line)
 			}
-			lines := strings.Split(string(data), "\n")
-			var services []string
-			for _, line := range lines {
-				if line = strings.TrimSpace(line); line != "" {
-					services = append(services, line)
-				}
-			}
-			// Allow empty service lists, but still register the service
-			serviceLists[serviceName] = services
+		}
+		serviceLists[service] = services
+		if len(services) == 0 {
+			fmt.Printf("当前初始化完成，服务列表 %s 为空，请根据实际需求及时更新，因为服务为空，当前无所事事\n", filePath)
+		} else {
+			fmt.Printf("Loaded %d services from %s: %v\n", len(services), filePath, services)
 		}
 	}
+
 	return serviceLists, nil
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -17,6 +18,11 @@ func main() {
 	cfg := config.LoadConfig("config.yaml")
 	if err := storage.EnsureStorageDir(); err != nil {
 		log.Fatalf("Failed to create storage dir: %v", err)
+	}
+
+	// Initialize service lists
+	if _, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots); err != nil {
+		log.Printf("Failed to initialize service lists: %v", err)
 	}
 
 	go storage.DailyMaintenanceGateway(cfg)
@@ -58,7 +64,9 @@ func makeHandleTasks(cfg *config.Config) http.HandlerFunc {
 		})
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(tasks)
+		if err := json.NewEncoder(w).Encode(tasks); err != nil {
+			log.Printf("Failed to encode tasks response: %v", err)
+		}
 
 		// Log interaction
 		storage.LogInteraction(cfg, map[string]interface{}{
