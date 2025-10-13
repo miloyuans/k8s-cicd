@@ -34,7 +34,7 @@ var (
 
 func StartDialog(userID, chatID int64, service string, cfg *config.Config) {
 	if _, loaded := dialogs.Load(userID); loaded {
-		sendMessage(cfg, chatID, "You already have an active dialog. Please complete or cancel it.")
+		sendMessage(cfg, chatID, "您已经有一个活跃的对话。请完成或取消它。\nYou already have an active dialog. Please complete or cancel it.")
 		return
 	}
 
@@ -50,23 +50,50 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config) {
 
 	serviceLists, err := config.LoadServiceLists(cfg.ServicesDir)
 	if err != nil {
-		sendMessage(cfg, chatID, "Failed to load service lists.")
+		sendMessage(cfg, chatID, fmt.Sprintf("无法加载服务列表：%v\nFailed to load service lists: %v", err, err))
 		return
 	}
-	services := serviceLists[service]
+	services, exists := serviceLists[service]
+	if !exists {
+		sendMessage(cfg, chatID, fmt.Sprintf("未找到 %s 的服务列表。请检查配置。\nNo service list found for %s. Please check configuration.", service, service))
+		return
+	}
 	if len(services) == 0 {
-		sendMessage(cfg, chatID, "No services available.")
+		sendMessage(cfg, chatID, fmt.Sprintf("没有可用的服务 %s。请在 %s.svc.list 中添加服务。\nNo services available for %s. Please add services to %s.svc.list.", service, service, service, service))
 		return
 	}
 
-	var buttons [][]tgbotapi.InlineKeyboardButton
+	// Calculate columns based on service name lengths and count
+	maxLen := 0
 	for _, svc := range services {
-		buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-			tgbotapi.NewInlineKeyboardButtonData(svc, svc),
-		})
+		if len(svc) > maxLen {
+			maxLen = len(svc)
+		}
 	}
+	// Estimate columns: assume max 50 chars per row, each button needs ~len+4 chars (for padding)
+	cols := 2
+	if maxLen < 10 {
+		cols = 4 // Short names, use 4 columns
+	} else if maxLen < 15 {
+		cols = 3 // Medium names, use 3 columns
+	}
+	if len(services) < cols {
+		cols = len(services) // Fewer services than columns, use service count
+	}
+
+	// Build multi-column button layout
+	var buttons [][]tgbotapi.InlineKeyboardButton
+	var row []tgbotapi.InlineKeyboardButton
+	for i, svc := range services {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(svc, svc))
+		if len(row) == cols || i == len(services)-1 {
+			buttons = append(buttons, row)
+			row = []tgbotapi.InlineKeyboardButton{}
+		}
+	}
+
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msg := tgbotapi.NewMessage(chatID, "Please select a service:")
+	msg := tgbotapi.NewMessage(chatID, "请选择一个服务：\nPlease select a service:")
 	msg.ReplyMarkup = keyboard
 	sendMessage(cfg, chatID, msg)
 }
@@ -82,7 +109,7 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 	case "service":
 		serviceLists, _ := config.LoadServiceLists(cfg.ServicesDir)
 		if !contains(serviceLists[s.Service], text) {
-			sendMessage(cfg, chatID, "Invalid service. Please select a valid service.")
+			sendMessage(cfg, chatID, "无效的服务。请选择一个有效的服务。\nInvalid service. Please select a valid service.")
 			return
 		}
 		s.Selected = append(s.Selected, text)
@@ -98,26 +125,26 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 			tgbotapi.NewInlineKeyboardButtonData("Done", "done"),
 		})
 		keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-		msg := tgbotapi.NewMessage(chatID, "Please select environment(s) (multi-select, press Done when finished):")
+		msg := tgbotapi.NewMessage(chatID, "请选择环境（可多选，按 Done 完成）：\nPlease select environment(s) (multi-select, press Done when finished):")
 		msg.ReplyMarkup = keyboard
 		sendMessage(cfg, chatID, msg)
 
 	case "env":
 		if text == "done" {
 			if len(s.Selected) == 0 {
-				sendMessage(cfg, chatID, "Please select at least one environment.")
+				sendMessage(cfg, chatID, "请至少选择一个环境。\nPlease select at least one environment.")
 				return
 			}
 			s.Stage = "version"
-			msg := tgbotapi.NewMessage(chatID, "Please enter the version:")
+			msg := tgbotapi.NewMessage(chatID, "请输入版本号：\nPlease enter the version:")
 			sendMessage(cfg, chatID, msg)
 		} else if contains(cfg.Environments, text) {
 			if !contains(s.Selected, text) {
 				s.Selected = append(s.Selected, text)
 			}
-			sendMessage(cfg, chatID, "Environment added. Select another or press Done.")
+			sendMessage(cfg, chatID, "环境已添加。继续选择或按 Done 完成。\nEnvironment added. Select another or press Done.")
 		} else {
-			sendMessage(cfg, chatID, "Invalid environment. Please select a valid environment.")
+			sendMessage(cfg, chatID, "无效的环境。请选择一个有效的环境。\nInvalid environment. Please select a valid environment.")
 		}
 
 	case "version":
@@ -137,14 +164,14 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 				Timestamp: time.Now(),
 			})
 		}
-		sendMessage(cfg, chatID, "Deployment task(s) submitted.")
+		sendMessage(cfg, chatID, "部署任务已提交。\nDeployment task(s) submitted.")
 		dialogs.Delete(userID)
 	}
 }
 
 func CancelDialog(userID, chatID int64, cfg *config.Config) bool {
 	if _, loaded := dialogs.LoadAndDelete(userID); loaded {
-		sendMessage(cfg, chatID, "Dialog cancelled.")
+		sendMessage(cfg, chatID, "对话已取消。\nDialog cancelled.")
 		return true
 	}
 	return false
@@ -160,7 +187,7 @@ func monitorDialogTimeout(userID, chatID int64, cfg *config.Config) {
 	if state, loaded := dialogs.LoadAndDelete(userID); loaded {
 		s := state.(*DialogState)
 		if s.ChatID == chatID {
-			sendMessage(cfg, chatID, "Dialog timed out after 5 minutes. Please start a new dialog if needed.")
+			sendMessage(cfg, chatID, "对话因 5 分钟未操作而超时。请重新开始对话。\nDialog timed out after 5 minutes. Please start a new dialog if needed.")
 		}
 	}
 }

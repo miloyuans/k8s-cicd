@@ -49,7 +49,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 
 		if text == cfg.CancelKeyword {
 			if dialog.CancelDialog(userID, chatID, cfg) {
-				sendMessage(bot, chatID, "Dialog cancelled.")
+				sendMessage(bot, chatID, "对话已取消。\nDialog cancelled.")
 			}
 			continue
 		}
@@ -102,34 +102,35 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 	var md strings.Builder
 	if result.Success {
 		md.WriteString(fmt.Sprintf(`
-## 🚀 **Deployment Success**
+## 🚀 **部署成功 / Deployment Success**
 
-**Service**: *%s*
-**Environment**: *%s*
-**New Version**: *%s*
-**Old Image**: *%s*
+**服务 / Service**: *%s*  
+**环境 / Environment**: *%s*  
+**新版本 / New Version**: *%s*  
+**旧镜像 / Old Image**: *%s*  
 
+✅ 部署成功完成！  
 ✅ Deployment completed successfully!
 
 ---
-**Deployed at**: %s
+**部署时间 / Deployed at**: %s
 `, result.Request.Service, result.Request.Env, result.Request.Version, result.OldImage,
 			result.Request.Timestamp.Format("2006-01-02 15:04:05")))
 	} else {
 		md.WriteString(fmt.Sprintf(`
-## ❌ **Deployment Failed**
+## ❌ **部署失败 / Deployment Failed**
 
-**Service**: *%s*
-**Environment**: *%s*
-**Version**: *%s*
-**Error**: *%s*
+**服务 / Service**: *%s*  
+**环境 / Environment**: *%s*  
+**版本 / Version**: *%s*  
+**错误 / Error**: *%s*  
 
-### 🔍 **Diagnostics**
+### 🔍 **诊断信息 / Diagnostics**
 
-**Events**:
+**事件 / Events**:  
 %s
 
-**Environment Variables**:
+**环境变量 / Environment Variables**:  
 `, result.Request.Service, result.Request.Env, result.Request.Version, result.ErrorMsg, result.Events))
 
 		for k, v := range result.Envs {
@@ -137,11 +138,11 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 		}
 
 		md.WriteString(fmt.Sprintf(`
-**Logs**: %s
+**日志 / Logs**: %s  
 
-⚠️ **Rollback completed**
+⚠️ **回滚完成 / Rollback completed**  
 ---
-**Failed at**: %s
+**失败时间 / Failed at**: %s
 `, result.Logs, result.Request.Timestamp.Format("2006-01-02 15:04:05")))
 	}
 
