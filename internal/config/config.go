@@ -28,6 +28,7 @@ type Config struct {
 	ServicesDir        string            `yaml:"services_dir"`
 	Environments       []string          `yaml:"environments"`
 	DialogTimeout      int               `yaml:"dialog_timeout"`
+	StorageDir         string            // Added for configurable storage directory
 }
 
 func LoadConfig(filePath string) *Config {
@@ -68,11 +69,13 @@ func LoadConfig(filePath string) *Config {
 	if cfg.GatewayListenAddr == "" {
 		cfg.GatewayListenAddr = ":8081"
 	}
+	if cfg.StorageDir == "" {
+		cfg.StorageDir = "storage" // Default, overridden by main.go
+	}
 	return &cfg
 }
 
 func LoadServiceLists(servicesDir string, telegramBots map[string]string) (map[string][]string, error) {
-	// Ensure services directory exists
 	if _, err := os.Stat(servicesDir); err == nil {
 		fmt.Printf("Using existing services directory: %s\n", servicesDir)
 	} else if err := os.MkdirAll(servicesDir, 0755); err != nil {
@@ -81,7 +84,6 @@ func LoadServiceLists(servicesDir string, telegramBots map[string]string) (map[s
 		fmt.Printf("Initialized services directory: %s\n", servicesDir)
 	}
 
-	// Initialize or check service list files for each bot in telegram_bots
 	serviceLists := make(map[string][]string)
 	for service := range telegramBots {
 		filePath := filepath.Join(servicesDir, fmt.Sprintf("%s.svc.list", service))
@@ -95,7 +97,6 @@ func LoadServiceLists(servicesDir string, telegramBots map[string]string) (map[s
 			fmt.Printf("Using existing service list file: %s\n", filePath)
 		}
 
-		// Read service list file
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			fmt.Printf("Failed to read service list file %s: %v\n", filePath, err)
@@ -130,12 +131,12 @@ func contains(slice []string, item string) bool {
 
 func IsIPAllowed(clientIP string, allowedIPs []string) bool {
 	if len(allowedIPs) == 0 {
-		return true // No whitelist, allow all
+		return true
 	}
 
 	clientAddr := net.ParseIP(clientIP)
 	if clientAddr == nil {
-		return false // Invalid client IP
+		return false
 	}
 
 	for _, allowed := range allowedIPs {

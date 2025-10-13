@@ -17,7 +17,8 @@ import (
 
 func main() {
 	cfg := config.LoadConfig("config.yaml")
-	if err := storage.EnsureStorageDir(); err != nil {
+	cfg.StorageDir = "gateway_storage" // Set gateway-specific storage directory
+	if err := storage.EnsureStorageDir(cfg.StorageDir); err != nil {
 		log.Fatalf("Failed to create storage dir: %v", err)
 	}
 
@@ -26,7 +27,6 @@ func main() {
 		log.Printf("Failed to initialize service lists: %v", err)
 	}
 
-	go storage.DailyMaintenanceGateway(cfg)
 	go telegram.StartBot(cfg)
 
 	http.HandleFunc("/tasks", handleTasks(cfg))
@@ -87,12 +87,10 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 }
 
 func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header for proxied requests
 	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
 		ips := strings.Split(forwarded, ",")
 		return strings.TrimSpace(ips[0])
 	}
-	// Fallback to RemoteAddr
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return ip
 }

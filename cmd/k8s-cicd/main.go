@@ -26,9 +26,10 @@ var (
 
 func main() {
 	cfg = config.LoadConfig("config.yaml")
+	cfg.StorageDir = "cicd_storage" // Set k8s-cicd-specific storage directory
 	k8sClient = k8s.NewClient(cfg.KubeConfigPath)
 
-	if err := storage.EnsureStorageDir(); err != nil {
+	if err := storage.EnsureStorageDir(cfg.StorageDir); err != nil {
 		log.Fatalf("Failed to create storage dir: %v", err)
 	}
 
