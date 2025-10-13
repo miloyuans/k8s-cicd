@@ -47,11 +47,11 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 			http.Error(w, "Forbidden: IP not allowed", http.StatusForbidden)
 			return
 		}
-		log.Printf("Accepted request from IP %s", clientIP)
 
 		if r.Method == http.MethodGet {
 			env := r.URL.Query().Get("env")
 			if env == "" {
+				log.Printf("Missing env parameter in GET request from IP %s", clientIP)
 				http.Error(w, "Missing env parameter", http.StatusBadRequest)
 				return
 			}
@@ -69,7 +69,9 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(tasks); err != nil {
-				log.Printf("Failed to encode tasks response: %v", err)
+				log.Printf("Failed to encode tasks response for IP %s: %v", clientIP, err)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
 			}
 
 			// Log interaction on gateway side
@@ -81,6 +83,7 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 				"timestamp": time.Now().Format(time.RFC3339),
 			})
 		} else {
+			log.Printf("Method not allowed for request from IP %s: %s", clientIP, r.Method)
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	}
