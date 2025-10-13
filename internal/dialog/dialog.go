@@ -3,6 +3,7 @@ package dialog
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,7 +51,7 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config) {
 	log.Printf("Started dialog for user %d in chat %d for service %s", userID, chatID, service)
 	go monitorDialogTimeout(userID, chatID, cfg)
 
-	serviceLists, err := config.LoadServiceLists(cfg.ServicesDir)
+	serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
 	if err != nil {
 		log.Printf("Failed to load service lists for user %d: %v", userID, err)
 		sendMessage(cfg, chatID, fmt.Sprintf("无法加载服务列表：%v\nFailed to load service lists: %v", err, err))
@@ -59,7 +60,7 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config) {
 	services, exists := serviceLists[service]
 	if !exists {
 		log.Printf("No service list found for %s for user %d", service, userID)
-		sendMessage(cfg, chatID, fmt.Sprintf("未找到 %s 的服务列表。请检查配置。\nNo service list found for %s. Please check configuration.", service, service))
+		sendMessage(cfg, chatID, fmt.Sprintf("未找到 %s 的服务列表。请检查 telegram_bots 配置。\nNo service list found for %s. Please check telegram_bots configuration.", service, service))
 		return
 	}
 	if len(services) == 0 {
@@ -116,7 +117,7 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 
 	switch s.Stage {
 	case "service":
-		serviceLists, err := config.LoadServiceLists(cfg.ServicesDir)
+		serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
 		if err != nil {
 			log.Printf("Failed to load service lists for user %d in chat %d: %v", userID, chatID, err)
 			sendMessage(cfg, chatID, fmt.Sprintf("无法加载服务列表：%v\nFailed to load service lists: %v", err, err))
