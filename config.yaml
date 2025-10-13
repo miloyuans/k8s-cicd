@@ -1,3 +1,15 @@
+gateway_url: "http://18.13.24.10:8081"
+gateway_listen_addr: "0.0.0.0:8099"
+allowed_ips:
+  - "10.1.0.0/16"
+  - "10.1.2.3/32"
+  - "10.1.2.5"
+poll_interval: 60
+namespace: "international"
+timeout_seconds: 600
+max_concurrency: 10
+services_dir: "services"
+dialog_timeout: 300
 trigger_keyword:
   - "deploy"
   - "发布"
@@ -9,7 +21,16 @@ cancel_keyword:
   - "停止"
   - "tingzhi"
   - "quxiao"
-invalid_responses:
-  - "请使用触发关键字（如 deploy、发布、update、upgrade）开始部署。\nPlease use a trigger keyword (e.g., deploy, 发布, update, upgrade) to start a deployment."
-  - "无效命令。请尝试触发关键字。\nInvalid command. Try a trigger keyword."
-  - "使用触发关键字（如 deploy、发布、update、upgrade）开始部署流程。\nUse a trigger keyword (e.g., deploy, 发布, update, upgrade) to initiate a deployment process."
+telegram_bots:
+  api-service: "YOUR_BOT_TOKEN"
+  web-service: "YOUR_BOT_TOKEN"
+telegram_chats:
+  api-service: -482wewew05
+  web-service: -4829719305
+service_keywords:
+  api-service: "international"
+  web-service: "gaming"
+environments:
+  - eks-test
+  - eks
+  - eks-us

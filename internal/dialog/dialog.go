@@ -3,12 +3,15 @@ package dialog
 import (
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/storage"
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"encoding/json"
 )
 
 type DeployRequest struct {
@@ -16,15 +19,18 @@ type DeployRequest struct {
 	Env       string    `json:"env"`
 	Version   string    `json:"version"`
 	Timestamp time.Time `json:"timestamp"`
+	UserName  string    `json:"username"`
 }
 
 type DialogState struct {
 	UserID    int64
 	ChatID    int64
 	Service   string
-	Stage     string // "service", "env", "version"
+	Stage     string // "service", "env", "version", "confirm"
 	Selected  []string
 	StartedAt time.Time
+	UserName  string
+	Version   string
 }
 
 var (
@@ -32,7 +38,7 @@ var (
 	taskQueue sync.Map // map[string][]DeployRequest
 )
 
-func StartDialog(userID, chatID int64, service string, cfg *config.Config) {
+func StartDialog(userID, chatID int64, service string, cfg *config.Config, userName string) {
 	if _, loaded := dialogs.Load(userID); loaded {
 		log.Printf("User %d already has an active dialog in chat %d", userID, chatID)
 		sendMessage(cfg, chatID, "您已经有一个活跃的对话。请完成或取消它。\nYou already have an active dialog. Please complete or cancel it.")
@@ -45,6 +51,7 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config) {
 		Service:   service,
 		Stage:     "service",
 		StartedAt: time.Now(),
+		UserName:  userName,
 	})
 
 	log.Printf("Started dialog for user %d in chat %d for service %s", userID, chatID, service)
@@ -155,7 +162,7 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 
 	case "env":
 		if text == "done" {
-			if len(s.Selected) == 0 {
+			if len(s.Selected) == 1 { // Only service selected, no envs
 				log.Printf("User %d in chat %d selected Done without environments", userID, chatID)
 				sendMessage(cfg, chatID, "请至少选择一个环境。\nPlease select at least one environment.")
 				return
@@ -176,28 +183,94 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 		}
 
 	case "version":
-		log.Printf("User %d in chat %d submitted version: %s", userID, chatID, text)
-		for _, env := range s.Selected[1:] { // First element is service
-			task := DeployRequest{
-				Service:   s.Selected[0],
-				Env:       env,
-				Version:   text,
-				Timestamp: time.Now(),
-			}
-			taskList, _ := taskQueue.LoadOrStore(s.Service, []DeployRequest{})
-			taskQueue.Store(s.Service, append(taskList.([]DeployRequest), task))
-			log.Printf("Stored task for user %d: service=%s, env=%s, version=%s", userID, s.Selected[0], env, text)
-			storage.PersistTelegramMessage(cfg, storage.TelegramMessage{
-				UserID:    userID,
-				ChatID:    chatID,
-				Content:   fmt.Sprintf("Deploy: %s, Env: %s, Version: %s", s.Selected[0], env, text),
-				Timestamp: time.Now(),
-			})
+		s.Version = text
+		s.Stage = "confirm"
+		checkAndConfirm(userID, chatID, cfg, s)
+
+	case "confirm":
+		if text == "confirm" {
+			submitTasks(userID, chatID, cfg, s)
+		} else if text == "cancel" {
+			CancelDialog(userID, chatID, cfg)
 		}
-		sendMessage(cfg, chatID, "部署任务已提交。\nDeployment task(s) submitted.")
-		dialogs.Delete(userID)
-		log.Printf("Dialog completed and removed for user %d in chat %d", userID, chatID)
 	}
+}
+
+func checkAndConfirm(userID, chatID int64, cfg *config.Config, s *DialogState) {
+	fileName := storage.GetDailyFileName(time.Now(), "deploy")
+	data, err := os.ReadFile(fileName)
+	if err != nil {
+		log.Printf("Failed to read deploy file: %v", err)
+		sendMessage(cfg, chatID, "内部错误，无法检查历史记录。\nInternal error, cannot check history.")
+		return
+	}
+	var infos []storage.DeploymentInfo
+	if err := json.Unmarshal(data, &infos); err != nil {
+		log.Printf("Failed to unmarshal deploy file: %v", err)
+		sendMessage(cfg, chatID, "内部错误，无法检查历史记录。\nInternal error, cannot check history.")
+		return
+	}
+
+	// Check for same version in history
+	var historyMsg strings.Builder
+	var count int
+	for _, info := range infos {
+		if info.Service == s.Selected[0] && strings.Contains(info.Image, ":"+s.Version) {
+			historyMsg.WriteString(fmt.Sprintf("• %s by %s at %s\n", info.Env, "unknown", info.Timestamp.Format(time.RFC3339)))
+		}
+		if info.Service == s.Selected[0] && info.Timestamp.Day() == time.Now().Day() {
+			count++
+		}
+	}
+
+	// Get today's submission count and username (assuming username from state)
+	todayCount := count
+	userName := s.UserName
+
+	var md strings.Builder
+	md.WriteString(fmt.Sprintf("**提交详情 / Submission Details**\n\n**服务 / Service**: %s\n**版本 / Version**: %s\n**环境 / Environments**: %s\n\n**当天提交数量 / Today's Submissions**: %d\n**提交用户 / Submitted by**: %s\n", s.Selected[0], s.Version, strings.Join(s.Selected[1:], ", "), todayCount, userName))
+
+	if historyMsg.Len() > 0 {
+		md.WriteString(fmt.Sprintf("\n**历史记录 / History** (same version):\n%s\n", historyMsg.String()))
+	}
+
+	md.WriteString("\n确认提交？ / Confirm submission?")
+
+	buttons := [][]tgbotapi.InlineKeyboardButton{
+		{
+			tgbotapi.NewInlineKeyboardButtonData("确认 / Confirm", "confirm"),
+			tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
+		},
+	}
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	msg := tgbotapi.NewMessage(chatID, md.String())
+	msg.ReplyMarkup = keyboard
+	msg.ParseMode = "Markdown"
+	sendMessage(cfg, chatID, msg)
+}
+
+func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
+	for _, env := range s.Selected[1:] { // First element is service
+		task := DeployRequest{
+			Service:   s.Selected[0],
+			Env:       env,
+			Version:   s.Version,
+			Timestamp: time.Now(),
+			UserName:  s.UserName,
+		}
+		taskList, _ := taskQueue.LoadOrStore(s.Service, []DeployRequest{})
+		taskQueue.Store(s.Service, append(taskList.([]DeployRequest), task))
+		log.Printf("Stored task for user %d: service=%s, env=%s, version=%s", userID, s.Selected[0], env, s.Version)
+		storage.PersistTelegramMessage(cfg, storage.TelegramMessage{
+			UserID:    userID,
+			ChatID:    chatID,
+			Content:   fmt.Sprintf("Deploy: %s, Env: %s, Version: %s", s.Selected[0], env, s.Version),
+			Timestamp: time.Now(),
+		})
+	}
+	sendMessage(cfg, chatID, "部署任务已提交。\nDeployment task(s) submitted.")
+	dialogs.Delete(userID)
+	log.Printf("Dialog completed and removed for user %d in chat %d", userID, chatID)
 }
 
 func CancelDialog(userID, chatID int64, cfg *config.Config) bool {

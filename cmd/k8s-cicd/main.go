@@ -107,6 +107,13 @@ func pollGateway() {
 			task.Timestamp = time.Now()
 			atomic.AddInt64(&globalCounter, 1)
 			taskQueue <- &task
+
+			// Log interaction on k8s-cicd side
+			storage.PersistInteraction(cfg, map[string]interface{}{
+				"endpoint":  "pollGateway",
+				"task_key":  taskKey,
+				"timestamp": time.Now().Format(time.RFC3339),
+			})
 		}
 	}
 }

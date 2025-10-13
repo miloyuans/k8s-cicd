@@ -35,6 +35,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 			chatID := update.Message.Chat.ID
 			userID := update.Message.From.ID
 			text := strings.TrimSpace(update.Message.Text)
+			userName := update.Message.From.UserName
 
 			if cfg.TelegramChats[service] != chatID {
 				log.Printf("Ignoring message from chat %d: not in allowed chats for service %s", chatID, service)
@@ -51,7 +52,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 						Content:   text,
 						Timestamp: time.Now(),
 					})
-					dialog.StartDialog(userID, chatID, service, cfg)
+					dialog.StartDialog(userID, chatID, service, cfg, userName)
 					break
 				}
 			}

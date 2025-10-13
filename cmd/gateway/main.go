@@ -29,7 +29,7 @@ func main() {
 	go storage.DailyMaintenanceGateway(cfg)
 	go telegram.StartBot(cfg)
 
-	http.HandleFunc("/tasks", ipRestrictedHandler(cfg, makeHandleTasks(cfg)))
+	http.HandleFunc("/tasks", handleTasks(cfg))
 	log.Printf("Gateway server starting on %s", cfg.GatewayListenAddr)
 	log.Fatal(http.ListenAndServe(cfg.GatewayListenAddr, nil))
 }
@@ -38,16 +38,51 @@ var (
 	taskQueue sync.Map // map[string][]dialog.DeployRequest
 )
 
-func ipRestrictedHandler(cfg *config.Config, next http.HandlerFunc) http.HandlerFunc {
+func handleTasks(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clientIP := getClientIP(r)
-		if !config.IsIPAllowed(clientIP, cfg.AllowedIPs) {
-			log.Printf("Rejected request from IP %s: not in allowed_ips", clientIP)
+		// Only restrict GET requests from k8s-cicd, allow POST without restriction
+		if r.Method == http.MethodGet && !config.IsIPAllowed(clientIP, cfg.AllowedIPs) {
+			log.Printf("Rejected GET request from IP %s: not in allowed_ips", clientIP)
 			http.Error(w, "Forbidden: IP not allowed", http.StatusForbidden)
 			return
 		}
 		log.Printf("Accepted request from IP %s", clientIP)
-		next(w, r)
+
+		if r.Method == http.MethodGet {
+			env := r.URL.Query().Get("env")
+			if env == "" {
+				http.Error(w, "Missing env parameter", http.StatusBadRequest)
+				return
+			}
+
+			tasks := []dialog.DeployRequest{}
+			taskQueue.Range(func(key, value interface{}) bool {
+				taskList := value.([]dialog.DeployRequest)
+				for _, task := range taskList {
+					if task.Env == env {
+						tasks = append(tasks, task)
+					}
+				}
+				return true
+			})
+
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(tasks); err != nil {
+				log.Printf("Failed to encode tasks response: %v", err)
+			}
+
+			// Log interaction on gateway side
+			storage.PersistInteraction(cfg, map[string]interface{}{
+				"endpoint":  "/tasks",
+				"method":    "GET",
+				"env":       env,
+				"tasks":     len(tasks),
+				"timestamp": time.Now().Format(time.RFC3339),
+			})
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
 	}
 }
 
@@ -60,45 +95,4 @@ func getClientIP(r *http.Request) string {
 	// Fallback to RemoteAddr
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return ip
-}
-
-func makeHandleTasks(cfg *config.Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req struct {
-			Env string `json:"env"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
-		}
-
-		tasks := []dialog.DeployRequest{}
-		taskQueue.Range(func(key, value interface{}) bool {
-			taskList := value.([]dialog.DeployRequest)
-			for _, task := range taskList {
-				if task.Env == req.Env {
-					tasks = append(tasks, task)
-				}
-			}
-			return true
-		})
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(tasks); err != nil {
-			log.Printf("Failed to encode tasks response: %v", err)
-		}
-
-		// Log interaction
-		storage.PersistInteraction(cfg, map[string]interface{}{
-			"endpoint": "/tasks",
-			"env":      req.Env,
-			"tasks":    len(tasks),
-			"timestamp": time.Now().Format(time.RFC3339),
-		})
-	}
 }

@@ -32,6 +32,7 @@ type DeployRequest struct {
 	Env       string    `json:"env"`
 	Version   string    `json:"version"`
 	Timestamp time.Time `json:"timestamp"`
+	UserName  string    `json:"username"` // Added username
 }
 
 type DeployResult struct {
@@ -64,13 +65,17 @@ func EnsureStorageDir() error {
 	return nil
 }
 
+func GetDailyFileName(now time.Time, prefix string) string {
+	return filepath.Join("storage", fmt.Sprintf("%s_%s.json", prefix, now.Format("2006-01-02")))
+}
+
 func InitAllDailyFiles(cfg *config.Config, client dynamic.Interface) {
 	storageMutex.Lock()
 	defer storageMutex.Unlock()
 
 	now := time.Now()
 	// Initialize deploy file
-	deployFile := getDailyFileName(now, "deploy")
+	deployFile := GetDailyFileName(now, "deploy")
 	if _, err := os.Stat(deployFile); os.IsNotExist(err) {
 		InitDailyFile(deployFile, client, cfg)
 	} else {
@@ -78,7 +83,7 @@ func InitAllDailyFiles(cfg *config.Config, client dynamic.Interface) {
 	}
 
 	// Initialize telegram file
-	telegramFile := getDailyFileName(now, "telegram")
+	telegramFile := GetDailyFileName(now, "telegram")
 	if _, err := os.Stat(telegramFile); os.IsNotExist(err) {
 		if err := os.WriteFile(telegramFile, []byte("[]"), 0644); err != nil {
 			fmt.Printf("Failed to initialize telegram log file %s: %v\n", telegramFile, err)
@@ -90,7 +95,7 @@ func InitAllDailyFiles(cfg *config.Config, client dynamic.Interface) {
 	}
 
 	// Initialize interaction file
-	interactionFile := getDailyFileName(now, "interaction")
+	interactionFile := GetDailyFileName(now, "interaction")
 	if _, err := os.Stat(interactionFile); os.IsNotExist(err) {
 		if err := os.WriteFile(interactionFile, []byte("[]"), 0644); err != nil {
 			fmt.Printf("Failed to initialize interaction log file %s: %v\n", interactionFile, err)
@@ -107,7 +112,7 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 	defer storageMutex.Unlock()
 
 	now := time.Now()
-	fileName := getDailyFileName(now, "deploy")
+	fileName := GetDailyFileName(now, "deploy")
 	data, err := os.ReadFile(fileName)
 	if err != nil {
 		fmt.Printf("Failed to read deploy file %s: %v\n", fileName, err)
@@ -179,16 +184,11 @@ func DailyMaintenance(cfg *config.Config, client dynamic.Interface) {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		storageMutex.Lock()
-		now := time.Now()
-		fileName := getDailyFileName(now, "deploy")
-		if _, err := os.Stat(fileName); os.IsNotExist(err) {
-			InitDailyFile(fileName, client, cfg)
-		} else {
-			fmt.Printf("Using existing deploy file: %s\n", fileName)
-		}
+		InitAllDailyFiles(cfg, client)
+		UpdateAllDeploymentVersions(cfg, client)
 		cleanupOldFiles("deploy")
-		storageMutex.Unlock()
+		cleanupOldFiles("telegram")
+		cleanupOldFiles("interaction")
 	}
 }
 
@@ -197,36 +197,10 @@ func DailyMaintenanceGateway(cfg *config.Config) {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		storageMutex.Lock()
-		now := time.Now()
-		fileName := getDailyFileName(now, "telegram")
-		if _, err := os.Stat(fileName); os.IsNotExist(err) {
-			if err := os.WriteFile(fileName, []byte("[]"), 0644); err != nil {
-				fmt.Printf("Failed to initialize telegram log file %s: %v\n", fileName, err)
-			} else {
-				fmt.Printf("Initialized empty telegram log file: %s\n", fileName)
-			}
-		} else {
-			fmt.Printf("Using existing telegram log file: %s\n", fileName)
-		}
-		fileName = getDailyFileName(now, "interaction")
-		if _, err := os.Stat(fileName); os.IsNotExist(err) {
-			if err := os.WriteFile(fileName, []byte("[]"), 0644); err != nil {
-				fmt.Printf("Failed to initialize interaction log file %s: %v\n", fileName, err)
-			} else {
-				fmt.Printf("Initialized empty interaction log file: %s\n", fileName)
-			}
-		} else {
-			fmt.Printf("Using existing interaction log file: %s\n", fileName)
-		}
+		cleanupOldFiles("deploy")
 		cleanupOldFiles("telegram")
 		cleanupOldFiles("interaction")
-		storageMutex.Unlock()
 	}
-}
-
-func getDailyFileName(t time.Time, prefix string) string {
-	return filepath.Join("storage", fmt.Sprintf("%s_%s.json", prefix, t.Format("2006-01-02")))
 }
 
 func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config) {
@@ -300,7 +274,7 @@ func PersistDeployment(cfg *config.Config, service, env, image, status string) {
 	storageMutex.Lock()
 	defer storageMutex.Unlock()
 
-	fileName := getDailyFileName(time.Now(), "deploy")
+	fileName := GetDailyFileName(time.Now(), "deploy")
 	data, err := os.ReadFile(fileName)
 	if err != nil {
 		fmt.Printf("Failed to read deploy file %s: %v\n", fileName, err)
@@ -350,7 +324,7 @@ func PersistTelegramMessage(cfg *config.Config, msg TelegramMessage) {
 	storageMutex.Lock()
 	defer storageMutex.Unlock()
 
-	fileName := getDailyFileName(time.Now(), "telegram")
+	fileName := GetDailyFileName(time.Now(), "telegram")
 	data, err := os.ReadFile(fileName)
 	if err != nil {
 		fmt.Printf("Failed to read telegram file %s: %v\n", fileName, err)
@@ -377,7 +351,7 @@ func PersistInteraction(cfg *config.Config, logEntry map[string]interface{}) {
 	storageMutex.Lock()
 	defer storageMutex.Unlock()
 
-	fileName := getDailyFileName(time.Now(), "interaction")
+	fileName := GetDailyFileName(time.Now(), "interaction")
 	data, err := os.ReadFile(fileName)
 	if err != nil {
 		fmt.Printf("Failed to read interaction file %s: %v\n", fileName, err)
