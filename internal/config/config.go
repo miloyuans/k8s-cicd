@@ -19,8 +19,8 @@ type Config struct {
 	Namespace          string            `yaml:"namespace"`
 	TimeoutSeconds     int               `yaml:"timeout_seconds"`
 	MaxConcurrency     int               `yaml:"max_concurrency"`
-	TriggerKeywords    []string          `yaml:"trigger_keywords"`
-	CancelKeywords     []string          `yaml:"cancel_keywords"`
+	TriggerKeywords    []string          `yaml:"trigger_keyword"`
+	CancelKeywords     []string          `yaml:"cancel_keyword"`
 	InvalidResponses   []string          `yaml:"invalid_responses"`
 	ServicesDir        string            `yaml:"services_dir"`
 	Environments       []string          `yaml:"environments"`

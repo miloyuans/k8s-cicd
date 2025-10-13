@@ -34,7 +34,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 		if update.Message != nil {
 			chatID := update.Message.Chat.ID
 			userID := update.Message.From.ID
-			text := update.Message.Text
+			text := strings.TrimSpace(update.Message.Text)
 
 			if cfg.TelegramChats[service] != chatID {
 				log.Printf("Ignoring message from chat %d: not in allowed chats for service %s", chatID, service)
@@ -43,7 +43,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 
 			// Check for trigger keywords
 			for _, trigger := range cfg.TriggerKeywords {
-				if text == trigger || strings.Contains(text, trigger) {
+				if text == trigger {
 					log.Printf("User %d triggered dialog via keyword %s for service %s in chat %d", userID, trigger, service, chatID)
 					storage.PersistTelegramMessage(cfg, storage.TelegramMessage{
 						UserID:    userID,
@@ -52,7 +52,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 						Timestamp: time.Now(),
 					})
 					dialog.StartDialog(userID, chatID, service, cfg)
-					continue
+					break
 				}
 			}
 
@@ -65,7 +65,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 					} else {
 						log.Printf("No active dialog to cancel for user %d in chat %d", userID, chatID)
 					}
-					continue
+					break
 				}
 			}
 
@@ -75,7 +75,12 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				continue
 			}
 
-			response := cfg.InvalidResponses[rand.Intn(len(cfg.InvalidResponses))]
+			// If no trigger or cancel keyword matched, send invalid response
+			triggerList := strings.Join(cfg.TriggerKeywords, ", ")
+			response := fmt.Sprintf("请使用触发关键字（如 %s）开始部署。\nPlease use a trigger keyword (e.g., %s) to start a deployment.", triggerList, triggerList)
+			if len(cfg.InvalidResponses) > 0 {
+				response = cfg.InvalidResponses[rand.Intn(len(cfg.InvalidResponses))]
+			}
 			log.Printf("Invalid input from user %d in chat %d: %s, responding with: %s", userID, chatID, text, response)
 			sendMessage(bot, chatID, response)
 		} else if update.CallbackQuery != nil {
