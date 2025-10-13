@@ -19,8 +19,8 @@ type Config struct {
 	Namespace          string            `yaml:"namespace"`
 	TimeoutSeconds     int               `yaml:"timeout_seconds"`
 	MaxConcurrency     int               `yaml:"max_concurrency"`
-	TriggerKeyword     string            `yaml:"trigger_keyword"`
-	CancelKeyword      string            `yaml:"cancel_keyword"`
+	TriggerKeywords    []string          `yaml:"trigger_keywords"`
+	CancelKeywords     []string          `yaml:"cancel_keywords"`
 	InvalidResponses   []string          `yaml:"invalid_responses"`
 	ServicesDir        string            `yaml:"services_dir"`
 	Environments       []string          `yaml:"environments"`
@@ -56,14 +56,25 @@ func LoadConfig(filePath string) *Config {
 	if cfg.DialogTimeout == 0 {
 		cfg.DialogTimeout = 300
 	}
+	if len(cfg.TriggerKeywords) == 0 {
+		cfg.TriggerKeywords = []string{"deploy"}
+	}
+	if len(cfg.CancelKeywords) == 0 {
+		cfg.CancelKeywords = []string{"cancel"}
+	}
 	return &cfg
 }
 
 func LoadServiceLists(servicesDir string) (map[string][]string, error) {
+	// Ensure services directory exists
+	if err := os.MkdirAll(servicesDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create services directory %s: %v", servicesDir, err)
+	}
+
 	serviceLists := make(map[string][]string)
 	files, err := os.ReadDir(servicesDir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read services directory %s: %v", servicesDir, err)
 	}
 
 	for _, file := range files {
@@ -81,6 +92,7 @@ func LoadServiceLists(servicesDir string) (map[string][]string, error) {
 					services = append(services, line)
 				}
 			}
+			// Allow empty service lists, but still register the service
 			serviceLists[serviceName] = services
 		}
 	}

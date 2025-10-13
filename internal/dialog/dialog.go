@@ -122,6 +122,7 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 			sendMessage(cfg, chatID, fmt.Sprintf("无法加载服务列表：%v\nFailed to load service lists: %v", err, err))
 			return
 		}
+		log.Printf("Checking service %s against list for %s: %v", text, s.Service, serviceLists[s.Service])
 		if !contains(serviceLists[s.Service], text) {
 			log.Printf("Invalid service selected by user %d in chat %d: %s", userID, chatID, text)
 			sendMessage(cfg, chatID, "无效的服务。请选择一个有效的服务。\nInvalid service. Please select a valid service.")
@@ -266,7 +267,6 @@ func contains(slice []string, item string) bool {
 		if s == item {
 			return true
 		}
-		return s == item
 	}
 	return false
 }

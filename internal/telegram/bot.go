@@ -41,20 +41,32 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				continue
 			}
 
-			if text == cfg.TriggerKeyword {
-				log.Printf("User %d triggered dialog for service %s in chat %d", userID, service, chatID)
-				dialog.StartDialog(userID, chatID, service, cfg)
-				continue
+			// Check for trigger keywords
+			for _, trigger := range cfg.TriggerKeywords {
+				if text == trigger || strings.Contains(text, trigger) {
+					log.Printf("User %d triggered dialog via keyword %s for service %s in chat %d", userID, trigger, service, chatID)
+					storage.PersistTelegramMessage(cfg, storage.TelegramMessage{
+						UserID:    userID,
+						ChatID:    chatID,
+						Content:   text,
+						Timestamp: time.Now(),
+					})
+					dialog.StartDialog(userID, chatID, service, cfg)
+					continue
+				}
 			}
 
-			if text == cfg.CancelKeyword {
-				log.Printf("User %d requested to cancel dialog in chat %d", userID, chatID)
-				if dialog.CancelDialog(userID, chatID, cfg) {
-					sendMessage(bot, chatID, "对话已取消。\nDialog cancelled.")
-				} else {
-					log.Printf("No active dialog to cancel for user %d in chat %d", userID, chatID)
+			// Check for cancel keywords
+			for _, cancel := range cfg.CancelKeywords {
+				if text == cancel {
+					log.Printf("User %d requested to cancel dialog in chat %d", userID, chatID)
+					if dialog.CancelDialog(userID, chatID, cfg) {
+						sendMessage(bot, chatID, "对话已取消。\nDialog cancelled.")
+					} else {
+						log.Printf("No active dialog to cancel for user %d in chat %d", userID, chatID)
+					}
+					continue
 				}
-				continue
 			}
 
 			if dialog.IsDialogActive(userID, chatID) {
@@ -63,20 +75,9 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				continue
 			}
 
-			if strings.Contains(text, cfg.TriggerKeyword) {
-				log.Printf("User %d triggered dialog via keyword for service %s in chat %d", userID, service, chatID)
-				storage.PersistTelegramMessage(cfg, storage.TelegramMessage{
-					UserID:    userID,
-					ChatID:    chatID,
-					Content:   text,
-					Timestamp: time.Now(),
-				})
-				dialog.StartDialog(userID, chatID, service, cfg)
-			} else {
-				response := cfg.InvalidResponses[rand.Intn(len(cfg.InvalidResponses))]
-				log.Printf("Invalid input from user %d in chat %d: %s, responding with: %s", userID, chatID, text, response)
-				sendMessage(bot, chatID, response)
-			}
+			response := cfg.InvalidResponses[rand.Intn(len(cfg.InvalidResponses))]
+			log.Printf("Invalid input from user %d in chat %d: %s, responding with: %s", userID, chatID, text, response)
+			sendMessage(bot, chatID, response)
 		} else if update.CallbackQuery != nil {
 			// Handle Inline Keyboard button clicks
 			chatID := update.CallbackQuery.Message.Chat.ID
