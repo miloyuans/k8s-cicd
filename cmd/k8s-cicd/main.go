@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"k8s-cicd/internal/config"
-	"k8s-cicd/internal/httpclient"
+	"k8s-cicd/internal/http"
 	"k8s-cicd/internal/k8s"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
@@ -53,7 +53,7 @@ func pollGateway() {
 
 	for range ticker.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		tasks, err := httpclient.FetchTasks(ctx, cfg.GatewayURL)
+		tasks, err := http.FetchTasks(ctx, cfg.GatewayURL)
 		if err != nil {
 			log.Printf("Failed to fetch tasks: %v", err)
 			cancel()

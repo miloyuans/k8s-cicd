@@ -1,4 +1,4 @@
-package httpclient
+package http
 
 import (
 	"bytes"
@@ -14,14 +14,14 @@ func FetchTasks(ctx context.Context, gatewayURL string) ([]storage.DeployRequest
 	body, _ := json.Marshal(map[string]string{"env": "prod"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gatewayURL+"/tasks", bytes.NewBuffer(body))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to fetch tasks from gateway: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -31,7 +31,7 @@ func FetchTasks(ctx context.Context, gatewayURL string) ([]storage.DeployRequest
 
 	var tasks []storage.DeployRequest
 	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decode tasks response: %v", err)
 	}
 	return tasks, nil
 }
