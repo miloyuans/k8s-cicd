@@ -34,8 +34,15 @@ func main() {
 	}
 
 	// Initialize service lists
-	if _, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots); err != nil {
+	serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
+	if err != nil {
 		log.Printf("Failed to initialize service lists: %v", err)
+	}
+	// Check for empty service lists
+	for service, services := range serviceLists {
+		if len(services) == 0 {
+			log.Printf("Warning: Service list for %s is empty, please update %s.svc.list", service, service)
+		}
 	}
 
 	// Initialize all daily files and update deployment versions

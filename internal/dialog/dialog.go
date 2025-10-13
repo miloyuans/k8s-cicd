@@ -140,7 +140,7 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 
 		if len(cfg.Environments) == 0 {
 			log.Printf("No environments configured for user %d in chat %d", userID, chatID)
-		 sendMessage(cfg, chatID, "未配置任何环境。请检查 config.yaml。\nNo environments configured. Please check config.yaml.")
+			sendMessage(cfg, chatID, "未配置任何环境。请检查 config.yaml。\nNo environments configured. Please check config.yaml.")
 			return
 		}
 

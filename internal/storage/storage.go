@@ -93,9 +93,6 @@ func ensureDailyFile(fileName string, client dynamic.Interface, cfg *config.Conf
 }
 
 func InitAllDailyFiles(cfg *config.Config, client dynamic.Interface) {
-	storageMutex.Lock()
-	defer storageMutex.Unlock()
-
 	now := time.Now()
 	// Initialize deploy file
 	deployFile := GetDailyFileName(now, "deploy", cfg.StorageDir)
