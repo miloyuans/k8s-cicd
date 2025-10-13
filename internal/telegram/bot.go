@@ -43,31 +43,31 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 			}
 
 			// Check for trigger keywords
+			triggered := false
 			for _, trigger := range cfg.TriggerKeywords {
 				if text == trigger {
 					log.Printf("User %d triggered dialog via keyword %s for service %s in chat %d", userID, trigger, service, chatID)
-					storage.PersistTelegramMessage(cfg, storage.TelegramMessage{
-						UserID:    userID,
-						ChatID:    chatID,
-						Content:   text,
-						Timestamp: time.Now(),
-					})
 					dialog.StartDialog(userID, chatID, service, cfg, userName)
+					triggered = true
 					break
 				}
 			}
+			if triggered {
+				continue
+			}
 
 			// Check for cancel keywords
+			canceled := false
 			for _, cancel := range cfg.CancelKeywords {
 				if text == cancel {
 					log.Printf("User %d requested to cancel dialog in chat %d", userID, chatID)
-					if dialog.CancelDialog(userID, chatID, cfg) {
-						sendMessage(bot, chatID, "对话已取消。\nDialog cancelled.")
-					} else {
-						log.Printf("No active dialog to cancel for user %d in chat %d", userID, chatID)
-					}
+					dialog.CancelDialog(userID, chatID, cfg)
+					canceled = true
 					break
 				}
+			}
+			if canceled {
+				continue
 			}
 
 			if dialog.IsDialogActive(userID, chatID) {
@@ -149,13 +149,14 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 **环境 / Environment**: *%s*  
 **新版本 / New Version**: *%s*  
 **旧镜像 / Old Image**: *%s*  
+**提交用户 / Submitted by**: *%s*
 
 ✅ 部署成功完成！  
 ✅ Deployment completed successfully!
 
 ---
 **部署时间 / Deployed at**: %s
-`, result.Request.Service, result.Request.Env, result.Request.Version, result.OldImage,
+`, result.Request.Service, result.Request.Env, result.Request.Version, result.OldImage, result.Request.UserName,
 			result.Request.Timestamp.Format("2006-01-02 15:04:05")))
 	} else {
 		md.WriteString(fmt.Sprintf(`
@@ -165,6 +166,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 **环境 / Environment**: *%s*  
 **版本 / Version**: *%s*  
 **错误 / Error**: *%s*  
+**提交用户 / Submitted by**: *%s*
 
 ### 🔍 **诊断信息 / Diagnostics**
 
@@ -172,7 +174,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 %s
 
 **环境变量 / Environment Variables**:  
-`, result.Request.Service, result.Request.Env, result.Request.Version, result.ErrorMsg, result.Events))
+`, result.Request.Service, result.Request.Env, result.Request.Version, result.ErrorMsg, result.Request.UserName, result.Events))
 
 		for k, v := range result.Envs {
 			md.WriteString(fmt.Sprintf("• `%s`: %s\n", k, v))

@@ -37,7 +37,7 @@ func main() {
 		log.Fatalf("Failed to create storage dir: %v", err)
 	}
 
-	// Initialize service lists
+	// Initialize service lists (though not used in cicd, keeping for consistency)
 	if _, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots); err != nil {
 		log.Printf("Failed to initialize service lists: %v", err)
 	}
@@ -104,7 +104,7 @@ func retryPendingTasks() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	for env := range cfg.EnvironmentNamespaces {
+	for env := range cfg.Environments {
 		tasks, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
 		if err != nil {
 			log.Printf("Failed to fetch pending tasks for env %s: %v", env, err)
@@ -135,7 +135,7 @@ func pollGateway() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		for env := range cfg.EnvironmentNamespaces {
+		for env := range cfg.Environments {
 			tasks, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
 			if err != nil {
 				log.Printf("Failed to fetch tasks for env %s: %v", env, err)
@@ -160,6 +160,9 @@ func pollGateway() {
 				storage.PersistInteraction(cfg, map[string]interface{}{
 					"endpoint":  "pollGateway",
 					"task_key":  taskKey,
+					"service":   task.Service,
+					"env":       task.Env,
+					"version":   task.Version,
 					"timestamp": time.Now().Format(time.RFC3339),
 				})
 			}
@@ -184,42 +187,42 @@ func worker() {
 				Envs:    make(map[string]string),
 			}
 
-			newImage, err := k8sClient.GetNewImage(t.Service, t.Version, cfg.EnvironmentNamespaces[t.Env])
+			newImage, err := k8sClient.GetNewImage(t.Service, t.Version, cfg.Environments[t.Env])
 			if err != nil {
 				result.Success = false
 				result.ErrorMsg = err.Error()
-				storage.PersistDeployment(cfg, t.Service, t.Env, "", "failed")
+				storage.PersistDeployment(cfg, t.Service, t.Env, "", "failed", t.UserName)
 				go telegram.SendTelegramNotification(cfg, result)
 				activeTasks.Delete(t.Service)
 				reportToGateway(cfg)
 				return
 			}
 
-			storage.PersistDeployment(cfg, t.Service, t.Env, newImage, "pending")
+			storage.PersistDeployment(cfg, t.Service, t.Env, newImage, "pending", t.UserName)
 
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 			defer cancel()
 
-			result.Success, result.ErrorMsg, result.OldImage = k8sClient.UpdateDeployment(ctx, t.Service, newImage, cfg.EnvironmentNamespaces[t.Env])
+			result.Success, result.ErrorMsg, result.OldImage = k8sClient.UpdateDeployment(ctx, t.Service, newImage, cfg.Environments[t.Env])
 
 			if result.Success {
-				result.Success = k8sClient.WaitForRollout(ctx, t.Service, cfg.EnvironmentNamespaces[t.Env])
+				result.Success = k8sClient.WaitForRollout(ctx, t.Service, cfg.Environments[t.Env])
 				if !result.Success {
 					result.ErrorMsg = "Rollout failed or timed out"
-					k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage, cfg.EnvironmentNamespaces[t.Env])
+					k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage, cfg.Environments[t.Env])
 				}
 			}
 
 			if !result.Success {
-				result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(ctx, t.Service, cfg.EnvironmentNamespaces[t.Env])
-				k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage, cfg.EnvironmentNamespaces[t.Env])
+				result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(ctx, t.Service, cfg.Environments[t.Env])
+				k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage, cfg.Environments[t.Env])
 			}
 
 			status := "success"
 			if !result.Success {
 				status = "failed"
 			}
-			storage.PersistDeployment(cfg, t.Service, t.Env, newImage, status)
+			storage.PersistDeployment(cfg, t.Service, t.Env, newImage, status, t.UserName)
 
 			go telegram.SendTelegramNotification(cfg, result)
 

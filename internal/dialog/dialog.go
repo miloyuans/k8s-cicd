@@ -41,7 +41,6 @@ var (
 func StartDialog(userID, chatID int64, service string, cfg *config.Config, userName string) {
 	if _, loaded := dialogs.Load(userID); loaded {
 		log.Printf("User %d already has an active dialog in chat %d", userID, chatID)
-		sendMessage(cfg, chatID, "您已经有一个活跃的对话。请完成或取消它。\nYou already have an active dialog. Please complete or cancel it.")
 		return
 	}
 
@@ -60,18 +59,15 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config, userN
 	serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
 	if err != nil {
 		log.Printf("Failed to load service lists for user %d: %v", userID, err)
-		sendMessage(cfg, chatID, fmt.Sprintf("无法加载服务列表：%v\nFailed to load service lists: %v", err, err))
 		return
 	}
 	services, exists := serviceLists[service]
 	if !exists {
 		log.Printf("No service list found for %s for user %d", service, userID)
-		sendMessage(cfg, chatID, fmt.Sprintf("未找到 %s 的服务列表。请检查 telegram_bots 配置。\nNo service list found for %s. Please check telegram_bots configuration.", service, service))
 		return
 	}
 	if len(services) == 0 {
 		log.Printf("No services available for %s for user %d", service, userID)
-		sendMessage(cfg, chatID, fmt.Sprintf("没有可用的服务 %s。请在 %s.svc.list 中添加服务。\nNo services available for %s. Please add services to %s.svc.list.", service, service, service, service))
 		return
 	}
 
@@ -158,112 +154,99 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
 	return envs
 }
 
-func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
-	state, ok := dialogs.Load(userID)
-	if !ok {
-		log.Printf("No active dialog found for user %d in chat %d", userID, chatID)
+func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
+	state, loaded := dialogs.Load(userID)
+	if !loaded {
+		log.Printf("No active dialog for user %d in chat %d", userID, chatID)
 		return
 	}
 	s := state.(*DialogState)
 
+	serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
+	if err != nil {
+		log.Printf("Failed to load service lists: %v", err)
+		return
+	}
+	services := serviceLists[s.Service]
+
 	switch s.Stage {
 	case "service":
-		serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
-		if err != nil {
-			log.Printf("Failed to load service lists for user %d in chat %d: %v", userID, chatID, err)
-			sendMessage(cfg, chatID, fmt.Sprintf("无法加载服务列表：%v\nFailed to load service lists: %v", err, err))
-			return
-		}
-		log.Printf("Checking service %s against list for %s: %v", text, s.Service, serviceLists[s.Service])
-		if !contains(serviceLists[s.Service], text) {
-			log.Printf("Invalid service selected by user %d in chat %d: %s", userID, chatID, text)
-			sendMessage(cfg, chatID, "无效的服务。请选择一个有效的服务。\nInvalid service. Please select a valid service.")
-			return
-		}
-		s.Selected = append(s.Selected, text)
-		s.Stage = "env"
-
-		// Get environments dynamically from deploy file
-		environments := getEnvironmentsFromDeployFile(cfg)
-		if len(environments) == 0 {
-			log.Printf("No environments found in deploy file for user %d in chat %d", userID, chatID)
-			sendMessage(cfg, chatID, "未找到任何环境。请等待 k8s-cicd 上报数据。\nNo environments found. Please wait for k8s-cicd to report data.")
-			return
-		}
-
-		log.Printf("Loaded %d environments for user %d: %v", len(environments), userID, environments)
-
-		var buttons [][]tgbotapi.InlineKeyboardButton
-		for _, env := range environments {
-			buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-				tgbotapi.NewInlineKeyboardButtonData(env, env),
-			})
-		}
-		buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-			tgbotapi.NewInlineKeyboardButtonData("Done", "done"),
-		})
-		keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-		msg := tgbotapi.NewMessage(chatID, "请选择环境（可多选，按 Done 完成）：\nPlease select environment(s) (multi-select, press Done when finished):")
-		msg.ReplyMarkup = keyboard
-		sendMessage(cfg, chatID, msg)
-
-	case "env":
-		if text == "done" {
-			if len(s.Selected) == 1 { // Only service selected, no envs
-				log.Printf("User %d in chat %d selected Done without environments", userID, chatID)
-				sendMessage(cfg, chatID, "请至少选择一个环境。\nPlease select at least one environment.")
-				return
-			}
-			s.Stage = "version"
-			log.Printf("User %d in chat %d moved to version stage with environments: %v", userID, chatID, s.Selected[1:])
-			msg := tgbotapi.NewMessage(chatID, "请输入版本号：\nPlease enter the version:")
-			sendMessage(cfg, chatID, msg)
+		if contains(services, input) {
+			s.Selected = append(s.Selected, input)
+			s.Stage = "env"
+			selectEnv(chatID, cfg)
 		} else {
-			// Check if the selected environment exists in the deploy file
-			environments := getEnvironmentsFromDeployFile(cfg)
-			if contains(environments, text) {
-				if !contains(s.Selected, text) {
-					s.Selected = append(s.Selected, text)
-					log.Printf("User %d in chat %d added environment: %s", userID, chatID, text)
-				}
-				sendMessage(cfg, chatID, "环境已添加。继续选择或按 Done 完成。\nEnvironment added. Select another or press Done.")
-			} else {
-				log.Printf("Invalid environment selected by user %d in chat %d: %s", userID, chatID, text)
-				sendMessage(cfg, chatID, "无效的环境。请选择一个有效的环境。\nInvalid environment. Please select a valid environment.")
+			log.Printf("Invalid service selected by user %d in chat %d: %s", userID, chatID, input)
+		}
+	case "env":
+		envs := getEnvironmentsFromDeployFile(cfg)
+		selectedEnvs := strings.Split(input, ",")
+		valid := true
+		for _, env := range selectedEnvs {
+			env = strings.TrimSpace(env)
+			if !contains(envs, env) {
+				valid = false
+				break
 			}
 		}
-
+		if valid {
+			s.Selected = append(s.Selected, selectedEnvs...)
+			s.Stage = "version"
+			sendMessage(cfg, chatID, "请输入版本号：\nPlease enter the version:")
+		} else {
+			log.Printf("Invalid environment selected by user %d in chat %d: %s", userID, chatID, input)
+		}
 	case "version":
-		s.Version = text
+		s.Version = strings.TrimSpace(input)
 		s.Stage = "confirm"
-		checkAndConfirm(userID, chatID, cfg, s)
-
+		confirmSubmission(userID, chatID, cfg, s)
 	case "confirm":
-		if text == "confirm" {
+		if input == "confirm" {
 			submitTasks(userID, chatID, cfg, s)
-		} else if text == "cancel" {
+		} else if input == "cancel" {
 			CancelDialog(userID, chatID, cfg)
 		}
 	}
+	dialogs.Store(userID, s)
 }
 
-func checkAndConfirm(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
-	if err := storage.EnsureDailyFile(fileName, nil, cfg); err != nil {
-		log.Printf("Failed to ensure deploy file: %v", err)
-		sendMessage(cfg, chatID, "内部错误，无法检查历史记录。\nInternal error, cannot check history.")
+func selectEnv(chatID int64, cfg *config.Config) {
+	envs := getEnvironmentsFromDeployFile(cfg)
+	if len(envs) == 0 {
+		log.Printf("No environments available for chat %d", chatID)
 		return
 	}
+
+	var buttons [][]tgbotapi.InlineKeyboardButton
+	var row []tgbotapi.InlineKeyboardButton
+	cols := 3
+	if len(envs) < cols {
+		cols = len(envs)
+	}
+	for i, env := range envs {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(env, env))
+		if len(row) == cols || i == len(envs)-1 {
+			buttons = append(buttons, row)
+			row = []tgbotapi.InlineKeyboardButton{}
+		}
+	}
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	msg := tgbotapi.NewMessage(chatID, "请选择环境（可多选，用逗号分隔）：\nPlease select environment(s) (comma-separated for multiple):")
+	msg.ReplyMarkup = keyboard
+	sendMessage(cfg, chatID, msg)
+}
+
+func confirmSubmission(userID, chatID int64, cfg *config.Config, s *DialogState) {
+	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
 	data, err := os.ReadFile(fileName)
 	if err != nil {
 		log.Printf("Failed to read deploy file: %v", err)
-		sendMessage(cfg, chatID, "内部错误，无法检查历史记录。\nInternal error, cannot check history.")
 		return
 	}
 	var infos []storage.DeploymentInfo
 	if err := json.Unmarshal(data, &infos); err != nil {
 		log.Printf("Failed to unmarshal deploy file: %v", err)
-		sendMessage(cfg, chatID, "内部错误，无法检查历史记录。\nInternal error, cannot check history.")
 		return
 	}
 
@@ -317,12 +300,6 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 		taskList, _ := taskQueue.LoadOrStore(s.Service, []DeployRequest{})
 		taskQueue.Store(s.Service, append(taskList.([]DeployRequest), task))
 		log.Printf("Stored task for user %d: service=%s, env=%s, version=%s", userID, s.Selected[0], env, s.Version)
-		storage.PersistTelegramMessage(cfg, storage.TelegramMessage{
-			UserID:    userID,
-			ChatID:    chatID,
-			Content:   fmt.Sprintf("Deploy: %s, Env: %s, Version: %s", s.Selected[0], env, s.Version),
-			Timestamp: time.Now(),
-		})
 	}
 	sendMessage(cfg, chatID, "部署任务已提交。\nDeployment task(s) submitted.")
 	dialogs.Delete(userID)
@@ -332,7 +309,6 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 func CancelDialog(userID, chatID int64, cfg *config.Config) bool {
 	if _, loaded := dialogs.LoadAndDelete(userID); loaded {
 		log.Printf("Dialog cancelled for user %d in chat %d", userID, chatID)
-		sendMessage(cfg, chatID, "对话已取消。\nDialog cancelled.")
 		return true
 	}
 	log.Printf("No active dialog to cancel for user %d in chat %d", userID, chatID)
@@ -350,7 +326,6 @@ func monitorDialogTimeout(userID, chatID int64, cfg *config.Config) {
 		s := state.(*DialogState)
 		if s.ChatID == chatID {
 			log.Printf("Dialog timed out for user %d in chat %d", userID, chatID)
-			sendMessage(cfg, chatID, "对话因 5 分钟未操作而超时。请重新开始对话。\nDialog timed out after 5 minutes. Please start a new dialog if needed.")
 		}
 	}
 }

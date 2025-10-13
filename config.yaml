@@ -31,6 +31,5 @@ service_keywords:
   api-service: "international"
   web-service: "gaming"
 environments:
-  - eks-test
-  - eks
-  - eks-us
+  eks-test: "international"
+  eks-pre: "pre"

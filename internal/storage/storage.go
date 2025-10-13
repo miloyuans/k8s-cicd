@@ -131,7 +131,7 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 	}
 
 	updated := false
-	for env, namespace := range cfg.EnvironmentNamespaces {
+	for env, namespace := range cfg.Environments {
 		deployments, err := client.Resource(schema.GroupVersionResource{
 			Group:    "apps",
 			Version:  "v1",
@@ -169,8 +169,8 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 					Status:    "current",
 					UserName:  "",
 				})
+				updated = true
 			}
-			updated = true
 		}
 	}
 
@@ -182,28 +182,16 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 		}
 		if err := os.WriteFile(fileName, newData, 0644); err != nil {
 			fmt.Printf("Failed to write deploy file %s: %v\n", fileName, err)
-			return
 		}
 	}
 }
 
-func DailyMaintenance(cfg *config.Config, client dynamic.Interface) {
-	ticker := time.NewTicker(24 * time.Hour)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		InitAllDailyFiles(cfg, client)
-		UpdateAllDeploymentVersions(cfg, client)
-		cleanupOldFiles("deploy", cfg.StorageDir)
-		cleanupOldFiles("telegram", cfg.StorageDir)
-		cleanupOldFiles("interaction", cfg.StorageDir)
-	}
-}
-
 func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config) {
-	infos := []DeploymentInfo{}
-	updated := false
-	for env, namespace := range cfg.EnvironmentNamespaces {
+	storageMutex.Lock()
+	defer storageMutex.Unlock()
+
+	var infos []DeploymentInfo
+	for env, namespace := range cfg.Environments {
 		deployments, err := client.Resource(schema.GroupVersionResource{
 			Group:    "apps",
 			Version:  "v1",
@@ -230,22 +218,30 @@ func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config
 				Status:    "current",
 				UserName:  "",
 			})
-			updated = true
 		}
-	}
-
-	if !updated {
-		return
 	}
 
 	data, err := json.MarshalIndent(infos, "", "  ")
 	if err != nil {
-		fmt.Printf("Failed to marshal daily file %s: %v\n", fileName, err)
+		fmt.Printf("Failed to marshal initial deploy file %s: %v\n", fileName, err)
 		return
 	}
 	if err := os.WriteFile(fileName, data, 0644); err != nil {
 		fmt.Printf("Failed to write daily file %s: %v\n", fileName, err)
 		return
+	}
+}
+
+func DailyMaintenance(cfg *config.Config, client dynamic.Interface) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		InitAllDailyFiles(cfg, client)
+		UpdateAllDeploymentVersions(cfg, client)
+		cleanupOldFiles("deploy", cfg.StorageDir)
+		cleanupOldFiles("telegram", cfg.StorageDir)
+		cleanupOldFiles("interaction", cfg.StorageDir)
 	}
 }
 
@@ -273,7 +269,7 @@ func cleanupOldFiles(prefix, storageDir string) {
 	}
 }
 
-func PersistDeployment(cfg *config.Config, service, env, image, status string) {
+func PersistDeployment(cfg *config.Config, service, env, image, status, userName string) {
 	fileName := GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
 	if err := EnsureDailyFile(fileName, nil, cfg); err != nil {
 		fmt.Printf("Failed to ensure deploy file %s: %v\n", fileName, err)
@@ -300,6 +296,7 @@ func PersistDeployment(cfg *config.Config, service, env, image, status string) {
 			infos[i].Image = image
 			infos[i].Timestamp = time.Now()
 			infos[i].Status = status
+			infos[i].UserName = userName
 			found = true
 			break
 		}
@@ -311,7 +308,7 @@ func PersistDeployment(cfg *config.Config, service, env, image, status string) {
 			Image:     image,
 			Timestamp: time.Now(),
 			Status:    status,
-			UserName:  "",
+			UserName:  userName,
 		})
 	}
 
@@ -322,38 +319,6 @@ func PersistDeployment(cfg *config.Config, service, env, image, status string) {
 	}
 	if err := os.WriteFile(fileName, newData, 0644); err != nil {
 		fmt.Printf("Failed to write deploy file %s: %v\n", fileName, err)
-	}
-}
-
-func PersistTelegramMessage(cfg *config.Config, msg TelegramMessage) {
-	fileName := GetDailyFileName(time.Now(), "telegram", cfg.StorageDir)
-	if err := EnsureDailyFile(fileName, nil, cfg); err != nil {
-		fmt.Printf("Failed to ensure telegram file %s: %v\n", fileName, err)
-		return
-	}
-
-	storageMutex.Lock()
-	defer storageMutex.Unlock()
-
-	data, err := os.ReadFile(fileName)
-	if err != nil {
-		fmt.Printf("Failed to read telegram file %s: %v\n", fileName, err)
-		return
-	}
-	var messages []TelegramMessage
-	if err := json.Unmarshal(data, &messages); err != nil {
-		fmt.Printf("Failed to unmarshal telegram file %s: %v\n", fileName, err)
-		return
-	}
-
-	messages = append(messages, msg)
-	newData, err := json.MarshalIndent(messages, "", "  ")
-	if err != nil {
-		fmt.Printf("Failed to marshal telegram file %s: %v\n", fileName, err)
-		return
-	}
-	if err := os.WriteFile(fileName, newData, 0644); err != nil {
-		fmt.Printf("Failed to write telegram file %s: %v\n", fileName, err)
 	}
 }
 
