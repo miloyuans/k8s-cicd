@@ -25,7 +25,7 @@ type DeploymentInfo struct {
 	Image     string    `json:"image"`
 	Timestamp time.Time `json:"timestamp"`
 	Status    string    `json:"status"`
-	UserName  string    `json:"username"` // Added to store username
+	UserName  string    `json:"username"`
 }
 
 type DeployRequest struct {
@@ -131,7 +131,7 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 	}
 
 	updated := false
-	for env, namespace := range cfg.Environments {
+	for env, namespace := range cfg.EnvironmentNamespaces {
 		deployments, err := client.Resource(schema.GroupVersionResource{
 			Group:    "apps",
 			Version:  "v1",
@@ -203,7 +203,7 @@ func DailyMaintenance(cfg *config.Config, client dynamic.Interface) {
 func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config) {
 	infos := []DeploymentInfo{}
 	updated := false
-	for env, namespace := range cfg.Environments {
+	for env, namespace := range cfg.EnvironmentNamespaces {
 		deployments, err := client.Resource(schema.GroupVersionResource{
 			Group:    "apps",
 			Version:  "v1",

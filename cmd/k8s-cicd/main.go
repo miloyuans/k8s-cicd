@@ -104,7 +104,7 @@ func retryPendingTasks() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	for env := range cfg.Environments {
+	for env := range cfg.EnvironmentNamespaces {
 		tasks, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
 		if err != nil {
 			log.Printf("Failed to fetch pending tasks for env %s: %v", env, err)
@@ -135,7 +135,7 @@ func pollGateway() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		for env := range cfg.Environments {
+		for env := range cfg.EnvironmentNamespaces {
 			tasks, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
 			if err != nil {
 				log.Printf("Failed to fetch tasks for env %s: %v", env, err)
@@ -184,7 +184,7 @@ func worker() {
 				Envs:    make(map[string]string),
 			}
 
-			newImage, err := k8sClient.GetNewImage(t.Service, t.Version, cfg.Environments[t.Env])
+			newImage, err := k8sClient.GetNewImage(t.Service, t.Version, cfg.EnvironmentNamespaces[t.Env])
 			if err != nil {
 				result.Success = false
 				result.ErrorMsg = err.Error()
@@ -200,19 +200,19 @@ func worker() {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 			defer cancel()
 
-			result.Success, result.ErrorMsg, result.OldImage = k8sClient.UpdateDeployment(ctx, t.Service, newImage, cfg.Environments[t.Env])
+			result.Success, result.ErrorMsg, result.OldImage = k8sClient.UpdateDeployment(ctx, t.Service, newImage, cfg.EnvironmentNamespaces[t.Env])
 
 			if result.Success {
-				result.Success = k8sClient.WaitForRollout(ctx, t.Service, cfg.Environments[t.Env])
+				result.Success = k8sClient.WaitForRollout(ctx, t.Service, cfg.EnvironmentNamespaces[t.Env])
 				if !result.Success {
 					result.ErrorMsg = "Rollout failed or timed out"
-					k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage, cfg.Environments[t.Env])
+					k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage, cfg.EnvironmentNamespaces[t.Env])
 				}
 			}
 
 			if !result.Success {
-				result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(ctx, t.Service, cfg.Environments[t.Env])
-				k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage, cfg.Environments[t.Env])
+				result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(ctx, t.Service, cfg.EnvironmentNamespaces[t.Env])
+				k8sClient.RestoreDeployment(ctx, t.Service, result.OldImage, cfg.EnvironmentNamespaces[t.Env])
 			}
 
 			status := "success"

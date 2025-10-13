@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -11,7 +12,6 @@ import (
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/storage"
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"encoding/json"
 )
 
 type DeployRequest struct {
@@ -113,6 +113,51 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config, userN
 	sendMessage(cfg, chatID, msg)
 }
 
+func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
+	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
+	if err := storage.EnsureDailyFile(fileName, nil, cfg); err != nil {
+		log.Printf("Failed to ensure deploy file for environments: %v", err)
+		return []string{}
+	}
+
+	data, err := os.ReadFile(fileName)
+	if err != nil {
+		log.Printf("Failed to read deploy file for environments: %v", err)
+		return []string{}
+	}
+
+	var infos []storage.DeploymentInfo
+	if err := json.Unmarshal(data, &infos); err != nil {
+		log.Printf("Failed to unmarshal deploy file for environments: %v", err)
+		return []string{}
+	}
+
+	// Extract unique environments
+	envSet := make(map[string]bool)
+	for _, info := range infos {
+		envSet[info.Env] = true
+	}
+
+	var envs []string
+	for env := range envSet {
+		envs = append(envs, env)
+	}
+
+	// Sort for consistent order
+	if len(envs) > 0 {
+		// Use a simple sort for strings
+		for i := 0; i < len(envs)-1; i++ {
+			for j := i + 1; j < len(envs); j++ {
+				if envs[i] > envs[j] {
+					envs[i], envs[j] = envs[j], envs[i]
+				}
+			}
+		}
+	}
+
+	return envs
+}
+
 func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 	state, ok := dialogs.Load(userID)
 	if !ok {
@@ -138,16 +183,18 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 		s.Selected = append(s.Selected, text)
 		s.Stage = "env"
 
-		if len(cfg.Environments) == 0 {
-			log.Printf("No environments configured for user %d in chat %d", userID, chatID)
-			sendMessage(cfg, chatID, "未配置任何环境。请检查 config.yaml。\nNo environments configured. Please check config.yaml.")
+		// Get environments dynamically from deploy file
+		environments := getEnvironmentsFromDeployFile(cfg)
+		if len(environments) == 0 {
+			log.Printf("No environments found in deploy file for user %d in chat %d", userID, chatID)
+			sendMessage(cfg, chatID, "未找到任何环境。请等待 k8s-cicd 上报数据。\nNo environments found. Please wait for k8s-cicd to report data.")
 			return
 		}
 
-		log.Printf("Loaded %d environments for user %d: %v", len(cfg.Environments), userID, cfg.Environments)
+		log.Printf("Loaded %d environments for user %d: %v", len(environments), userID, environments)
 
 		var buttons [][]tgbotapi.InlineKeyboardButton
-		for env := range cfg.Environments {
+		for _, env := range environments {
 			buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
 				tgbotapi.NewInlineKeyboardButtonData(env, env),
 			})
@@ -171,15 +218,19 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 			log.Printf("User %d in chat %d moved to version stage with environments: %v", userID, chatID, s.Selected[1:])
 			msg := tgbotapi.NewMessage(chatID, "请输入版本号：\nPlease enter the version:")
 			sendMessage(cfg, chatID, msg)
-		} else if _, ok := cfg.Environments[text]; ok {
-			if !contains(s.Selected, text) {
-				s.Selected = append(s.Selected, text)
-				log.Printf("User %d in chat %d added environment: %s", userID, chatID, text)
-			}
-			sendMessage(cfg, chatID, "环境已添加。继续选择或按 Done 完成。\nEnvironment added. Select another or press Done.")
 		} else {
-			log.Printf("Invalid environment selected by user %d in chat %d: %s", userID, chatID, text)
-			sendMessage(cfg, chatID, "无效的环境。请选择一个有效的环境。\nInvalid environment. Please select a valid environment.")
+			// Check if the selected environment exists in the deploy file
+			environments := getEnvironmentsFromDeployFile(cfg)
+			if contains(environments, text) {
+				if !contains(s.Selected, text) {
+					s.Selected = append(s.Selected, text)
+					log.Printf("User %d in chat %d added environment: %s", userID, chatID, text)
+				}
+				sendMessage(cfg, chatID, "环境已添加。继续选择或按 Done 完成。\nEnvironment added. Select another or press Done.")
+			} else {
+				log.Printf("Invalid environment selected by user %d in chat %d: %s", userID, chatID, text)
+				sendMessage(cfg, chatID, "无效的环境。请选择一个有效的环境。\nInvalid environment. Please select a valid environment.")
+			}
 		}
 
 	case "version":
