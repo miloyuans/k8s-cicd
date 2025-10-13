@@ -234,7 +234,7 @@ func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config
 		})
 	}
 
-	data, err := json.MarshalIndent(inos, "", "  ")
+	data, err := json.MarshalIndent(infos, "", "  ")
 	if err != nil {
 		fmt.Printf("Failed to marshal daily file %s: %v\n", fileName, err)
 		return
