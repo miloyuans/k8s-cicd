@@ -5,7 +5,6 @@ import (
 	"log"
 	"math/rand"
 	"strings"
-	"time"
 
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/dialog"
