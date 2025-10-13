@@ -15,12 +15,12 @@ import (
 )
 
 var (
-	cfg         *config.Config
-	k8sClient   *k8s.Client
-	taskQueue   chan *storage.DeployRequest
-	activeTasks sync.Map
-	wg          sync.WaitGroup
-	globalCounter int64
+	cfg            *config.Config
+	k8sClient      *k8s.Client
+	taskQueue      chan *storage.DeployRequest
+	activeTasks    sync.Map
+	wg             sync.WaitGroup
+	globalCounter  int64
 	processedTasks sync.Map // map[string]bool to track processed tasks
 )
 

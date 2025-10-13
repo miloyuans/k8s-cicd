@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,14 +30,38 @@ func main() {
 	go storage.DailyMaintenanceGateway(cfg)
 	go telegram.StartBot(cfg)
 
-	http.HandleFunc("/tasks", makeHandleTasks(cfg))
-	log.Println("Gateway server starting on :8081")
-	log.Fatal(http.ListenAndServe(":8081", nil))
+	http.HandleFunc("/tasks", ipRestrictedHandler(cfg, makeHandleTasks(cfg)))
+	log.Printf("Gateway server starting on %s", cfg.GatewayListenAddr)
+	log.Fatal(http.ListenAndServe(cfg.GatewayListenAddr, nil))
 }
 
 var (
 	taskQueue sync.Map // map[string][]dialog.DeployRequest
 )
+
+func ipRestrictedHandler(cfg *config.Config, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		clientIP := getClientIP(r)
+		if !config.IsIPAllowed(clientIP, cfg.AllowedIPs) {
+			log.Printf("Rejected request from IP %s: not in allowed_ips", clientIP)
+			http.Error(w, "Forbidden: IP not allowed", http.StatusForbidden)
+			return
+		}
+		log.Printf("Accepted request from IP %s", clientIP)
+		next(w, r)
+	}
+}
+
+func getClientIP(r *http.Request) string {
+	// Check X-Forwarded-For header for proxied requests
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		ips := strings.Split(forwarded, ",")
+		return strings.TrimSpace(ips[0])
+	}
+	// Fallback to RemoteAddr
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	return ip
+}
 
 func makeHandleTasks(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +95,7 @@ func makeHandleTasks(cfg *config.Config) http.HandlerFunc {
 		}
 
 		// Log interaction
-		storage.LogInteraction(cfg, map[string]interface{}{
+		storage.PersistInteraction(cfg, map[string]interface{}{
 			"endpoint": "/tasks",
 			"env":      req.Env,
 			"tasks":    len(tasks),

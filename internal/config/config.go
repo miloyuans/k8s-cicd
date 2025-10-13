@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,8 @@ import (
 
 type Config struct {
 	GatewayURL         string            `yaml:"gateway_url"`
+	GatewayListenAddr  string            `yaml:"gateway_listen_addr"`
+	AllowedIPs         []string          `yaml:"allowed_ips"`
 	PollInterval       int               `yaml:"poll_interval"`
 	TelegramBots       map[string]string `yaml:"telegram_bots"`
 	TelegramChats      map[string]int64  `yaml:"telegram_chats"`
@@ -62,15 +65,20 @@ func LoadConfig(filePath string) *Config {
 	if len(cfg.CancelKeywords) == 0 {
 		cfg.CancelKeywords = []string{"cancel"}
 	}
+	if cfg.GatewayListenAddr == "" {
+		cfg.GatewayListenAddr = ":8081"
+	}
 	return &cfg
 }
 
 func LoadServiceLists(servicesDir string, telegramBots map[string]string) (map[string][]string, error) {
 	// Ensure services directory exists
-	if err := os.MkdirAll(servicesDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create services directory %s: %v", servicesDir, err)
-	} else if _, err := os.Stat(servicesDir); err == nil {
+	if _, err := os.Stat(servicesDir); err == nil {
 		fmt.Printf("Using existing services directory: %s\n", servicesDir)
+	} else if err := os.MkdirAll(servicesDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create services directory %s: %v", servicesDir, err)
+	} else {
+		fmt.Printf("Initialized services directory: %s\n", servicesDir)
 	}
 
 	// Initialize or check service list files for each bot in telegram_bots
@@ -115,6 +123,35 @@ func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
 			return true
+		}
+	}
+	return false
+}
+
+func IsIPAllowed(clientIP string, allowedIPs []string) bool {
+	if len(allowedIPs) == 0 {
+		return true // No whitelist, allow all
+	}
+
+	clientAddr := net.ParseIP(clientIP)
+	if clientAddr == nil {
+		return false // Invalid client IP
+	}
+
+	for _, allowed := range allowedIPs {
+		if strings.Contains(allowed, "/") {
+			_, ipNet, err := net.ParseCIDR(allowed)
+			if err != nil {
+				fmt.Printf("Invalid CIDR in allowed_ips: %s\n", allowed)
+				continue
+			}
+			if ipNet.Contains(clientAddr) {
+				return true
+			}
+		} else {
+			if allowed == clientIP {
+				return true
+			}
 		}
 	}
 	return false
