@@ -38,11 +38,11 @@ func (q *Queue) Enqueue(task Task) {
         fmt.Printf("Task %s already exists, skipping enqueue\n", taskKey)
         return
     }
-    task.Status = "pending"
+    task.DeployRequest.Status = "pending"
     q.taskMap.Store(taskKey, task)
     q.tasks <- task
     q.persistTask(task)
-    fmt.Printf("Enqueued task %s (service=%s, env=%s, version=%s)\n", taskKey, task.Service, task.Env, task.Version)
+    fmt.Printf("Enqueued task %s (service=%s, env=%s, version=%s)\n", taskKey, task.DeployRequest.Service, task.DeployRequest.Env, task.DeployRequest.Version)
 }
 
 func (q *Queue) Dequeue() <-chan Task {
@@ -53,7 +53,7 @@ func (q *Queue) GetPendingTasks(env string) []types.DeployRequest {
     var tasks []types.DeployRequest
     q.taskMap.Range(func(key, value interface{}) bool {
         task := value.(Task)
-        if task.Env == env && task.Status == "pending" {
+        if task.DeployRequest.Env == env && task.DeployRequest.Status == "pending" {
             tasks = append(tasks, task.DeployRequest)
         }
         return true
@@ -64,7 +64,7 @@ func (q *Queue) GetPendingTasks(env string) []types.DeployRequest {
 func (q *Queue) CompleteTask(taskKey string) {
     if task, exists := q.taskMap.Load(taskKey); exists {
         t := task.(Task)
-        t.Status = "completed"
+        t.DeployRequest.Status = "completed"
         q.taskMap.Store(taskKey, t)
         q.persistTask(t)
         fmt.Printf("Marked task %s as completed\n", taskKey)
