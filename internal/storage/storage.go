@@ -50,7 +50,7 @@ func EnsureStorageDir(storageDir string) error {
 	if _, err := os.Stat(storageDir); err == nil {
 		return nil
 	}
-	if err := os.MdirAll(storageDir, 0755); err != nil {
+	if err := os.MkdirAll(storageDir, 0755); err != nil {
 		fmt.Printf("Failed to create storage directory: %v\n", err)
 		return err
 	}
