@@ -17,7 +17,7 @@ type Config struct {
 	PollInterval       int               `yaml:"poll_interval"`
 	TelegramBots       map[string]string `yaml:"telegram_bots"`
 	TelegramChats      map[string]int64  `yaml:"telegram_chats"`
-	ServiceKeywords    map[string]string `yaml:"service_keywords"`
+	ServiceKeywords    map[string]string `yaml:"service_keywords"` // keyword: category
 	KubeConfigPath     string            `yaml:"kube_config_path"`
 	Namespace          string            `yaml:"namespace"`
 	TimeoutSeconds     int               `yaml:"timeout_seconds"`
