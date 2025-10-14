@@ -10,6 +10,7 @@ import (
     "k8s-cicd/internal/dialog"
     "k8s-cicd/internal/queue"
     "k8s-cicd/internal/storage"
+    "k8s-cicd/internal/types"
     "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
@@ -144,51 +145,30 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 
     var md strings.Builder
     if result.Success {
-        md.WriteString(fmt.Sprintf(`
-## 🚀 **部署成功 / Deployment Success**
-
-**服务 / Service**: *%s*  
-**环境 / Environment**: *%s*  
-**新版本 / New Version**: *%s*  
-**旧镜像 / Old Image**: *%s*  
-**提交用户 / Submitted by**: *%s*
-
-✅ 部署成功完成！  
-✅ Deployment completed successfully!
-
----
-**部署时间 / Deployed at**: %s
-`, result.Request.Service, result.Request.Env, result.Request.Version, result.OldImage, result.Request.UserName,
-            result.Request.Timestamp.Format("2006-01-02 15:04:05")))
+        md.WriteString(fmt.Sprintf("**🚀 部署成功 / Deployment Success**\n\n"))
+        md.WriteString(fmt.Sprintf("服务 / Service: **%s**\n", result.Request.Service))
+        md.WriteString(fmt.Sprintf("环境 / Environment: **%s**\n", result.Request.Env))
+        md.WriteString(fmt.Sprintf("新版本 / New Version: **%s**\n", result.Request.Version))
+        md.WriteString(fmt.Sprintf("旧镜像 / Old Image: **%s**\n", result.OldImage))
+        md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", result.Request.UserName))
+        md.WriteString("\n✅ 部署成功完成！\n✅ Deployment completed successfully!\n")
+        md.WriteString(fmt.Sprintf("\n**部署时间 / Deployed at**: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
     } else {
-        md.WriteString(fmt.Sprintf(`
-## ❌ **部署失败 / Deployment Failed**
-
-**服务 / Service**: *%s*  
-**环境 / Environment**: *%s*  
-**版本 / Version**: *%s*  
-**错误 / Error**: *%s*  
-**提交用户 / Submitted by**: *%s*
-
-### 🔍 **诊断信息 / Diagnostics**
-
-**事件 / Events**:  
-%s
-
-**环境变量 / Environment Variables**:  
-`, result.Request.Service, result.Request.Env, result.Request.Version, result.ErrorMsg, result.Request.UserName, result.Events))
-
+        md.WriteString(fmt.Sprintf("**❌ 部署失败 / Deployment Failed**\n\n"))
+        md.WriteString(fmt.Sprintf("服务 / Service: **%s**\n", result.Request.Service))
+        md.WriteString(fmt.Sprintf("环境 / Environment: **%s**\n", result.Request.Env))
+        md.WriteString(fmt.Sprintf("版本 / Version: **%s**\n", result.Request.Version))
+        md.WriteString(fmt.Sprintf("错误 / Error: **%s**\n", result.ErrorMsg))
+        md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", result.Request.UserName))
+        md.WriteString("\n**🔍 诊断信息 / Diagnostics**\n\n")
+        md.WriteString(fmt.Sprintf("事件 / Events:\n%s\n", result.Events))
+        md.WriteString("环境变量 / Environment Variables:\n")
         for k, v := range result.Envs {
-            md.WriteString(fmt.Sprintf("• `%s`: %s\n", k, v))
+            md.WriteString(fmt.Sprintf("- %s: **%s**\n", k, v))
         }
-
-        md.WriteString(fmt.Sprintf(`
-**日志 / Logs**: %s  
-
-⚠️ **回滚完成 / Rollback completed**  
----
-**失败时间 / Failed at**: %s
-`, result.Logs, result.Request.Timestamp.Format("2006-01-02 15:04:05")))
+        md.WriteString(fmt.Sprintf("\n日志 / Logs: **%s**\n", result.Logs))
+        md.WriteString("\n⚠️ **回滚完成 / Rollback completed**\n")
+        md.WriteString(fmt.Sprintf("\n**失败时间 / Failed at**: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
     }
 
     msg := tgbotapi.NewMessage(chatID, md.String())

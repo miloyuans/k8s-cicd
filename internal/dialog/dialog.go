@@ -20,7 +20,7 @@ type DialogState struct {
     UserID    int64
     ChatID    int64
     Service   string
-    Stage     string // "service", "env", "version", "confirm"
+    Stage     string // "service", "env", "version", "confirm", "continue"
     Selected  []string
     StartedAt time.Time
     UserName  string
@@ -203,6 +203,16 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
         } else if input == "cancel" {
             CancelDialog(userID, chatID, cfg)
         }
+    case "continue":
+        if input == "yes" {
+            s.Stage = "service"
+            s.Selected = nil
+            s.Version = ""
+            dialogs.Store(userID, s)
+            StartDialog(userID, chatID, s.Service, cfg, s.UserName)
+        } else if input == "no" {
+            CancelDialog(userID, chatID, cfg)
+        }
     }
     dialogs.Store(userID, s)
 }
@@ -247,24 +257,25 @@ func confirmSubmission(userID, chatID int64, cfg *config.Config, s *DialogState)
         return
     }
 
-    // Check for same version in history
+    // Count submissions for the same service on the current day
+    todayCount := 0
     var historyMsg strings.Builder
-    var count int
     for _, info := range infos {
-        if info.Service == s.Selected[0] && strings.Contains(info.Image, ":"+s.Version) {
-            historyMsg.WriteString(fmt.Sprintf("• %s by %s at %s\n", info.Env, info.UserName, info.Timestamp.Format(time.RFC3339)))
+        if info.Service == s.Selected[0] && info.Timestamp.Truncate(24*time.Hour).Equal(time.Now().Truncate(24*time.Hour)) {
+            todayCount++
         }
-        if info.Service == s.Selected[0] && info.Timestamp.Day() == time.Now().Day() {
-            count++
+        if info.Service == s.Selected[0] && strings.Contains(info.Image, ":"+s.Version) {
+            historyMsg.WriteString(fmt.Sprintf("- %s by **%s** at **%s**\n", info.Env, info.UserName, info.Timestamp.Format("2006-01-02 15:04:05")))
         }
     }
 
-    // Get today's submission count and username
-    todayCount := count
-    userName := s.UserName
-
     var md strings.Builder
-    md.WriteString(fmt.Sprintf("**提交详情 / Submission Details**\n\n**服务 / Service**: %s\n**版本 / Version**: %s\n**环境 / Environments**: %s\n\n**当天提交数量 / Today's Submissions**: %d\n**提交用户 / Submitted by**: %s\n", s.Selected[0], s.Version, strings.Join(s.Selected[1:], ", "), todayCount, userName))
+    md.WriteString(fmt.Sprintf("**提交详情 / Submission Details**\n\n"))
+    md.WriteString(fmt.Sprintf("服务 / Service: **%s**\n", s.Selected[0]))
+    md.WriteString(fmt.Sprintf("版本 / Version: **%s**\n", s.Version))
+    md.WriteString(fmt.Sprintf("环境 / Environments: **%s**\n", strings.Join(s.Selected[1:], ", ")))
+    md.WriteString(fmt.Sprintf("当天提交数量 / Today's Submissions: **%d**\n", todayCount))
+    md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", s.UserName))
 
     if historyMsg.Len() > 0 {
         md.WriteString(fmt.Sprintf("\n**历史记录 / History** (same version):\n%s\n", historyMsg.String()))
@@ -298,8 +309,21 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
         taskQueue.Enqueue(queue.Task{DeployRequest: task})
     }
     sendMessage(cfg, chatID, "部署任务已提交。\nDeployment task(s) submitted.")
-    dialogs.Delete(userID)
-    log.Printf("Dialog completed and removed for user %d in chat %d", userID, chatID)
+
+    // Prompt for continuing interaction
+    s.Stage = "continue"
+    dialogs.Store(userID, s)
+    buttons := [][]tgbotapi.InlineKeyboardButton{
+        {
+            tgbotapi.NewInlineKeyboardButtonData("是 / Yes", "yes"),
+            tgbotapi.NewInlineKeyboardButtonData("否 / No", "no"),
+        },
+    }
+    keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+    msg := tgbotapi.NewMessage(chatID, "是否继续提交另一个部署任务？\nWould you like to submit another deployment task?")
+    msg.ReplyMarkup = keyboard
+    msg.ParseMode = "Markdown"
+    sendMessage(cfg, chatID, msg)
 }
 
 func CancelDialog(userID, chatID int64, cfg *config.Config) bool {
