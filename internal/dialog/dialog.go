@@ -230,6 +230,8 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
         } else if input == "no" {
             log.Printf("User %d chose to end dialog in chat %d", userID, chatID)
             CancelDialog(userID, chatID, cfg)
+        } else {
+            log.Printf("Invalid input in continue stage for user %d in chat %d: %s", userID, chatID, input)
         }
     }
     dialogs.Store(userID, s)
