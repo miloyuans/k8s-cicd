@@ -12,6 +12,7 @@ import (
     "k8s-cicd/internal/queue"
     "k8s-cicd/internal/storage"
     "k8s-cicd/internal/telegram"
+    "k8s-cicd/internal/types"
     "os"
 )
 
@@ -37,7 +38,7 @@ func main() {
     // Initialize task queue
     taskQueue = queue.NewQueue(cfg, 100)
 
-    go telegram.StartBot(cfg)
+    go telegram.StartBot(cfg, taskQueue)
 
     http.HandleFunc("/tasks", handleTasks(cfg))
     http.HandleFunc("/report", handleReport(cfg))

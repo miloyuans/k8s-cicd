@@ -13,9 +13,8 @@ import (
     "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-func StartBot(cfg *config.Config) {
-    taskQueue := queue.NewQueue(cfg, 100)
-    dialog.SetTaskQueue(taskQueue)
+func StartBot(cfg *config.Config, q *queue.Queue) {
+    dialog.SetTaskQueue(q)
 
     for service, token := range cfg.TelegramBots {
         bot, err := tgbotapi.NewBotAPI(token)
