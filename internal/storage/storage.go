@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"k8s-cicd/internal/config"
+	"k8s-cicd/internal/dialog"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -28,16 +29,8 @@ type DeploymentInfo struct {
 	UserName  string    `json:"username"`
 }
 
-type DeployRequest struct {
-	Service   string    `json:"service"`
-	Env       string    `json:"env"`
-	Version   string    `json:"version"`
-	Timestamp time.Time `json:"timestamp"`
-	UserName  string    `json:"username"`
-}
-
 type DeployResult struct {
-	Request   DeployRequest
+	Request   dialog.DeployRequest
 	Success   bool
 	ErrorMsg  string
 	OldImage  string

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"k8s-cicd/internal/config"
+	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -20,6 +21,7 @@ type DeployRequest struct {
 	Version   string    `json:"version"`
 	Timestamp time.Time `json:"timestamp"`
 	UserName  string    `json:"username"`
+	Status    string    `json:"status"`
 }
 
 type DialogState struct {
@@ -35,8 +37,12 @@ type DialogState struct {
 
 var (
 	dialogs   sync.Map // map[int64]*DialogState
-	taskQueue sync.Map // map[string][]DeployRequest
+	taskQueue *queue.Queue
 )
+
+func SetTaskQueue(q *queue.Queue) {
+	taskQueue = q
+}
 
 func StartDialog(userID, chatID int64, service string, cfg *config.Config, userName string) {
 	if _, loaded := dialogs.Load(userID); loaded {
@@ -141,7 +147,6 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
 
 	// Sort for consistent order
 	if len(envs) > 0 {
-		// Use a simple sort for strings
 		for i := 0; i < len(envs)-1; i++ {
 			for j := i + 1; j < len(envs); j++ {
 				if envs[i] > envs[j] {
@@ -296,10 +301,9 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 			Version:   s.Version,
 			Timestamp: time.Now(),
 			UserName:  s.UserName,
+			Status:    "pending",
 		}
-		taskList, _ := taskQueue.LoadOrStore(s.Service, []DeployRequest{})
-		taskQueue.Store(s.Service, append(taskList.([]DeployRequest), task))
-		log.Printf("Stored task for user %d: service=%s, env=%s, version=%s", userID, s.Selected[0], env, s.Version)
+		taskQueue.Enqueue(queue.Task{DeployRequest: task})
 	}
 	sendMessage(cfg, chatID, "部署任务已提交。\nDeployment task(s) submitted.")
 	dialogs.Delete(userID)

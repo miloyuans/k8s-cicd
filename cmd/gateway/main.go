@@ -6,14 +6,18 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/dialog"
+	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
 	"os"
+)
+
+var (
+	taskQueue *queue.Queue
 )
 
 func main() {
@@ -23,22 +27,25 @@ func main() {
 		log.Fatalf("Failed to create storage dir: %v", err)
 	}
 
+	// Initialize all daily files
+	storage.InitAllDailyFiles(cfg, nil)
+
 	// Initialize service lists
 	if _, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots); err != nil {
 		log.Printf("Failed to initialize service lists: %v", err)
 	}
 
+	// Initialize task queue
+	taskQueue = queue.NewQueue(cfg, 100)
+
 	go telegram.StartBot(cfg)
 
 	http.HandleFunc("/tasks", handleTasks(cfg))
 	http.HandleFunc("/report", handleReport(cfg))
+	http.HandleFunc("/complete", handleComplete(cfg))
 	log.Printf("Gateway server starting on %s", cfg.GatewayListenAddr)
 	log.Fatal(http.ListenAndServe(cfg.GatewayListenAddr, nil))
 }
-
-var (
-	taskQueue sync.Map // map[string][]dialog.DeployRequest
-)
 
 func handleTasks(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -57,16 +64,8 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 				return
 			}
 
-			tasks := []dialog.DeployRequest{}
-			taskQueue.Range(func(key, value interface{}) bool {
-				taskList := value.([]dialog.DeployRequest)
-				for _, task := range taskList {
-					if task.Env == env {
-						tasks = append(tasks, task)
-					}
-				}
-				return true
-			})
+			tasks := taskQueue.GetPendingTasks(env)
+			log.Printf("Serving %d pending tasks for env %s", len(tasks), env)
 
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(tasks); err != nil {
@@ -142,6 +141,31 @@ func handleReport(cfg *config.Config) http.HandlerFunc {
 
 		// Store merged data using storage package
 		storage.UpdateDeploymentInfo(cfg, existingInfos)
+		log.Printf("Processed report with %d deployment infos", len(infos))
+
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func handleComplete(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			log.Printf("Method not allowed for /complete: %s", r.Method)
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			TaskKey string `json:"task_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("Failed to decode complete request: %v", err)
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		taskQueue.CompleteTask(req.TaskKey)
+		log.Printf("Received completion for task %s", req.TaskKey)
 
 		w.WriteHeader(http.StatusOK)
 	}

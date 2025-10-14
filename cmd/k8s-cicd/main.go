@@ -7,24 +7,21 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"k8s-cicd/internal/config"
 	k8shttp "k8s-cicd/internal/http"
 	"k8s-cicd/internal/k8s"
+	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
+	"k8s-cicd/internal/dialog"
 )
 
 var (
-	cfg            *config.Config
-	k8sClient      *k8s.Client
-	taskQueue      chan *storage.DeployRequest
-	activeTasks    sync.Map
-	globalCounter  int64
-	processedTasks sync.Map // map[string]bool to track processed tasks
+	cfg       *config.Config
+	k8sClient *k8s.Client
+	taskQueue *queue.Queue
 )
 
 func main() {
@@ -46,10 +43,12 @@ func main() {
 	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
 	reportToGateway(cfg)
 
+	// Initialize task queue
+	taskQueue = queue.NewQueue(cfg, 100)
+
 	// Retry pending tasks from gateway
 	retryPendingTasks()
 
-	taskQueue = make(chan *storage.DeployRequest, 100)
 	for i := 0; i < cfg.MaxConcurrency; i++ {
 		go worker()
 	}
@@ -119,17 +118,9 @@ func retryPendingTasks() {
 				log.Printf("Invalid task parameters: service=%s, env=%s, version=%s", task.Service, task.Env, task.Version)
 				continue
 			}
-			taskKey := task.Service + "-" + task.Env + "-" + task.Version + "-" + task.Timestamp.Format(time.RFC3339)
-			if _, processed := processedTasks.Load(taskKey); processed {
-				log.Printf("Skipping already processed task: %s", taskKey)
-				continue
-			}
-			if _, loaded := activeTasks.Load(task.Service); loaded {
-				log.Printf("Service %s is already deploying, skipping retry", task.Service)
-				continue
-			}
+			taskKey := queue.computeTaskKey(task)
 			log.Printf("Retrying pending task: %s (service=%s, env=%s, version=%s)", taskKey, task.Service, task.Env, task.Version)
-			taskQueue <- &task
+			taskQueue.Enqueue(queue.Task{DeployRequest: task})
 		}
 	}
 }
@@ -156,19 +147,9 @@ func pollGateway() {
 					log.Printf("Invalid task parameters: service=%s, env=%s, version=%s", task.Service, task.Env, task.Version)
 					continue
 				}
-				taskKey := task.Service + "-" + task.Env + "-" + task.Version + "-" + task.Timestamp.Format(time.RFC3339)
-				if _, processed := processedTasks.Load(taskKey); processed {
-					log.Printf("Skipping already processed task: %s", taskKey)
-					continue
-				}
-				if _, loaded := activeTasks.Load(task.Service); loaded {
-					log.Printf("Service %s is already deploying", task.Service)
-					continue
-				}
-				task.Timestamp = time.Now()
-				atomic.AddInt64(&globalCounter, 1)
+				taskKey := queue.computeTaskKey(task)
 				log.Printf("Queuing new task: %s (service=%s, env=%s, version=%s)", taskKey, task.Service, task.Env, task.Version)
-				taskQueue <- &task
+				taskQueue.Enqueue(queue.Task{DeployRequest: task})
 
 				// Log interaction on k8s-cicd side
 				storage.PersistInteraction(cfg, map[string]interface{}{
@@ -188,24 +169,18 @@ func pollGateway() {
 }
 
 func worker() {
-	for task := range taskQueue {
-		taskKey := task.Service + "-" + task.Env + "-" + task.Version + "-" + task.Timestamp.Format(time.RFC3339)
+	for task := range taskQueue.Dequeue() {
+		taskKey := queue.computeTaskKey(task.DeployRequest)
 		log.Printf("Worker starting to process task: %s (service=%s, env=%s, version=%s)", taskKey, task.Service, task.Env, task.Version)
-		if _, processed := processedTasks.LoadOrStore(taskKey, true); processed {
-			log.Printf("Task already processed: %s", taskKey)
-			return
-		}
-		activeTasks.Store(task.Service, nil)
 
 		result := &storage.DeployResult{
-			Request: *task,
+			Request: task.DeployRequest,
 			Envs:    make(map[string]string),
 		}
 
 		namespace, ok := cfg.Environments[task.Env]
 		if !ok {
 			log.Printf("No namespace found for env %s, skipping task %s", task.Env, taskKey)
-			activeTasks.Delete(task.Service)
 			return
 		}
 
@@ -216,8 +191,6 @@ func worker() {
 			log.Printf("Failed to get new image for task %s: %v", taskKey, err)
 			storage.PersistDeployment(cfg, task.Service, task.Env, "", "failed", task.UserName)
 			go telegram.SendTelegramNotification(cfg, result)
-			activeTasks.Delete(task.Service)
-			reportToGateway(cfg)
 			return
 		}
 		log.Printf("Got new image %s for task %s", newImage, taskKey)
@@ -259,8 +232,39 @@ func worker() {
 
 		go telegram.SendTelegramNotification(cfg, result)
 
-		activeTasks.Delete(task.Service)
-		reportToGateway(cfg)
+		if result.Success {
+			feedbackCompleteToGateway(cfg, taskKey)
+		}
+
 		log.Printf("Finished processing task %s with status %s", taskKey, status)
+	}
+}
+
+func feedbackCompleteToGateway(cfg *config.Config, taskKey string) {
+	data, err := json.Marshal(map[string]string{"task_key": taskKey})
+	if err != nil {
+		log.Printf("Failed to marshal complete data for task %s: %v", taskKey, err)
+		return
+	}
+
+	req, err := http.NewRequest("POST", cfg.GatewayURL+"/complete", bytes.NewBuffer(data))
+	if err != nil {
+		log.Printf("Failed to create complete request for task %s: %v", taskKey, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Failed to send complete to gateway for task %s: %v", taskKey, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Gateway complete failed with status %d for task %s", resp.StatusCode, taskKey)
+	} else {
+		log.Printf("Feedback complete for task %s", taskKey)
 	}
 }

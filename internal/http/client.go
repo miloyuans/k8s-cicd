@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"net/http"
 
-	"k8s-cicd/internal/storage"
+	"k8s-cicd/internal/dialog"
 )
 
-func FetchTasks(ctx context.Context, gatewayURL, env string) ([]storage.DeployRequest, error) {
+func FetchTasks(ctx context.Context, gatewayURL, env string) ([]dialog.DeployRequest, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gatewayURL+"/tasks?env="+env, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
@@ -27,7 +27,7 @@ func FetchTasks(ctx context.Context, gatewayURL, env string) ([]storage.DeployRe
 		return nil, fmt.Errorf("gateway returned status: %d", resp.StatusCode)
 	}
 
-	var tasks []storage.DeployRequest
+	var tasks []dialog.DeployRequest
 	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
 		return nil, fmt.Errorf("failed to decode tasks response: %v", err)
 	}
