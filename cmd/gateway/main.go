@@ -12,7 +12,6 @@ import (
     "k8s-cicd/internal/queue"
     "k8s-cicd/internal/storage"
     "k8s-cicd/internal/telegram"
-    "k8s-cicd/internal/types"
     "os"
 )
 
