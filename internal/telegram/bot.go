@@ -10,7 +10,6 @@ import (
     "k8s-cicd/internal/dialog"
     "k8s-cicd/internal/queue"
     "k8s-cicd/internal/storage"
-    "k8s-cicd/internal/types"
     "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
