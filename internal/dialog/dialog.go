@@ -159,6 +159,15 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
     }
     s := state.(*DialogState)
 
+    // Check for cancel keywords in any stage
+    for _, cancel := range cfg.CancelKeywords {
+        if strings.EqualFold(input, cancel) {
+            log.Printf("User %d cancelled dialog in chat %d with input: %s", userID, chatID, input)
+            CancelDialog(userID, chatID, cfg)
+            return
+        }
+    }
+
     serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
     if err != nil {
         log.Printf("Failed to load service lists: %v", err)
@@ -205,12 +214,15 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
         }
     case "continue":
         if input == "yes" {
+            log.Printf("User %d chose to continue dialog in chat %d", userID, chatID)
             s.Stage = "service"
             s.Selected = nil
             s.Version = ""
+            s.StartedAt = time.Now() // Reset timeout
             dialogs.Store(userID, s)
             StartDialog(userID, chatID, s.Service, cfg, s.UserName)
         } else if input == "no" {
+            log.Printf("User %d chose to end dialog in chat %d", userID, chatID)
             CancelDialog(userID, chatID, cfg)
         }
     }
@@ -346,6 +358,7 @@ func monitorDialogTimeout(userID, chatID int64, cfg *config.Config) {
         s := state.(*DialogState)
         if s.ChatID == chatID {
             log.Printf("Dialog timed out for user %d in chat %d", userID, chatID)
+            sendMessage(cfg, chatID, "对话已超时，请重新触发部署。\nDialog timed out, please trigger deployment again.")
         }
     }
 }
