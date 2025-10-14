@@ -117,10 +117,12 @@ func handleReport(cfg *config.Config) http.HandlerFunc {
             return
         }
         var existingInfos []storage.DeploymentInfo
-        if err := json.Unmarshal(data, &existingInfos); err != nil {
-            log.Printf("Failed to unmarshal deploy file %s: %v", fileName, err)
-            http.Error(w, "Internal server error", http.StatusInternalServerError)
-            return
+        if len(data) > 0 {
+            if err := json.Unmarshal(data, &existingInfos); err != nil {
+                log.Printf("Failed to unmarshal deploy file %s: %v", fileName, err)
+                http.Error(w, "Internal server error", http.StatusInternalServerError)
+                return
+            }
         }
 
         // Merge reported data, updating or appending as needed

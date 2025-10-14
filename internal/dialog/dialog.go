@@ -12,7 +12,6 @@ import (
     "k8s-cicd/internal/config"
     "k8s-cicd/internal/queue"
     "k8s-cicd/internal/storage"
-    "k8s-cicd/internal/types"
     "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
@@ -125,9 +124,11 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
     }
 
     var infos []storage.DeploymentInfo
-    if err := json.Unmarshal(data, &infos); err != nil {
-        log.Printf("Failed to unmarshal deploy file for environments: %v", err)
-        return []string{}
+    if len(data) > 0 {
+        if err := json.Unmarshal(data, &infos); err != nil {
+            log.Printf("Failed to unmarshal deploy file for environments: %v", err)
+            return []string{}
+        }
     }
 
     // Extract unique environments
@@ -262,15 +263,22 @@ func selectEnv(chatID int64, cfg *config.Config) {
 
 func confirmSubmission(userID, chatID int64, cfg *config.Config, s *DialogState) {
     fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
+    if err := storage.EnsureDailyFile(fileName, nil, cfg); err != nil {
+        log.Printf("Failed to ensure deploy file: %v", err)
+        return
+    }
+
     data, err := os.ReadFile(fileName)
     if err != nil {
         log.Printf("Failed to read deploy file: %v", err)
         return
     }
     var infos []storage.DeploymentInfo
-    if err := json.Unmarshal(data, &infos); err != nil {
-        log.Printf("Failed to unmarshal deploy file: %v", err)
-        return
+    if len(data) > 0 {
+        if err := json.Unmarshal(data, &infos); err != nil {
+            log.Printf("Failed to unmarshal deploy file: %v", err)
+            return
+        }
     }
 
     // Count submissions for the same service on the current day
@@ -323,6 +331,8 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
             Status:    "pending",
         }
         taskQueue.Enqueue(queue.Task{DeployRequest: task})
+        // Persist deployment info immediately to ensure history is recorded
+        storage.PersistDeployment(cfg, task.Service, task.Env, "", "pending", task.UserName)
     }
     sendMessage(cfg, chatID, "部署任务已提交。\nDeployment task(s) submitted.")
 
@@ -345,6 +355,7 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 func CancelDialog(userID, chatID int64, cfg *config.Config) bool {
     if _, loaded := dialogs.LoadAndDelete(userID); loaded {
         log.Printf("Dialog cancelled for user %d in chat %d", userID, chatID)
+        sendMessage(cfg, chatID, "当前会话已关闭。\nCurrent session has been closed.")
         return true
     }
     log.Printf("No active dialog to cancel for user %d in chat %d", userID, chatID)
