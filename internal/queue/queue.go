@@ -33,7 +33,7 @@ func NewQueue(cfg *config.Config, capacity int) *Queue {
 }
 
 func (q *Queue) Enqueue(task Task) {
-    taskKey := computeTaskKey(task.DeployRequest)
+    taskKey := ComputeTaskKey(task.DeployRequest)
     if _, exists := q.taskMap.Load(taskKey); exists {
         fmt.Printf("Task %s already exists, skipping enqueue\n", taskKey)
         return
@@ -94,10 +94,10 @@ func (q *Queue) persistTask(task Task) {
         return
     }
 
-    taskKey := computeTaskKey(task.DeployRequest)
+    taskKey := ComputeTaskKey(task.DeployRequest)
     found := false
     for i := range tasks {
-        if computeTaskKey(tasks[i]) == taskKey {
+        if ComputeTaskKey(tasks[i]) == taskKey {
             tasks[i] = task.DeployRequest
             found = true
             break
@@ -136,7 +136,7 @@ func (q *Queue) loadPendingTasks() {
 
     for _, t := range tasks {
         if t.Status == "pending" {
-            taskKey := computeTaskKey(t)
+            taskKey := ComputeTaskKey(t)
             if _, exists := q.taskMap.Load(taskKey); !exists {
                 task := Task{DeployRequest: t}
                 q.taskMap.Store(taskKey, task)
@@ -147,6 +147,6 @@ func (q *Queue) loadPendingTasks() {
     }
 }
 
-func computeTaskKey(task types.DeployRequest) string {
+func ComputeTaskKey(task types.DeployRequest) string {
     return task.Service + "-" + task.Env + "-" + task.Version + "-" + task.Timestamp.Format(time.RFC3339)
 }
