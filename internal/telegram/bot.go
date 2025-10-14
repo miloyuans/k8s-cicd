@@ -124,6 +124,8 @@ func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) {
 }
 
 func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) {
+	log.Printf("Attempting to send notification for service %s in env %s with success %t", result.Request.Service, result.Request.Env, result.Success)
+	
 	// Find category for service
 	category := ""
 	for keyword, cat := range cfg.ServiceKeywords {
@@ -133,19 +135,19 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 		}
 	}
 	if category == "" {
-		log.Printf("No category found for service: %s", result.Request.Service)
+		log.Printf("Skipping notification: no category found for service %s", result.Request.Service)
 		return
 	}
 
 	token, ok := cfg.TelegramBots[category]
 	if !ok {
-		log.Printf("No bot configured for category: %s", category)
+		log.Printf("Skipping notification: no bot configured for category %s", category)
 		return
 	}
 
 	chatID, ok := cfg.TelegramChats[category]
 	if !ok {
-		log.Printf("No chat configured for category: %s", category)
+		log.Printf("Skipping notification: no chat configured for category %s", category)
 		return
 	}
 
@@ -187,5 +189,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 	msg.ParseMode = "Markdown"
 	if _, err := bot.Send(msg); err != nil {
 		log.Printf("Failed to send telegram notification to chat %d: %v", chatID, err)
+	} else {
+		log.Printf("Successfully sent notification for service %s in env %s with success %t", result.Request.Service, result.Request.Env, result.Success)
 	}
 }

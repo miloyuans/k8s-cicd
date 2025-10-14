@@ -25,6 +25,7 @@ type DialogState struct {
 	StartedAt time.Time
 	UserName  string
 	Version   string
+	timeoutCancel chan bool // New: channel to cancel timeout
 }
 
 var (
@@ -43,17 +44,17 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config, userN
 	}
 
 	state := &DialogState{
-		UserID:    userID,
-		ChatID:    chatID,
-		Service:   service,
-		Stage:     "service",
-		StartedAt: time.Now(),
-		UserName:  userName,
+		UserID:        userID,
+		ChatID:        chatID,
+		Service:       service,
+		Stage:         "service",
+		StartedAt:     time.Now(),
+		UserName:      userName,
+		timeoutCancel: make(chan bool),
 	}
 	dialogs.Store(userID, state)
 
 	log.Printf("Started dialog for user %d in chat %d for service %s", userID, chatID, service)
-	go monitorDialogTimeout(userID, chatID, cfg)
 	sendServiceSelection(userID, chatID, cfg, state)
 }
 
@@ -271,6 +272,9 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	msg.ReplyMarkup = keyboard
 	msg.ParseMode = "Markdown"
 	sendMessage(cfg, chatID, msg)
+
+	// Start timeout after submission
+	go monitorDialogTimeout(userID, chatID, cfg, s)
 }
 
 func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
@@ -305,6 +309,11 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 		}
 	case "continue":
 		if input == "yes" {
+			// Cancel timeout if continuing
+			select {
+			case s.timeoutCancel <- true:
+			default:
+			}
 			s.Stage = "service"
 			s.Selected = []string{}
 			s.Version = ""
@@ -317,13 +326,21 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 }
 
 func CancelDialog(userID, chatID int64, cfg *config.Config) bool {
-	if _, loaded := dialogs.LoadAndDelete(userID); loaded {
-		log.Printf("Dialog cancelled for user %d in chat %d", userID, chatID)
-		sendMessage(cfg, chatID, "当前会话已关闭。\nCurrent session has been closed.")
-		return true
+	state, loaded := dialogs.Load(userID)
+	if !loaded {
+		log.Printf("No active dialog to cancel for user %d in chat %d", userID, chatID)
+		return false
 	}
-	log.Printf("No active dialog to cancel for user %d in chat %d", userID, chatID)
-	return false
+	s := state.(*DialogState)
+	// Cancel timeout
+	select {
+	case s.timeoutCancel <- true:
+	default:
+	}
+	dialogs.Delete(userID)
+	log.Printf("Dialog cancelled for user %d in chat %d", userID, chatID)
+	sendMessage(cfg, chatID, "当前会话已关闭。\nCurrent session has been closed.")
+	return true
 }
 
 func IsDialogActive(userID int64) bool {
@@ -331,14 +348,16 @@ func IsDialogActive(userID int64) bool {
 	return ok
 }
 
-func monitorDialogTimeout(userID, chatID int64, cfg *config.Config) {
-	time.Sleep(time.Duration(cfg.DialogTimeout) * time.Second)
-	if state, loaded := dialogs.LoadAndDelete(userID); loaded {
-		s := state.(*DialogState)
-		if s.ChatID == chatID {
+func monitorDialogTimeout(userID, chatID int64, cfg *config.Config, s *DialogState) {
+	select {
+	case <-time.After(time.Duration(cfg.DialogTimeout) * time.Second):
+		if _, loaded := dialogs.Load(userID); loaded {
 			log.Printf("Dialog timed out for user %d in chat %d", userID, chatID)
 			sendMessage(cfg, chatID, "对话已超时，请重新触发部署。\nDialog timed out, please trigger deployment again.")
+			dialogs.Delete(userID)
 		}
+	case <-s.timeoutCancel:
+		log.Printf("Timeout cancelled for user %d in chat %d", userID, chatID)
 	}
 }
 
