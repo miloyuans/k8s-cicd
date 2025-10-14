@@ -112,6 +112,10 @@ func retryPendingTasks() {
 		}
 
 		for _, task := range tasks {
+			if task.Service == "" || task.Env == "" || task.Version == "" {
+				log.Printf("Invalid task parameters: service=%s, env=%s, version=%s", task.Service, task.Env, task.Version)
+				continue
+			}
 			taskKey := task.Service + "-" + task.Env + "-" + task.Version + "-" + task.Timestamp.Format(time.RFC3339)
 			if _, processed := processedTasks.Load(taskKey); processed {
 				log.Printf("Skipping already processed task: %s", taskKey)
@@ -143,6 +147,10 @@ func pollGateway() {
 			}
 
 			for _, task := range tasks {
+				if task.Service == "" || task.Env == "" || task.Version == "" {
+					log.Printf("Invalid task parameters: service=%s, env=%s, version=%s", task.Service, task.Env, task.Version)
+					continue
+				}
 				taskKey := task.Service + "-" + task.Env + "-" + task.Version + "-" + task.Timestamp.Format(time.RFC3339)
 				if _, processed := processedTasks.Load(taskKey); processed {
 					log.Printf("Skipping already processed task: %s", taskKey)

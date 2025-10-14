@@ -69,12 +69,9 @@ func GetDailyFileName(now time.Time, prefix, storageDir string) string {
 }
 
 func EnsureDailyFile(fileName string, client dynamic.Interface, cfg *config.Config) error {
-	storageMutex.Lock()
-	defer storageMutex.Unlock()
-
 	if _, err := os.Stat(fileName); os.IsNotExist(err) {
 		if prefix := strings.TrimSuffix(filepath.Base(fileName), filepath.Ext(fileName)); prefix == "deploy_"+time.Now().Format("2006-01-02") && client != nil {
-			InitDailyFile(fileName, client, cfg)
+			return InitDailyFile(fileName, client, cfg)
 		} else {
 			if err := os.WriteFile(fileName, []byte("[]"), 0644); err != nil {
 				fmt.Printf("Failed to initialize file %s: %v\n", fileName, err)
@@ -186,10 +183,7 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 	}
 }
 
-func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config) {
-	storageMutex.Lock()
-	defer storageMutex.Unlock()
-
+func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config) error {
 	var infos []DeploymentInfo
 	for env, namespace := range cfg.Environments {
 		deployments, err := client.Resource(schema.GroupVersionResource{
@@ -224,12 +218,13 @@ func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config
 	data, err := json.MarshalIndent(infos, "", "  ")
 	if err != nil {
 		fmt.Printf("Failed to marshal initial deploy file %s: %v\n", fileName, err)
-		return
+		return err
 	}
 	if err := os.WriteFile(fileName, data, 0644); err != nil {
 		fmt.Printf("Failed to write daily file %s: %v\n", fileName, err)
-		return
+		return err
 	}
+	return nil
 }
 
 func DailyMaintenance(cfg *config.Config, client dynamic.Interface) {
