@@ -42,34 +42,38 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config, userN
         return
     }
 
-    dialogs.Store(userID, &DialogState{
+    state := &DialogState{
         UserID:    userID,
         ChatID:    chatID,
         Service:   service,
         Stage:     "service",
         StartedAt: time.Now(),
         UserName:  userName,
-    })
+    }
+    dialogs.Store(userID, state)
 
     log.Printf("Started dialog for user %d in chat %d for service %s", userID, chatID, service)
     go monitorDialogTimeout(userID, chatID, cfg)
+    sendServiceSelection(userID, chatID, cfg, state)
+}
 
+func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogState) {
     serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
     if err != nil {
         log.Printf("Failed to load service lists for user %d: %v", userID, err)
         return
     }
-    services, exists := serviceLists[service]
+    services, exists := serviceLists[s.Service]
     if !exists {
-        log.Printf("No service list found for %s for user %d", service, userID)
+        log.Printf("No service list found for %s for user %d", s.Service, userID)
         return
     }
     if len(services) == 0 {
-        log.Printf("No services available for %s for user %d", service, userID)
+        log.Printf("No services available for %s for user %d", s.Service, userID)
         return
     }
 
-    log.Printf("Loaded %d services for %s: %v", len(services), service, services)
+    log.Printf("Loaded %d services for %s: %v", len(services), s.Service, services)
 
     // Calculate columns based on service name lengths and count
     maxLen := 0
@@ -220,7 +224,7 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
             s.Version = ""
             s.StartedAt = time.Now() // Reset timeout
             dialogs.Store(userID, s)
-            StartDialog(userID, chatID, s.Service, cfg, s.UserName)
+            sendServiceSelection(userID, chatID, cfg, s)
         } else if input == "no" {
             log.Printf("User %d chose to end dialog in chat %d", userID, chatID)
             CancelDialog(userID, chatID, cfg)
