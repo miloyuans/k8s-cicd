@@ -348,22 +348,56 @@ func worker() {
 		if result.Success {
 			log.Printf("Waiting for rollout for task %s", taskKey)
 			result.Success = k8sClient.WaitForRollout(ctx, task.DeployRequest.Service, namespace)
-			if !result.Success {
+			if result.Success {
+				// Additional asynchronous check for pod readiness
+				go func() {
+					checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Minute) // 5 min timeout for check
+					defer checkCancel()
+					ready, readyErr := k8sClient.CheckPodReadiness(checkCtx, task.DeployRequest.Service, namespace)
+					if !ready {
+						result.Success = false
+						result.ErrorMsg = fmt.Sprintf("Pods not ready after rollout: %v", readyErr)
+						log.Printf("Pods not ready for task %s: %v", taskKey, readyErr)
+						// Rollback asynchronously
+						rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
+						defer rollbackCancel()
+						k8sClient.RestoreDeployment(rollbackCtx, task.DeployRequest.Service, result.OldImage, namespace)
+						// Check rollback success
+						rollbackReady, rollbackErr := k8sClient.CheckPodReadiness(rollbackCtx, task.DeployRequest.Service, namespace)
+						if !rollbackReady {
+							result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+						} else {
+							result.ErrorMsg += "; Rollback succeeded, service restored."
+						}
+					}
+					// Send notification after all checks
+					telegram.SendTelegramNotification(cfg, result)
+				}()
+			} else {
 				result.ErrorMsg = "Rollout failed or timed out"
 				log.Printf("Rollout failed for task %s, restoring", taskKey)
 				k8sClient.RestoreDeployment(ctx, task.DeployRequest.Service, result.OldImage, namespace)
-			} else {
-				log.Printf("Rollout successful for task %s", taskKey)
+				// Check rollback
+				rollbackReady, rollbackErr := k8sClient.CheckPodReadiness(ctx, task.DeployRequest.Service, namespace)
+				if !rollbackReady {
+					result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+				} else {
+					result.ErrorMsg += "; Rollback succeeded, service restored."
+				}
+				telegram.SendTelegramNotification(cfg, result)
 			}
 		} else {
 			log.Printf("Update deployment failed for task %s: %s", taskKey, result.ErrorMsg)
-		}
-
-		if !result.Success {
-			log.Printf("Getting diagnostics for failed task %s", taskKey)
-			result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(ctx, task.DeployRequest.Service, namespace)
-			log.Printf("Restoring deployment for failed task %s", taskKey)
+			// Rollback on update failure
 			k8sClient.RestoreDeployment(ctx, task.DeployRequest.Service, result.OldImage, namespace)
+			// Check rollback
+			rollbackReady, rollbackErr := k8sClient.CheckPodReadiness(ctx, task.DeployRequest.Service, namespace)
+			if !rollbackReady {
+				result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+			} else {
+				result.ErrorMsg += "; Rollback succeeded, service restored."
+			}
+			telegram.SendTelegramNotification(cfg, result)
 		}
 
 		status := "success"
@@ -371,8 +405,6 @@ func worker() {
 			status = "failed"
 		}
 		storage.PersistDeployment(cfg, task.DeployRequest.Service, task.DeployRequest.Env, newImage, status, task.DeployRequest.UserName)
-
-		go telegram.SendTelegramNotification(cfg, result) // Always send notification
 
 		if result.Success {
 			feedbackCompleteToGateway(cfg, taskKey)

@@ -204,3 +204,32 @@ func (c *Client) getDeploymentEnvs(ctx context.Context, service, namespace strin
 	}
 	return result
 }
+
+func (c *Client) CheckPodReadiness(ctx context.Context, service, namespace string) (bool, error) {
+	podsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+	pods, err := c.client.Resource(podsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app=%s", service),
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to list pods: %v", err)
+	}
+
+	for _, pod := range pods.Items {
+		conditions, _, _ := unstructured.NestedSlice(pod.Object, "status", "conditions")
+		ready := false
+		for _, cond := range conditions {
+			c, ok := cond.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if c["type"] == "Ready" && c["status"] == "True" {
+				ready = true
+				break
+			}
+		}
+		if !ready {
+			return false, fmt.Errorf("pod %s not ready", pod.GetName())
+		}
+	}
+	return true, nil
+}
