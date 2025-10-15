@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"regexp" // Added import for regexp package
 	"strings"
 
 	"k8s-cicd/internal/config"
@@ -132,7 +133,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 	for categoryName, patterns := range cfg.ServiceKeywords {
 		for _, pattern := range patterns {
 			if strings.HasPrefix(pattern, "^") || strings.HasSuffix(pattern, "$") || strings.Contains(pattern, ".*") {
-				re, err := regexp.Compile(pattern)
+				re, err := regexp.Compile(pattern) // Line 135: Now resolved with regexp import
 				if err == nil && re.MatchString(result.Request.Service) {
 					category = categoryName
 					break
