@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt" // Added import
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath" // Added import
-	"strings"       // Added import
+	"path/filepath"
+	"strings"
 	"time"
 
 	"k8s-cicd/internal/config"
@@ -52,13 +52,13 @@ func main() {
 
 	go storage.DailyMaintenance(cfg, k8sClient.Client())
 	go pollGateway()
-	go updateServicesPeriodically() // New: periodic service update
+	go updateServicesPeriodically() // Periodic service update
 
 	select {} // Keep running
 }
 
 func updateServicesPeriodically() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(10 * time.Minute) // Changed to 10 minutes
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -107,28 +107,27 @@ func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error)
 	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
 	data, err := os.ReadFile(fileName)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read deploy file: %v", err)
 	}
 	var infos []storage.DeploymentInfo
 	if err := json.Unmarshal(data, &infos); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal deploy file: %v", err)
 	}
 
 	classified := make(map[string][]string)
-	seen := make(map[string]map[string]bool) // category -> service set
+	seenServices := make(map[string]bool) // Global service deduplication across namespaces
 
 	for _, info := range infos {
+		if seenServices[info.Service] {
+			continue // Skip duplicate service across namespaces
+		}
 		category := classifyService(info.Service, cfg.ServiceKeywords)
 		if category == "" {
-			continue // Discard unmatched
+			log.Printf("Service %s not matched to any category, discarding", info.Service)
+			continue // Discard unmatched services
 		}
-		if _, ok := seen[category]; !ok {
-			seen[category] = make(map[string]bool)
-		}
-		if !seen[category][info.Service] {
-			classified[category] = append(classified[category], info.Service)
-			seen[category][info.Service] = true
-		}
+		classified[category] = append(classified[category], info.Service)
+		seenServices[info.Service] = true
 	}
 
 	// Ensure files are initialized for each category

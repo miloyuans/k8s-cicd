@@ -125,7 +125,7 @@ func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) {
 
 func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) {
 	log.Printf("Attempting to send notification for service %s in env %s with success %t", result.Request.Service, result.Request.Env, result.Success)
-	
+
 	// Find category for service
 	category := ""
 	for keyword, cat := range cfg.ServiceKeywords {

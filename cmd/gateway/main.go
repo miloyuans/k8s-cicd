@@ -2,11 +2,11 @@ package main
 
 import (
 	"encoding/json"
-	"fmt" // Added import
+	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"path/filepath" // Added import
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -195,15 +195,20 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 			log.Printf("Failed to load existing services: %v", err)
 		}
 
+		// Global deduplication across all categories
+		globalSeen := make(map[string]bool)
+		for _, svcs := range existingServices {
+			for _, s := range svcs {
+				globalSeen[s] = true
+			}
+		}
+
 		for category, newSvcs := range services {
 			existing := existingServices[category]
-			seen := make(map[string]bool)
-			for _, s := range existing {
-				seen[s] = true
-			}
 			for _, s := range newSvcs {
-				if !seen[s] {
+				if !globalSeen[s] {
 					existing = append(existing, s)
+					globalSeen[s] = true
 				}
 			}
 			existingServices[category] = existing
@@ -212,6 +217,8 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 			data := strings.Join(existing, "\n")
 			if err := os.WriteFile(filePath, []byte(data), 0644); err != nil {
 				log.Printf("Failed to write service list %s: %v", filePath, err)
+			} else {
+				log.Printf("Updated service list %s with %d services", filePath, len(existing))
 			}
 		}
 
