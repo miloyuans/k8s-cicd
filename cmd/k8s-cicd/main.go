@@ -1,3 +1,4 @@
+// cicd_main.go
 package main
 
 import (
@@ -35,6 +36,9 @@ func main() {
 		log.Fatalf("Failed to create storage dir: %v", err)
 	}
 
+	// Check and initialize services directory if not exist
+	initServicesDir(cfg)
+
 	// Initialize all daily files and update deployment versions
 	storage.InitAllDailyFiles(cfg, k8sClient.Client())
 	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
@@ -52,19 +56,41 @@ func main() {
 
 	go storage.DailyMaintenance(cfg, k8sClient.Client())
 	go pollGateway()
-	go updateServicesPeriodically() // Periodic service update
+
+	// Immediate update services and report, then periodic
+	updateAndReportServices()
+	go periodicUpdateServices()
 
 	select {} // Keep running
 }
 
-func updateServicesPeriodically() {
-	ticker := time.NewTicker(10 * time.Minute) // Changed to 10 minutes
+func initServicesDir(cfg *config.Config) {
+	if _, err := os.Stat(cfg.ServicesDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(cfg.ServicesDir, 0755); err != nil {
+			log.Fatalf("Failed to create services dir: %v", err)
+		}
+		for category := range cfg.TelegramBots {
+			filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
+			if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+				log.Printf("Failed to init service file %s: %v", filePath, err)
+			}
+		}
+		log.Println("Initialized services directory and files")
+	}
+}
+
+func updateAndReportServices() {
+	log.Println("Immediate updating services")
+	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client()) // Collects services
+	reportServicesToGateway(cfg)
+}
+
+func periodicUpdateServices() {
+	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		log.Println("Updating services periodically")
-		storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client()) // Collects services
-		reportServicesToGateway(cfg)
+		updateAndReportServices()
 	}
 }
 
@@ -194,26 +220,33 @@ func reportToGateway(cfg *config.Config) {
 }
 
 func retryPendingTasks() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	for env := range cfg.Environments {
-		log.Printf("Retrying pending tasks for env %s", env)
-		tasks, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
+	for _, env := range cfg.Environments {
+		tasks, err := k8shttp.FetchTasks(context.Background(), cfg.GatewayURL, env)
 		if err != nil {
 			log.Printf("Failed to fetch pending tasks for env %s: %v", env, err)
 			continue
 		}
-		log.Printf("Fetched %d pending tasks for env %s", len(tasks), env)
-
 		for _, task := range tasks {
 			if task.Service == "" || task.Env == "" || task.Version == "" {
 				log.Printf("Invalid task parameters: service=%s, env=%s, version=%s", task.Service, task.Env, task.Version)
 				continue
 			}
 			taskKey := queue.ComputeTaskKey(task)
-			log.Printf("Retrying pending task: %s (service=%s, env=%s, version=%s)", taskKey, task.Service, task.Env, task.Version)
+			log.Printf("Queuing new task: %s (service=%s, env=%s, version=%s)", taskKey, task.Service, task.Env, task.Version)
 			taskQueue.Enqueue(queue.Task{DeployRequest: task})
+
+			// Log interaction on k8s-cicd side
+			storage.PersistInteraction(cfg, map[string]interface{}{
+				"endpoint":  "pollGateway",
+				"task_key":  taskKey,
+				"service":   task.Service,
+				"env":       task.Env,
+				"version":   task.Version,
+				"timestamp": time.Now().Format(time.RFC3339),
+			})
+		}
+		if len(tasks) == 0 {
+			log.Printf("No tasks fetched for env %s", env)
 		}
 	}
 }
@@ -223,41 +256,7 @@ func pollGateway() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		for env := range cfg.Environments {
-			log.Printf("Polling gateway for tasks in env %s", env)
-			tasks, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
-			if err != nil {
-				log.Printf("Failed to fetch tasks for env %s: %v", env, err)
-				continue
-			}
-			log.Printf("Fetched %d tasks for env %s", len(tasks), env)
-
-			for _, task := range tasks {
-				if task.Service == "" || task.Env == "" || task.Version == "" {
-					log.Printf("Invalid task parameters: service=%s, env=%s, version=%s", task.Service, task.Env, task.Version)
-					continue
-				}
-				taskKey := queue.ComputeTaskKey(task)
-				log.Printf("Queuing new task: %s (service=%s, env=%s, version=%s)", taskKey, task.Service, task.Env, task.Version)
-				taskQueue.Enqueue(queue.Task{DeployRequest: task})
-
-				// Log interaction on k8s-cicd side
-				storage.PersistInteraction(cfg, map[string]interface{}{
-					"endpoint":  "pollGateway",
-					"task_key":  taskKey,
-					"service":   task.Service,
-					"env":       task.Env,
-					"version":   task.Version,
-					"timestamp": time.Now().Format(time.RFC3339),
-				})
-			}
-			if len(tasks) == 0 {
-				log.Printf("No tasks fetched for env %s", env)
-			}
-		}
+		retryPendingTasks()
 	}
 }
 

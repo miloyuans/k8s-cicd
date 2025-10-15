@@ -1,3 +1,4 @@
+// storage.go
 package storage
 
 import (
@@ -145,12 +146,14 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 			}
 			container := containers[0].(map[string]interface{})
 			image, _, _ := unstructured.NestedString(container, "image")
+
 			found := false
 			for i := range infos {
 				if infos[i].Service == service && infos[i].Env == env {
 					infos[i].Image = image
 					infos[i].Timestamp = time.Now()
 					found = true
+					updated = true
 					break
 				}
 			}
@@ -160,8 +163,6 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 					Env:       env,
 					Image:     image,
 					Timestamp: time.Now(),
-					Status:    "running",
-					UserName:  "",
 				})
 				updated = true
 			}
@@ -182,41 +183,46 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 }
 
 func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config) error {
-	var infos []DeploymentInfo
-	for env, namespace := range cfg.Environments {
-		deployments, err := client.Resource(schema.GroupVersionResource{
-			Group:    "apps",
-			Version:  "v1",
-			Resource: "deployments",
-		}).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
-		if err != nil {
-			fmt.Printf("Failed to list deployments for env %s namespace %s: %v\n", env, namespace, err)
-			continue
-		}
+	storageMutex.Lock()
+	defer storageMutex.Unlock()
 
-		for _, dep := range deployments.Items {
-			service := dep.GetName()
-			containers, _, _ := unstructured.NestedSlice(dep.Object, "spec", "template", "spec", "containers")
-			if len(containers) == 0 {
+	var data []byte = []byte("[]")
+	var err error
+	if client != nil {
+		// For deploy files, initialize with current deployments
+		var infos []DeploymentInfo
+		for env, namespace := range cfg.Environments {
+			deployments, err := client.Resource(schema.GroupVersionResource{
+				Group:    "apps",
+				Version:  "v1",
+				Resource: "deployments",
+			}).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
+			if err != nil {
+				fmt.Printf("Failed to list deployments for env %s: %v\n", env, err)
 				continue
 			}
-			container := containers[0].(map[string]interface{})
-			image, _, _ := unstructured.NestedString(container, "image")
-			infos = append(infos, DeploymentInfo{
-				Service:   service,
-				Env:       env,
-				Image:     image,
-				Timestamp: time.Now(),
-				Status:    "running",
-				UserName:  "",
-			})
-		}
-	}
 
-	data, err := json.MarshalIndent(infos, "", "  ")
-	if err != nil {
-		fmt.Printf("Failed to marshal initial deploy file %s: %v\n", fileName, err)
-		return err
+			for _, dep := range deployments.Items {
+				service := dep.GetName()
+				containers, _, _ := unstructured.NestedSlice(dep.Object, "spec", "template", "spec", "containers")
+				if len(containers) == 0 {
+					continue
+				}
+				container := containers[0].(map[string]interface{})
+				image, _, _ := unstructured.NestedString(container, "image")
+				infos = append(infos, DeploymentInfo{
+					Service:   service,
+					Env:       env,
+					Image:     image,
+					Timestamp: time.Now(),
+				})
+			}
+		}
+		data, err = json.MarshalIndent(infos, "", "  ")
+		if err != nil {
+			fmt.Printf("Failed to marshal initial deploy data for %s: %v\n", fileName, err)
+			return err
+		}
 	}
 	if err := os.WriteFile(fileName, data, 0644); err != nil {
 		fmt.Printf("Failed to write daily file %s: %v\n", fileName, err)

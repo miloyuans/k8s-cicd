@@ -1,3 +1,4 @@
+// dialog.go
 package dialog
 
 import (
@@ -17,14 +18,15 @@ import (
 )
 
 type DialogState struct {
-	UserID    int64
-	ChatID    int64
-	Service   string
-	Stage     string // "service", "env", "version", "confirm", "continue"
-	Selected  []string
-	StartedAt time.Time
-	UserName  string
-	Version   string
+	UserID        int64
+	ChatID        int64
+	Service       string
+	Stage         string // "service", "env", "version", "confirm", "continue"
+	Selected      []string
+	SelectedEnvs  []string // For multi-select envs
+	StartedAt     time.Time
+	UserName      string
+	Version       string
 	timeoutCancel chan bool // New: channel to cancel timeout
 }
 
@@ -162,73 +164,51 @@ func sendEnvSelection(userID, chatID int64, cfg *config.Config, s *DialogState) 
 	envs := getEnvironmentsFromDeployFile(cfg)
 	if len(envs) == 0 {
 		log.Printf("No environments available for user %d", userID)
+		sendMessage(cfg, chatID, "No environments available.")
+		CancelDialog(userID, chatID, cfg)
 		return
 	}
 
+	// Build buttons for multi-select if >1 env
 	var buttons [][]tgbotapi.InlineKeyboardButton
 	var row []tgbotapi.InlineKeyboardButton
-	cols := 3
-	if len(envs) < cols {
-		cols = len(envs)
-	}
-	for i, env := range envs {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(env, env))
-		if len(row) == cols || i == len(envs)-1 {
+	for _, env := range envs {
+		buttonText := env
+		data := fmt.Sprintf("env:%s:select", env) // Callback data for select
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(buttonText, data))
+		if len(row) == 3 {
 			buttons = append(buttons, row)
 			row = []tgbotapi.InlineKeyboardButton{}
 		}
 	}
+	if len(row) > 0 {
+		buttons = append(buttons, row)
+	}
+
+	// Add confirm button
+	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("确认 / Confirm", "env:confirm"),
+	})
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msg := tgbotapi.NewMessage(chatID, "请选择一个环境：\nPlease select an environment:")
+	msgText := "请选择环境（支持多选）：\nPlease select environment(s) (multi-select supported):"
+	if len(envs) == 1 {
+		msgText = "请选择环境：\nPlease select environment:"
+	}
+	msg := tgbotapi.NewMessage(chatID, msgText)
 	msg.ReplyMarkup = keyboard
 	sendMessage(cfg, chatID, msg)
 }
 
 func sendVersionInput(userID, chatID int64, cfg *config.Config) {
-	msg := tgbotapi.NewMessage(chatID, "请输入版本号：\nPlease enter the version:")
+	msg := tgbotapi.NewMessage(chatID, "请输入版本号：\nPlease enter version:")
 	sendMessage(cfg, chatID, msg)
 }
 
 func sendConfirmation(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	// Get today's submission count and history for the same version
-	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
-	data, err := os.ReadFile(fileName)
-	if err != nil {
-		log.Printf("Failed to read deploy file for confirmation: %v", err)
-		return
-	}
-	var infos []storage.DeploymentInfo
-	if err := json.Unmarshal(data, &infos); err != nil {
-		log.Printf("Failed to unmarshal deploy file for confirmation: %v", err)
-		return
-	}
-
-	todayCount := 0
-	var historyMsg strings.Builder
-	for _, info := range infos {
-		if info.Service == s.Selected[0] && info.Env == s.Selected[1] && info.Timestamp.Day() == time.Now().Day() {
-			todayCount++
-		}
-		if info.Service == s.Selected[0] && info.Env == s.Selected[1] && strings.Contains(info.Image, ":"+s.Version) {
-			historyMsg.WriteString(fmt.Sprintf("- %s: %s\n", info.Env, info.Timestamp.Format("2006-01-02 15:04:05")))
-		}
-	}
-
-	var md strings.Builder
-	md.WriteString(fmt.Sprintf("**提交详情 / Submission Details**\n\n"))
-	md.WriteString(fmt.Sprintf("服务 / Service: **%s**\n", s.Selected[0]))
-	md.WriteString(fmt.Sprintf("版本 / Version: **%s**\n", s.Version))
-	md.WriteString(fmt.Sprintf("环境 / Environments: **%s**\n", strings.Join(s.Selected[1:], ", ")))
-	md.WriteString(fmt.Sprintf("当天提交数量 / Today's Submissions: **%d**\n", todayCount))
-	md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", s.UserName))
-
-	if historyMsg.Len() > 0 {
-		md.WriteString(fmt.Sprintf("\n**历史记录 / History** (same version):\n%s\n", historyMsg.String()))
-	}
-
-	md.WriteString("\n确认提交？ / Confirm submission?")
-
+	selectedEnvs := strings.Join(s.SelectedEnvs, ", ")
+	md := fmt.Sprintf("**确认部署 / Confirm Deployment**\n\n服务 / Service: **%s**\n环境 / Env: **%s**\n版本 / Version: **%s**\n\n确认？ / Confirm?",
+		s.Selected[0], selectedEnvs, s.Version)
 	buttons := [][]tgbotapi.InlineKeyboardButton{
 		{
 			tgbotapi.NewInlineKeyboardButtonData("确认 / Confirm", "confirm"),
@@ -236,21 +216,30 @@ func sendConfirmation(userID, chatID int64, cfg *config.Config, s *DialogState) 
 		},
 	}
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msg := tgbotapi.NewMessage(chatID, md.String())
+	msg := tgbotapi.NewMessage(chatID, md)
 	msg.ReplyMarkup = keyboard
 	msg.ParseMode = "Markdown"
 	sendMessage(cfg, chatID, msg)
+
+	// Start timeout
+	go monitorDialogTimeout(userID, chatID, cfg, s)
 }
 
 func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	for _, env := range s.Selected[1:] { // First element is service
+	// Cancel timeout
+	select {
+	case s.timeoutCancel <- true:
+	default:
+	}
+
+	service := s.Selected[0]
+	for _, env := range s.SelectedEnvs {
 		task := types.DeployRequest{
-			Service:   s.Selected[0],
+			Service:   service,
 			Env:       env,
 			Version:   s.Version,
 			Timestamp: time.Now(),
 			UserName:  s.UserName,
-			Status:    "pending",
 		}
 		taskQueue.Enqueue(queue.Task{DeployRequest: task})
 		// Persist deployment info immediately to ensure history is recorded
@@ -292,10 +281,36 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 		dialogs.Store(userID, s)
 		sendEnvSelection(userID, chatID, cfg, s)
 	case "env":
-		s.Selected = append(s.Selected, input)
-		s.Stage = "version"
-		dialogs.Store(userID, s)
-		sendVersionInput(userID, chatID, cfg)
+		if strings.HasPrefix(input, "env:") {
+			parts := strings.Split(input, ":")
+			if len(parts) == 3 && parts[2] == "select" {
+				env := parts[1]
+				if contains(s.SelectedEnvs, env) {
+					// Deselect
+					for i, e := range s.SelectedEnvs {
+						if e == env {
+							s.SelectedEnvs = append(s.SelectedEnvs[:i], s.SelectedEnvs[i+1:]...)
+							break
+						}
+					}
+				} else {
+					// Select
+					s.SelectedEnvs = append(s.SelectedEnvs, env)
+				}
+				dialogs.Store(userID, s)
+				// Refresh buttons with selected state (Telegram doesn't support dynamic update, so resend message)
+				sendEnvSelection(userID, chatID, cfg, s)
+				return
+			} else if input == "env:confirm" {
+				if len(s.SelectedEnvs) == 0 {
+					sendMessage(cfg, chatID, "Please select at least one environment.")
+					return
+				}
+				s.Stage = "version"
+				dialogs.Store(userID, s)
+				sendVersionInput(userID, chatID, cfg)
+			}
+		}
 	case "version":
 		s.Version = input
 		s.Stage = "confirm"
@@ -316,6 +331,7 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 			}
 			s.Stage = "service"
 			s.Selected = []string{}
+			s.SelectedEnvs = []string{}
 			s.Version = ""
 			dialogs.Store(userID, s)
 			sendServiceSelection(userID, chatID, cfg, s)

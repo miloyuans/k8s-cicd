@@ -1,3 +1,4 @@
+// types/types.go
 package types
 
 import "time"

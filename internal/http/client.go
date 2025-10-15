@@ -1,3 +1,4 @@
+// http/client.go
 package http
 
 import (
@@ -5,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-
-	"k8s-cicd/internal/types"
 )
 
 func FetchTasks(ctx context.Context, gatewayURL, env string) ([]types.DeployRequest, error) {
