@@ -129,9 +129,20 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 
 	// Find category for service
 	category := ""
-	for keyword, cat := range cfg.ServiceKeywords {
-		if strings.Contains(result.Request.Service, keyword) {
-			category = cat
+	for categoryName, patterns := range cfg.ServiceKeywords {
+		for _, pattern := range patterns {
+			if strings.HasPrefix(pattern, "^") || strings.HasSuffix(pattern, "$") || strings.Contains(pattern, ".*") {
+				re, err := regexp.Compile(pattern)
+				if err == nil && re.MatchString(result.Request.Service) {
+					category = categoryName
+					break
+				}
+			} else if strings.Contains(result.Request.Service, pattern) {
+				category = categoryName
+				break
+			}
+		}
+		if category != "" {
 			break
 		}
 	}
@@ -175,7 +186,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 		md.WriteString(fmt.Sprintf("版本 / Version: **%s**\n", result.Request.Version))
 		md.WriteString(fmt.Sprintf("错误 / Error: **%s**\n", result.ErrorMsg))
 		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", result.Request.UserName))
-		md.WriteString("\n**🔍 诊断信息 / Diagnostics**\n\n") // Fixed: Removed extra )
+		md.WriteString("\n**🔍 诊断信息 / Diagnostics**\n\n")
 		md.WriteString(fmt.Sprintf("事件 / Events:\n%s\n", result.Events))
 		md.WriteString("环境变量 / Environment Variables:\n")
 		for k, v := range result.Envs {
