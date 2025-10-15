@@ -43,13 +43,7 @@ func LoadConfig(filePath string) *Config {
 		fmt.Fprintf(os.Stderr, "Failed to unmarshal config: %v\n", err)
 		os.Exit(1)
 	}
-	// Parse service_keywords into lists
-	parsedKeywords := make(map[string][]string)
-	for keyword, patterns := range cfg.ServiceKeywords {
-		parsedKeywords[keyword] = strings.Split(patterns[0], "|")
-	}
-	cfg.ServiceKeywords = parsedKeywords
-
+	// No need to manually split patterns; YAML parser handles []string directly
 	if cfg.TimeoutSeconds == 0 {
 		cfg.TimeoutSeconds = 300
 	}
