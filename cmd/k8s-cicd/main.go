@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -107,25 +108,38 @@ func reportServicesToGateway(cfg *config.Config) {
 		return
 	}
 
-	req, err := http.NewRequest("POST", cfg.GatewayURL+"/services", bytes.NewBuffer(data))
-	if err != nil {
-		log.Printf("Failed to create services request: %v", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
+	// Retry logic for gateway connection
+	const maxRetries = 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest("POST", cfg.GatewayURL+"/services", bytes.NewBuffer(data))
+		if err != nil {
+			log.Printf("Failed to create services request (attempt %d/%d): %v", attempt, maxRetries, err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Failed to send services to gateway: %v", err)
-		return
-	}
-	defer resp.Body.Close()
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Failed to send services to gateway (attempt %d/%d): %v", attempt, maxRetries, err)
+			if attempt == maxRetries {
+				return
+			}
+			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
+			continue
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Gateway services failed with status: %d", resp.StatusCode)
-	} else {
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Gateway services failed with status %d (attempt %d/%d)", resp.StatusCode, attempt, maxRetries)
+			if attempt == maxRetries {
+				return
+			}
+			continue
+		}
+
 		log.Printf("Successfully reported services to gateway")
+		return
 	}
 }
 
@@ -169,10 +183,19 @@ func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error)
 	return classified, nil
 }
 
-func classifyService(service string, keywords map[string]string) string {
-	for keyword, category := range keywords {
-		if strings.Contains(service, keyword) {
-			return category
+func classifyService(service string, keywords map[string][]string) string {
+	for category, patterns := range keywords {
+		for _, pattern := range patterns {
+			// Try regex match if pattern looks like a regex
+			if strings.HasPrefix(pattern, "^") || strings.HasSuffix(pattern, "$") || strings.Contains(pattern, ".*") {
+				re, err := regexp.Compile(pattern)
+				if err == nil && re.MatchString(service) {
+					return category
+				}
+			} else if strings.Contains(service, pattern) {
+				// Fallback to substring match
+				return category
+			}
 		}
 	}
 	return ""
@@ -197,25 +220,38 @@ func reportToGateway(cfg *config.Config) {
 		return
 	}
 
-	req, err := http.NewRequest("POST", cfg.GatewayURL+"/report", bytes.NewBuffer(reportData))
-	if err != nil {
-		log.Printf("Failed to create report request: %v", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
+	// Retry logic for gateway report
+	const maxRetries = 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest("POST", cfg.GatewayURL+"/report", bytes.NewBuffer(reportData))
+		if err != nil {
+			log.Printf("Failed to create report request (attempt %d/%d): %v", attempt, maxRetries, err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Failed to send report to gateway: %v", err)
-		return
-	}
-	defer resp.Body.Close()
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Failed to send report to gateway (attempt %d/%d): %v", attempt, maxRetries, err)
+			if attempt == maxRetries {
+				return
+			}
+			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
+			continue
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Gateway report failed with status: %d", resp.StatusCode)
-	} else {
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Gateway report failed with status %d (attempt %d/%d)", resp.StatusCode, attempt, maxRetries)
+			if attempt == maxRetries {
+				return
+			}
+			continue
+		}
+
 		log.Printf("Successfully reported to gateway")
+		return
 	}
 }
 
@@ -339,24 +375,37 @@ func feedbackCompleteToGateway(cfg *config.Config, taskKey string) {
 		return
 	}
 
-	req, err := http.NewRequest("POST", cfg.GatewayURL+"/complete", bytes.NewBuffer(data))
-	if err != nil {
-		log.Printf("Failed to create complete request for task %s: %v", taskKey, err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
+	// Retry logic for gateway complete
+	const maxRetries = 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest("POST", cfg.GatewayURL+"/complete", bytes.NewBuffer(data))
+		if err != nil {
+			log.Printf("Failed to create complete request for task %s (attempt %d/%d): %v", taskKey, attempt, maxRetries, err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Failed to send complete to gateway for task %s: %v", taskKey, err)
-		return
-	}
-	defer resp.Body.Close()
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Failed to send complete to gateway for task %s (attempt %d/%d): %v", taskKey, attempt, maxRetries, err)
+			if attempt == maxRetries {
+				return
+			}
+			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
+			continue
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Gateway complete failed with status %d for task %s", resp.StatusCode, taskKey)
-	} else {
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Gateway complete failed with status %d for task %s (attempt %d/%d)", resp.StatusCode, taskKey, attempt, maxRetries)
+			if attempt == maxRetries {
+				return
+			}
+			continue
+		}
+
 		log.Printf("Feedback complete for task %s", taskKey)
+		return
 	}
 }

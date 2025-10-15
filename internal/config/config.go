@@ -12,24 +12,24 @@ import (
 )
 
 type Config struct {
-	GatewayURL         string            `yaml:"gateway_url"`
-	GatewayListenAddr  string            `yaml:"gateway_listen_addr"`
-	AllowedIPs         []string          `yaml:"allowed_ips"`
-	PollInterval       int               `yaml:"poll_interval"`
-	TelegramBots       map[string]string `yaml:"telegram_bots"`
-	TelegramChats      map[string]int64  `yaml:"telegram_chats"`
-	ServiceKeywords    map[string]string `yaml:"service_keywords"` // keyword: category
-	KubeConfigPath     string            `yaml:"kube_config_path"`
-	Namespace          string            `yaml:"namespace"`
-	TimeoutSeconds     int               `yaml:"timeout_seconds"`
-	MaxConcurrency     int               `yaml:"max_concurrency"`
-	TriggerKeywords    []string          `yaml:"trigger_keyword"`
-	CancelKeywords     []string          `yaml:"cancel_keyword"`
-	InvalidResponses   []string          `yaml:"invalid_responses"`
-	ServicesDir        string            `yaml:"services_dir"`
-	Environments       map[string]string `yaml:"environments"`
-	DialogTimeout      int               `yaml:"dialog_timeout"`
-	StorageDir         string            // Added for configurable storage directory
+	GatewayURL         string              `yaml:"gateway_url"`
+	GatewayListenAddr  string              `yaml:"gateway_listen_addr"`
+	AllowedIPs         []string            `yaml:"allowed_ips"`
+	PollInterval       int                 `yaml:"poll_interval"`
+	TelegramBots       map[string]string   `yaml:"telegram_bots"`
+	TelegramChats      map[string]int64    `yaml:"telegram_chats"`
+	ServiceKeywords    map[string][]string `yaml:"service_keywords"` // keyword: list of patterns
+	KubeConfigPath     string              `yaml:"kube_config_path"`
+	Namespace          string              `yaml:"namespace"`
+	TimeoutSeconds     int                 `yaml:"timeout_seconds"`
+	MaxConcurrency     int                 `yaml:"max_concurrency"`
+	TriggerKeywords    []string            `yaml:"trigger_keyword"`
+	CancelKeywords     []string            `yaml:"cancel_keyword"`
+	InvalidResponses   []string            `yaml:"invalid_responses"`
+	ServicesDir        string              `yaml:"services_dir"`
+	Environments       map[string]string   `yaml:"environments"`
+	DialogTimeout      int                 `yaml:"dialog_timeout"`
+	StorageDir         string              // Added for configurable storage directory
 }
 
 func LoadConfig(filePath string) *Config {
@@ -43,6 +43,13 @@ func LoadConfig(filePath string) *Config {
 		fmt.Fprintf(os.Stderr, "Failed to unmarshal config: %v\n", err)
 		os.Exit(1)
 	}
+	// Parse service_keywords into lists
+	parsedKeywords := make(map[string][]string)
+	for keyword, patterns := range cfg.ServiceKeywords {
+		parsedKeywords[keyword] = strings.Split(patterns[0], "|")
+	}
+	cfg.ServiceKeywords = parsedKeywords
+
 	if cfg.TimeoutSeconds == 0 {
 		cfg.TimeoutSeconds = 300
 	}
