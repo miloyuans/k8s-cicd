@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"regexp" // Added import for regexp package
+	"regexp"
 	"strings"
 
 	"k8s-cicd/internal/config"
@@ -133,7 +133,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 	for categoryName, patterns := range cfg.ServiceKeywords {
 		for _, pattern := range patterns {
 			if strings.HasPrefix(pattern, "^") || strings.HasSuffix(pattern, "$") || strings.Contains(pattern, ".*") {
-				re, err := regexp.Compile(pattern) // Line 135: Now resolved with regexp import
+				re, err := regexp.Compile(pattern)
 				if err == nil && re.MatchString(result.Request.Service) {
 					category = categoryName
 					break
@@ -176,7 +176,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 		md.WriteString(fmt.Sprintf("服务 / Service: **%s**\n", result.Request.Service))
 		md.WriteString(fmt.Sprintf("环境 / Environment: **%s**\n", result.Request.Env))
 		md.WriteString(fmt.Sprintf("新版本 / New Version: **%s**\n", result.Request.Version))
-		md.WriteString(fmt.Sprintf("旧镜像 / Old Image: **%s**\n", result.OldImage))
+		md.WriteString(fmt.Sprintf("旧版本 / Old Version: **%s**\n", getVersionFromImage(result.OldImage)))
 		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", result.Request.UserName))
 		md.WriteString("\n✅ 部署成功完成！\n✅ Deployment completed successfully!\n")
 		md.WriteString(fmt.Sprintf("\n**部署时间 / Deployed at**: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
@@ -184,7 +184,8 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 		md.WriteString(fmt.Sprintf("**❌ 部署失败 / Deployment Failed**\n\n"))
 		md.WriteString(fmt.Sprintf("服务 / Service: **%s**\n", result.Request.Service))
 		md.WriteString(fmt.Sprintf("环境 / Environment: **%s**\n", result.Request.Env))
-		md.WriteString(fmt.Sprintf("版本 / Version: **%s**\n", result.Request.Version))
+		md.WriteString(fmt.Sprintf("尝试版本 / Attempted Version: **%s**\n", result.Request.Version))
+		md.WriteString(fmt.Sprintf("回滚版本 / Rollback Version: **%s**\n", getVersionFromImage(result.OldImage)))
 		md.WriteString(fmt.Sprintf("错误 / Error: **%s**\n", result.ErrorMsg))
 		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", result.Request.UserName))
 		md.WriteString("\n**🔍 诊断信息 / Diagnostics**\n\n")
@@ -194,7 +195,6 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 			md.WriteString(fmt.Sprintf("- %s: **%s**\n", k, v))
 		}
 		md.WriteString(fmt.Sprintf("\n日志 / Logs: **%s**\n", result.Logs))
-		md.WriteString("\n⚠️ **回滚完成 / Rollback completed**\n")
 		md.WriteString(fmt.Sprintf("\n**失败时间 / Failed at**: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
 	}
 
@@ -205,4 +205,12 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 	} else {
 		log.Printf("Successfully sent notification for service %s in env %s with success %t", result.Request.Service, result.Request.Env, result.Success)
 	}
+}
+
+func getVersionFromImage(image string) string {
+	parts := strings.Split(image, ":")
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return "unknown"
 }
