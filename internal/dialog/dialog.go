@@ -88,10 +88,14 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 		}
 	}
 	cols := 2
-	if maxLen < 10 {
+	if maxLen <= 10 {
 		cols = 4 // Short names, use 4 columns
-	} else if maxLen < 15 {
+	} else if maxLen <= 20 {
 		cols = 3 // Medium names, use 3 columns
+	} else if maxLen <= 30 {
+		cols = 2 // Longer names, use 2 columns
+	} else {
+		cols = 1 // Very long names, use 1 column to avoid truncation
 	}
 	if len(services) < cols {
 		cols = len(services) // Fewer services than columns, use service count
@@ -101,14 +105,19 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 	var buttons [][]tgbotapi.InlineKeyboardButton
 	var row []tgbotapi.InlineKeyboardButton
 	for i, svc := range services {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(svc, svc))
+		// Shorten if too long (optional, but Telegram buttons can handle up to ~64 chars, display may truncate)
+		buttonText := svc
+		if len(buttonText) > 30 {
+			buttonText = buttonText[:27] + "..." // Truncate for display, but keep full in data
+		}
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(buttonText, svc))
 		if len(row) == cols || i == len(services)-1 {
 			buttons = append(buttons, row)
 			row = []tgbotapi.InlineKeyboardButton{}
 		}
 	}
 
-	log.Printf("Generated %d rows with %d columns for %d services for user %d", len(buttons), cols, len(services), userID)
+	log.Printf("Generated %d rows with %d columns for %d services for user %d (maxLen: %d)", len(buttons), cols, len(services), userID, maxLen)
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
 	msg := tgbotapi.NewMessage(chatID, "请选择一个服务：\nPlease select a service:")

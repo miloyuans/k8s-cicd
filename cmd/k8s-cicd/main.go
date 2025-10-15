@@ -170,13 +170,20 @@ func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error)
 		seenServices[info.Service] = true
 	}
 
-	// Ensure files are initialized for each category
-	for category := range classified {
+	// Ensure files are initialized for each category and save classified services locally
+	for category, svcs := range classified {
 		filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
 			if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
 				log.Printf("Failed to init service file %s: %v", filePath, err)
 			}
+		}
+		// Save classified services to local file
+		data := strings.Join(svcs, "\n")
+		if err := os.WriteFile(filePath, []byte(data), 0644); err != nil {
+			log.Printf("Failed to write local service list %s: %v", filePath, err)
+		} else {
+			log.Printf("Saved %d services to local %s", len(svcs), filePath)
 		}
 	}
 
