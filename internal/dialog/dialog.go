@@ -149,7 +149,8 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
 	// Extract unique environments
 	envSet := make(map[string]bool)
 	for _, info := range infos {
-		envSet[info.Env] = true
+		lowerEnv := strings.ToLower(info.Env)
+		envSet[lowerEnv] = true
 	}
 
 	var envs []string
@@ -256,7 +257,7 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	for _, env := range s.SelectedEnvs {
 		task := types.DeployRequest{
 			Service:   service,
-			Env:       env,
+			Env:       strings.ToLower(env), // Normalize env
 			Version:   s.Version,
 			Timestamp: time.Now(),
 			UserName:  s.UserName,

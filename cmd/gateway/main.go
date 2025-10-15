@@ -64,9 +64,9 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 				http.Error(w, "Missing env parameter", http.StatusBadRequest)
 				return
 			}
-
-			tasks := taskQueue.GetPendingTasks(env)
-			log.Printf("Serving %d pending tasks for env %s", len(tasks), env)
+			lowerEnv := strings.ToLower(env) // Normalize env
+			tasks := taskQueue.GetPendingTasks(lowerEnv)
+			log.Printf("Received GET for env %s from IP %s, returning %d tasks", lowerEnv, clientIP, len(tasks))
 
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(tasks); err != nil {
@@ -78,7 +78,7 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 			storage.PersistInteraction(cfg, map[string]interface{}{
 				"endpoint":  "/tasks",
 				"method":    "GET",
-				"env":       env,
+				"env":       lowerEnv,
 				"tasks":     len(tasks),
 				"timestamp": time.Now().Format(time.RFC3339),
 			})
@@ -174,7 +174,6 @@ func handleComplete(cfg *config.Config) http.HandlerFunc {
 	}
 }
 
-// New handler for receiving services from k8s-cicd
 func handleServices(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

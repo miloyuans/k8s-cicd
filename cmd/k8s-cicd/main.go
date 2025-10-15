@@ -48,7 +48,8 @@ func main() {
 	// Initialize task queue
 	taskQueue = queue.NewQueue(cfg, 100)
 
-	// Retry pending tasks from gateway
+	// Immediate poll to reduce initial delay
+	log.Println("Performing initial task poll")
 	retryPendingTasks()
 
 	for i := 0; i < cfg.MaxConcurrency; i++ {
@@ -191,15 +192,17 @@ func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error)
 }
 
 func classifyService(service string, keywords map[string][]string) string {
+	lowerService := strings.ToLower(service)
 	for category, patterns := range keywords {
 		for _, pattern := range patterns {
+			lowerPattern := strings.ToLower(pattern)
 			// Try regex match if pattern looks like a regex
-			if strings.HasPrefix(pattern, "^") || strings.HasSuffix(pattern, "$") || strings.Contains(pattern, ".*") {
-				re, err := regexp.Compile(pattern)
-				if err == nil && re.MatchString(service) {
+			if strings.HasPrefix(lowerPattern, "^") || strings.HasSuffix(lowerPattern, "$") || strings.Contains(lowerPattern, ".*") {
+				re, err := regexp.Compile(lowerPattern)
+				if err == nil && re.MatchString(lowerService) {
 					return category
 				}
-			} else if strings.Contains(service, pattern) {
+			} else if strings.Contains(lowerService, lowerPattern) {
 				// Fallback to substring match
 				return category
 			}
@@ -263,17 +266,21 @@ func reportToGateway(cfg *config.Config) {
 }
 
 func retryPendingTasks() {
-	for _, env := range cfg.Environments {
-		tasks, err := k8shttp.FetchTasks(context.Background(), cfg.GatewayURL, env)
+	log.Printf("Polling tasks for environments: %v", cfg.Environments)
+	for env := range cfg.Environments {
+		lowerEnv := strings.ToLower(env)
+		tasks, err := k8shttp.FetchTasks(context.Background(), cfg.GatewayURL, lowerEnv)
 		if err != nil {
-			log.Printf("Failed to fetch pending tasks for env %s: %v", env, err)
+			log.Printf("Failed to fetch pending tasks for env %s: %v", lowerEnv, err)
 			continue
 		}
+		log.Printf("Fetched %d tasks for env %s", len(tasks), lowerEnv)
 		for _, task := range tasks {
 			if task.Service == "" || task.Env == "" || task.Version == "" {
 				log.Printf("Invalid task parameters: service=%s, env=%s, version=%s", task.Service, task.Env, task.Version)
 				continue
 			}
+			task.Env = strings.ToLower(task.Env) // Normalize task env
 			taskKey := queue.ComputeTaskKey(task)
 			log.Printf("Queuing new task: %s (service=%s, env=%s, version=%s)", taskKey, task.Service, task.Env, task.Version)
 			taskQueue.Enqueue(queue.Task{DeployRequest: task})
@@ -289,7 +296,7 @@ func retryPendingTasks() {
 			})
 		}
 		if len(tasks) == 0 {
-			log.Printf("No tasks fetched for env %s", env)
+			log.Printf("No tasks fetched for env %s", lowerEnv)
 		}
 	}
 }
@@ -313,7 +320,7 @@ func worker() {
 			Envs:    make(map[string]string),
 		}
 
-		namespace, ok := cfg.Environments[task.DeployRequest.Env]
+		namespace, ok := cfg.Environments[strings.ToLower(task.DeployRequest.Env)]
 		if !ok {
 			log.Printf("No namespace found for env %s, skipping task %s", task.DeployRequest.Env, taskKey)
 			return

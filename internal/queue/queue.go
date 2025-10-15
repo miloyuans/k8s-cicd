@@ -44,6 +44,7 @@ func (q *Queue) Enqueue(task Task) {
 	q.tasks <- task
 	q.persistTask(task)
 	fmt.Printf("Enqueued task %s (service=%s, env=%s, version=%s)\n", taskKey, task.DeployRequest.Service, task.DeployRequest.Env, task.DeployRequest.Version)
+	log.Printf("Enqueued task %s for env %s", taskKey, task.DeployRequest.Env)
 }
 
 func (q *Queue) Dequeue() <-chan Task {
@@ -52,13 +53,15 @@ func (q *Queue) Dequeue() <-chan Task {
 
 func (q *Queue) GetPendingTasks(env string) []types.DeployRequest {
 	var tasks []types.DeployRequest
+	lowerEnv := strings.ToLower(env)
 	q.taskMap.Range(func(key, value interface{}) bool {
 		task := value.(Task)
-		if task.DeployRequest.Env == env && task.DeployRequest.Status == "pending" {
+		if strings.ToLower(task.DeployRequest.Env) == lowerEnv && task.DeployRequest.Status == "pending" {
 			tasks = append(tasks, task.DeployRequest)
 		}
 		return true
 	})
+	log.Printf("Returning %d pending tasks for env %s", len(tasks), lowerEnv)
 	return tasks
 }
 

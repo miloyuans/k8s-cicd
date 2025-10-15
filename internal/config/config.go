@@ -43,7 +43,13 @@ func LoadConfig(filePath string) *Config {
 		fmt.Fprintf(os.Stderr, "Failed to unmarshal config: %v\n", err)
 		os.Exit(1)
 	}
-	// No need to manually split patterns; YAML parser handles []string directly
+	// Normalize environment keys to lowercase
+	for k, v := range cfg.Environments {
+		delete(cfg.Environments, k)
+		cfg.Environments[strings.ToLower(k)] = v
+	}
+	// Debug: Log loaded ServiceKeywords
+	log.Printf("Loaded ServiceKeywords: %v", cfg.ServiceKeywords)
 	if cfg.TimeoutSeconds == 0 {
 		cfg.TimeoutSeconds = 300
 	}
@@ -51,7 +57,7 @@ func LoadConfig(filePath string) *Config {
 		cfg.MaxConcurrency = 10
 	}
 	if cfg.PollInterval == 0 {
-		cfg.PollInterval = 60
+		cfg.PollInterval = 10 // Reduced to 10s for faster polling
 	}
 	if cfg.ServicesDir == "" {
 		cfg.ServicesDir = "services"
