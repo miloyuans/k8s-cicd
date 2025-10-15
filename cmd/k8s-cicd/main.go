@@ -20,6 +20,10 @@ import (
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"           // Added for metav1
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured" // Added for unstructured
+	"k8s.io/apimachinery/pkg/runtime/schema"            // Added for schema
 )
 
 var (
