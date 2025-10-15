@@ -336,8 +336,12 @@ func worker() {
 		newImage, err := k8sClient.GetNewImage(task.DeployRequest.Service, task.DeployRequest.Version, namespace)
 		if err != nil {
 			result.Success = false
-			result.ErrorMsg = fmt.Sprintf("Failed to get new image: %v", err)
-			log.Printf("Failed to get new image for task %s: %v", taskKey, err)
+			if strings.Contains(err.Error(), "not found") {
+				result.ErrorMsg = fmt.Sprintf("Service %s not found in environment %s, no task execution needed", task.DeployRequest.Service, task.DeployRequest.Env)
+			} else {
+				result.ErrorMsg = fmt.Sprintf("Failed to get new image: %v", err)
+			}
+			log.Printf("%s for task %s", result.ErrorMsg, taskKey)
 			storage.PersistDeployment(cfg, task.DeployRequest.Service, task.DeployRequest.Env, "", "failed", task.DeployRequest.UserName)
 			go telegram.SendTelegramNotification(cfg, result)
 			return
