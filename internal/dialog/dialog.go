@@ -87,29 +87,27 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 			maxLen = len(svc)
 		}
 	}
-	cols := 2
-	if maxLen <= 10 {
-		cols = 4 // Short names, use 4 columns
-	} else if maxLen <= 20 {
-		cols = 3 // Medium names, use 3 columns
-	} else if maxLen <= 30 {
+	cols := 4
+	if maxLen > 10 && maxLen <= 15 {
+		cols = 3 // Short to medium names, use 3 columns
+	} else if maxLen > 15 && maxLen <= 25 {
 		cols = 2 // Longer names, use 2 columns
-	} else {
-		cols = 1 // Very long names, use 1 column to avoid truncation
+	} else if maxLen > 25 {
+		cols = 2 // Very long names, use 2 columns to avoid truncation
 	}
 	if len(services) < cols {
 		cols = len(services) // Fewer services than columns, use service count
+	}
+	if cols < 2 && len(services) > 1 {
+		cols = 2 // Enforce at least 2 columns if possible
 	}
 
 	// Build multi-column button layout
 	var buttons [][]tgbotapi.InlineKeyboardButton
 	var row []tgbotapi.InlineKeyboardButton
 	for i, svc := range services {
-		// Shorten if too long (optional, but Telegram buttons can handle up to ~64 chars, display may truncate)
+		// No truncation; let Telegram handle ellipsis if needed
 		buttonText := svc
-		if len(buttonText) > 30 {
-			buttonText = buttonText[:27] + "..." // Truncate for display, but keep full in data
-		}
 		row = append(row, tgbotapi.NewInlineKeyboardButtonData(buttonText, svc))
 		if len(row) == cols || i == len(services)-1 {
 			buttons = append(buttons, row)
