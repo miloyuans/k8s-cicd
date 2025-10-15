@@ -330,6 +330,7 @@ func worker() {
 			result.Success = false
 			result.ErrorMsg = fmt.Sprintf("No namespace found for environment %s", task.DeployRequest.Env)
 			go telegram.SendTelegramNotification(cfg, result)
+			feedbackCompleteToGateway(cfg, taskKey)
 			return
 		}
 
@@ -344,6 +345,7 @@ func worker() {
 			log.Printf("%s for task %s", result.ErrorMsg, taskKey)
 			storage.PersistDeployment(cfg, task.DeployRequest.Service, task.DeployRequest.Env, "", "failed", task.DeployRequest.UserName)
 			go telegram.SendTelegramNotification(cfg, result)
+			feedbackCompleteToGateway(cfg, taskKey)
 			return
 		}
 		log.Printf("Got new image %s for task %s", newImage, taskKey)
@@ -402,6 +404,7 @@ func worker() {
 				}
 				storage.PersistDeployment(cfg, task.DeployRequest.Service, task.DeployRequest.Env, newImage, "failed", task.DeployRequest.UserName)
 				go telegram.SendTelegramNotification(cfg, result)
+				feedbackCompleteToGateway(cfg, taskKey)
 			}
 		} else {
 			log.Printf("Update deployment failed for task %s: %s", taskKey, result.ErrorMsg)
@@ -414,6 +417,7 @@ func worker() {
 			}
 			storage.PersistDeployment(cfg, task.DeployRequest.Service, task.DeployRequest.Env, newImage, "failed", task.DeployRequest.UserName)
 			go telegram.SendTelegramNotification(cfg, result)
+			feedbackCompleteToGateway(cfg, taskKey)
 		}
 	}
 }

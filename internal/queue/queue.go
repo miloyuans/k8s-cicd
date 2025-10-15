@@ -4,10 +4,10 @@ package queue
 import (
 	"encoding/json"
 	"fmt"
-	"log"      // Added import for log package
+	"log"
 	"os"
 	"path/filepath"
-	"strings"  // Added import for strings package
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +32,7 @@ func NewQueue(cfg *config.Config, capacity int) *Queue {
 		cfg:     cfg,
 	}
 	go q.loadPendingTasks()
+	go q.cleanupExpiredTasks() // Start cleanup goroutine
 	return q
 }
 
@@ -150,6 +151,26 @@ func (q *Queue) loadPendingTasks() {
 				fmt.Printf("Loaded pending task %s (service=%s, env=%s, version=%s)\n", taskKey, t.Service, t.Env, t.Version)
 			}
 		}
+	}
+}
+
+// cleanupExpiredTasks periodically cleans up pending tasks older than 30 minutes
+func (q *Queue) cleanupExpiredTasks() {
+	ticker := time.NewTicker(5 * time.Minute) // Check every 5 minutes
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := time.Now()
+		q.taskMap.Range(func(key, value interface{}) bool {
+			task := value.(Task)
+			if task.DeployRequest.Status == "pending" && now.Sub(task.DeployRequest.Timestamp) > 30*time.Minute {
+				log.Printf("Cleaning up expired pending task %s (age: %v)", key, now.Sub(task.DeployRequest.Timestamp))
+				task.DeployRequest.Status = "expired"
+				q.persistTask(task)
+				q.taskMap.Delete(key)
+			}
+			return true
+		})
 	}
 }
 
