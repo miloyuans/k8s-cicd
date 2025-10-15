@@ -175,7 +175,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 		md.WriteString(fmt.Sprintf("版本 / Version: **%s**\n", result.Request.Version))
 		md.WriteString(fmt.Sprintf("错误 / Error: **%s**\n", result.ErrorMsg))
 		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", result.Request.UserName))
-		md.WriteString("\n**🔍 诊断信息 / Diagnostics**\n\n"))
+		md.WriteString("\n**🔍 诊断信息 / Diagnostics**\n\n") // Fixed: Removed extra )
 		md.WriteString(fmt.Sprintf("事件 / Events:\n%s\n", result.Events))
 		md.WriteString("环境变量 / Environment Variables:\n")
 		for k, v := range result.Envs {
