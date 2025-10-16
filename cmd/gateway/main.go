@@ -300,7 +300,7 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 		}
 
 		id := uuid.New().String()[:8] // Short ID
-		pendingConfirmations.Store(id, tasks)
+		dialog.pendingConfirmations.Store(id, tasks)
 
 		message := fmt.Sprintf("确认部署服务 %s 到环境 %s，版本 %s，由用户 %s 提交？\nConfirm deployment for service %s to envs %s, version %s by %s?",
 			req.Service, strings.Join(req.Envs, ","), req.Version, req.Username,
