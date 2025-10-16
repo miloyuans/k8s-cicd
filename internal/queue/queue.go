@@ -1,4 +1,4 @@
-// queue.go
+// internal/queue/queue.go
 package queue
 
 import (
@@ -123,6 +123,12 @@ func (q *Queue) ConfirmTask(task types.DeployRequest) {
 		}
 		log.Printf("Confirmed task %s, status set to pending", taskKey)
 	}
+}
+
+// Exists checks if a task with the given key exists in the queue
+func (q *Queue) Exists(taskKey string) bool {
+	_, exists := q.taskMap.Load(taskKey)
+	return exists
 }
 
 func (q *Queue) persistTask(task Task) {

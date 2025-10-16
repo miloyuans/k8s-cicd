@@ -1,4 +1,4 @@
-// cicd_main.go
+// cmd/k8s-cicd/main.go
 package main
 
 import (
@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort" // Added import for sort package
 	"strings"
 	"time"
 
@@ -21,9 +22,9 @@ import (
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"           // Added for metav1
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured" // Added for unstructured
-	"k8s.io/apimachinery/pkg/runtime/schema"            // Added for schema
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 var (
@@ -210,7 +211,7 @@ func pollGateway() {
 }
 
 func retryPendingTasks() {
-	for env, namespace := range cfg.Environments {
+	for env := range cfg.Environments {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		tasks, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
@@ -220,7 +221,7 @@ func retryPendingTasks() {
 		}
 		for _, task := range tasks {
 			taskKey := queue.ComputeTaskKey(task)
-			if _, exists := taskQueue.taskMap.Load(taskKey); !exists {
+			if !taskQueue.Exists(taskKey) { // Use Exists method instead of taskMap
 				taskQueue.Enqueue(queue.Task{DeployRequest: task})
 			}
 		}
