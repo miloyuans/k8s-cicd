@@ -221,7 +221,7 @@ func retryPendingTasks() {
 		}
 		for _, task := range tasks {
 			taskKey := queue.ComputeTaskKey(task)
-			if !taskQueue.Exists(taskKey) { // Use Exists method instead of taskMap
+			if !taskQueue.Exists(taskKey) {
 				taskQueue.Enqueue(queue.Task{DeployRequest: task})
 			}
 		}
@@ -247,114 +247,34 @@ func worker() {
 		result.Request = task.DeployRequest
 		result.Success, result.ErrorMsg, result.OldImage = k8sClient.UpdateDeployment(ctx, task.DeployRequest.Service, newImage, namespace)
 
-		if result.Success {
-			// Observe stability for 5 minutes
-			observeCtx, observeCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer observeCancel()
-			stable, err := observeDeploymentStability(observeCtx, k8sClient, task.DeployRequest.Service, namespace, task.DeployRequest.Version)
-			if stable {
-				result.Success = true
-				log.Printf("Deployment stable for task %s", taskKey)
-				storage.PersistDeployment(cfg, task.DeployRequest.Service, task.DeployRequest.Env, newImage, "success", task.DeployRequest.UserName)
-				go telegram.SendTelegramNotification(cfg, &result)
-				feedbackCompleteToGateway(cfg, taskKey)
-			} else {
-				result.Success = false
-				result.ErrorMsg = fmt.Sprintf("Deployment unstable: %v", err)
-				handleDeploymentFailure(cfg, &result, taskKey, namespace, newImage)
-			}
-		} else {
-			handleDeploymentFailure(cfg, &result, taskKey, namespace, newImage)
-		}
-	}
-}
-
-func handleDeploymentFailure(cfg *config.Config, result *storage.DeployResult, taskKey, namespace, newImage string) {
-	// Get diagnostics
-	result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(context.Background(), result.Request.Service, namespace)
-
-	// Attempt restart
-	log.Printf("Attempting restart for failed deployment %s in env %s", result.Request.Service, result.Request.Env)
-	k8sClient.RestartDeployment(context.Background(), result.Request.Service, namespace)
-
-	// Wait for restart to take effect
-	time.Sleep(30 * time.Second) // Arbitrary wait, adjust as needed
-
-	// Retry update
-	retryCtx, retryCancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
-	defer retryCancel()
-	retrySuccess, retryErrMsg, _ := k8sClient.UpdateDeployment(retryCtx, result.Request.Service, newImage, namespace)
-
-	if retrySuccess {
-		// Observe stability again
-		observeCtx, observeCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer observeCancel()
-		stable, err := observeDeploymentStability(observeCtx, k8sClient, result.Request.Service, namespace, result.Request.Version)
-		if stable {
+		// Check pod status immediately after update
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer checkCancel()
+		ready, err := k8sClient.CheckPodReadiness(checkCtx, result.Request.Service, namespace)
+		if ready {
 			result.Success = true
 			result.ErrorMsg = ""
-			log.Printf("Retry successful for task %s after restart", taskKey)
+			log.Printf("Deployment successful for task %s", taskKey)
 			storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "success", result.Request.UserName)
-			go telegram.SendTelegramNotification(cfg, result)
-			feedbackCompleteToGateway(cfg, taskKey)
-			return
+			go telegram.SendTelegramNotification(cfg, &result)
 		} else {
-			result.ErrorMsg = fmt.Sprintf("Retry unstable after restart: %v", err)
+			result.Success = false
+			result.ErrorMsg = fmt.Sprintf("Pods not ready: %v", err)
+			result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(checkCtx, result.Request.Service, namespace)
+			log.Printf("Deployment failed for task %s: %s", taskKey, result.ErrorMsg)
+			// Rollback to old image
+			k8sClient.RestoreDeployment(checkCtx, result.Request.Service, result.OldImage, namespace)
+			rollbackReady, rollbackErr := k8sClient.CheckPodReadiness(checkCtx, result.Request.Service, namespace)
+			if rollbackReady {
+				result.ErrorMsg += "; Rollback succeeded."
+			} else {
+				result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+			}
+			storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
+			go telegram.SendTelegramNotification(cfg, &result)
 		}
-	} else {
-		result.ErrorMsg = fmt.Sprintf("Retry failed after restart: %s", retryErrMsg)
-	}
-
-	// If still failed, rollback, notify deploy team, and complete task
-	log.Printf("Deployment failed after retry for task %s: %s", taskKey, result.ErrorMsg)
-	k8sClient.RestoreDeployment(context.Background(), result.Request.Service, result.OldImage, namespace)
-	rollbackReady, rollbackErr := k8sClient.CheckPodReadiness(context.Background(), result.Request.Service, namespace)
-	if !rollbackReady {
-		result.ErrorMsg += fmt.Sprintf("; Rollback to version %s failed: %v", getVersionFromImage(result.OldImage), rollbackErr)
-	} else {
-		result.ErrorMsg += fmt.Sprintf("; Rollback to version %s succeeded, service restored.", getVersionFromImage(result.OldImage))
-	}
-	storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
-	go telegram.SendTelegramNotification(cfg, result)
-	go telegram.NotifyDeployTeam(cfg, result) // New function to notify deploy team
-	feedbackCompleteToGateway(cfg, taskKey)
-}
-
-// observeDeploymentStability checks deployment and pod readiness for 2 minutes
-func observeDeploymentStability(ctx context.Context, client *k8s.Client, service, namespace, version string) (bool, error) {
-	ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return false, fmt.Errorf("observation timed out after 5 minutes")
-		case <-ticker.C:
-			// Check deployment status
-			rolloutOK := client.WaitForRollout(ctx, service, namespace)
-			if !rolloutOK {
-				return false, fmt.Errorf("deployment status not available")
-			}
-			// Check pod readiness
-			ready, err := client.CheckPodReadiness(ctx, service, namespace)
-			if !ready {
-				return false, fmt.Errorf("pods not ready: %v", err)
-			}
-			// Verify deployment image matches requested version
-			gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-			dep, err := client.Client().Resource(gvr).Namespace(namespace).Get(ctx, service, metav1.GetOptions{})
-			if err != nil {
-				return false, fmt.Errorf("failed to get deployment: %v", err)
-			}
-			containers, _, _ := unstructured.NestedSlice(dep.Object, "spec", "template", "spec", "containers")
-			if len(containers) == 0 {
-				return false, fmt.Errorf("no containers found in deployment")
-			}
-			currentImage, _, _ := unstructured.NestedString(containers[0].(map[string]interface{}), "image")
-			if !strings.Contains(currentImage, ":"+version) {
-				return false, fmt.Errorf("deployment image %s does not match requested version %s", currentImage, version)
-			}
-		}
+		feedbackCompleteToGateway(cfg, taskKey)
+		time.Sleep(1 * time.Minute) // 1 minute silence between tasks for the same service
 	}
 }
 

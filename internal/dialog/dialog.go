@@ -112,10 +112,16 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 		}
 	}
 
+	// Add Next and Cancel buttons
+	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_service"),
+		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
+	})
+
 	log.Printf("Generated %d rows with %d columns for %d services for user %d", len(buttons), cols, len(services), userID)
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msg := tgbotapi.NewMessage(chatID, "请选择一个服务：\nPlease select a service:")
+	msg := tgbotapi.NewMessage(chatID, "请选择一个或多个服务：\nPlease select one or more services:")
 	msg.ReplyMarkup = keyboard
 	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
 		s.Messages = append(s.Messages, sentMsg.MessageID)
@@ -263,6 +269,21 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 
 	switch s.Stage {
 	case "service":
+		if strings.HasPrefix(input, "next_service") {
+			if len(s.Selected) == 0 {
+				sendMessage(cfg, chatID, "请至少选择一个服务。\nPlease select at least one service.")
+				return
+			}
+			s.Stage = "env"
+			dialogs.Store(userID, s)
+			deleteMessages(s, cfg)
+			s.Messages = []int{}
+			sendEnvSelection(userID, chatID, cfg, s)
+			return
+		} else if input == "cancel" {
+			CancelDialog(userID, chatID, cfg)
+			return
+		}
 		// Multi-select services
 		if contains(s.Selected, input) {
 			// Deselect
