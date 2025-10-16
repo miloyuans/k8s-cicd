@@ -8,13 +8,16 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"k8s-cicd/internal/config"
+	"k8s-cicd/internal/dialog"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
+	"k8s-cicd/internal/types"
 	"os"
 )
 
@@ -37,6 +40,7 @@ func main() {
 
 	// Initialize task queue
 	taskQueue = queue.NewQueue(cfg, 100)
+	dialog.GlobalTaskQueue = taskQueue
 
 	go telegram.StartBot(cfg, taskQueue)
 
@@ -44,6 +48,7 @@ func main() {
 	http.HandleFunc("/report", handleReport(cfg))
 	http.HandleFunc("/complete", handleComplete(cfg))
 	http.HandleFunc("/services", handleServices(cfg)) // New endpoint for services
+	http.HandleFunc("/submit-task", handleSubmitTask(cfg))
 	log.Printf("Gateway server starting on %s", cfg.GatewayListenAddr)
 	log.Fatal(http.ListenAndServe(cfg.GatewayListenAddr, nil))
 }
@@ -64,9 +69,9 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 				http.Error(w, "Missing env parameter", http.StatusBadRequest)
 				return
 			}
-			lowerEnv := strings.ToLower(env) // Normalize env
-			tasks := taskQueue.GetPendingTasks(lowerEnv)
-			log.Printf("Received GET for env %s from IP %s, returning %d tasks", lowerEnv, clientIP, len(tasks))
+
+			tasks := taskQueue.GetPendingTasks(env)
+			log.Printf("Serving %d pending tasks for env %s", len(tasks), env)
 
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(tasks); err != nil {
@@ -78,7 +83,7 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 			storage.PersistInteraction(cfg, map[string]interface{}{
 				"endpoint":  "/tasks",
 				"method":    "GET",
-				"env":       lowerEnv,
+				"env":       env,
 				"tasks":     len(tasks),
 				"timestamp": time.Now().Format(time.RFC3339),
 			})
@@ -174,6 +179,7 @@ func handleComplete(cfg *config.Config) http.HandlerFunc {
 	}
 }
 
+// New handler for receiving services from k8s-cicd
 func handleServices(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -226,6 +232,91 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			log.Printf("Method not allowed for /submit-task: %s", r.Method)
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Service  string   `json:"service"`
+			Envs     []string `json:"envs"`
+			Version  string   `json:"version"`
+			Username string   `json:"username"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("Failed to decode submit-task request: %v", err)
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		if req.Service == "" || len(req.Envs) == 0 || req.Version == "" || req.Username == "" {
+			http.Error(w, "Missing required fields: service, envs, version, username", http.StatusBadRequest)
+			return
+		}
+
+		category := classifyService(req.Service, cfg.ServiceKeywords)
+		if category == "" {
+			http.Error(w, "No category found for service", http.StatusBadRequest)
+			return
+		}
+
+		chatID, ok := cfg.TelegramChats[category]
+		if !ok {
+			http.Error(w, "No chat configured for category", http.StatusInternalServerError)
+			return
+		}
+
+		var taskKeys []string
+		for _, env := range req.Envs {
+			deployReq := types.DeployRequest{
+				Service:   req.Service,
+				Env:       env,
+				Version:   req.Version,
+				Timestamp: time.Now(),
+				UserName:  req.Username,
+			}
+			taskQueue.Enqueue(queue.Task{DeployRequest: deployReq})
+			taskKeys = append(taskKeys, queue.ComputeTaskKey(deployReq))
+		}
+
+		message := fmt.Sprintf("确认部署服务 %s 到环境 %s，版本 %s，由用户 %s 提交？\nConfirm deployment for service %s to envs %s, version %s by %s?",
+			req.Service, strings.Join(req.Envs, ","), req.Version, req.Username,
+			req.Service, strings.Join(req.Envs, ","), req.Version, req.Username)
+		callbackData := strings.Join(taskKeys, ",")
+
+		if err := telegram.SendConfirmation(category, chatID, message, callbackData); err != nil {
+			log.Printf("Failed to send confirmation for submit-task: %v", err)
+			http.Error(w, "Failed to send confirmation", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func classifyService(service string, keywords map[string][]string) string {
+	lowerService := strings.ToLower(service)
+	for category, patterns := range keywords {
+		for _, pattern := range patterns {
+			lowerPattern := strings.ToLower(pattern)
+			// Try regex match if pattern looks like a regex
+			if strings.HasPrefix(lowerPattern, "^") || strings.HasSuffix(lowerPattern, "$") || strings.Contains(lowerPattern, ".*") {
+				re, err := regexp.Compile(lowerPattern)
+				if err == nil && re.MatchString(lowerService) {
+					return category
+				}
+			} else if strings.Contains(lowerService, lowerPattern) {
+				// Fallback to substring match
+				return category
+			}
+		}
+	}
+	return ""
 }
 
 func getClientIP(r *http.Request) string {

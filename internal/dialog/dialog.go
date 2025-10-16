@@ -34,10 +34,12 @@ type DialogState struct {
 var (
 	dialogs   sync.Map // map[int64]*DialogState
 	taskQueue *queue.Queue
+	GlobalTaskQueue *queue.Queue // Added for API confirmation
 )
 
 func SetTaskQueue(q *queue.Queue) {
 	taskQueue = q
+	GlobalTaskQueue = q
 }
 
 func StartDialog(userID, chatID int64, service string, cfg *config.Config, userName string) {
@@ -87,35 +89,28 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 			maxLen = len(svc)
 		}
 	}
-	cols := 4
-	if maxLen > 10 && maxLen <= 15 {
-		cols = 3 // Short to medium names, use 3 columns
-	} else if maxLen > 15 && maxLen <= 25 {
-		cols = 2 // Longer names, use 2 columns
-	} else if maxLen > 25 {
-		cols = 2 // Very long names, use 2 columns to avoid truncation
+	cols := 2
+	if maxLen < 10 {
+		cols = 4 // Short names, use 4 columns
+	} else if maxLen < 15 {
+		cols = 3 // Medium names, use 3 columns
 	}
 	if len(services) < cols {
 		cols = len(services) // Fewer services than columns, use service count
-	}
-	if cols < 2 && len(services) > 1 {
-		cols = 2 // Enforce at least 2 columns if possible
 	}
 
 	// Build multi-column button layout
 	var buttons [][]tgbotapi.InlineKeyboardButton
 	var row []tgbotapi.InlineKeyboardButton
 	for i, svc := range services {
-		// No truncation; let Telegram handle ellipsis if needed
-		buttonText := svc
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(buttonText, svc))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(svc, svc))
 		if len(row) == cols || i == len(services)-1 {
 			buttons = append(buttons, row)
 			row = []tgbotapi.InlineKeyboardButton{}
 		}
 	}
 
-	log.Printf("Generated %d rows with %d columns for %d services for user %d (maxLen: %d)", len(buttons), cols, len(services), userID, maxLen)
+	log.Printf("Generated %d rows with %d columns for %d services for user %d", len(buttons), cols, len(services), userID)
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
 	msg := tgbotapi.NewMessage(chatID, "请选择一个服务：\nPlease select a service:")
@@ -149,8 +144,7 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
 	// Extract unique environments
 	envSet := make(map[string]bool)
 	for _, info := range infos {
-		lowerEnv := strings.ToLower(info.Env)
-		envSet[lowerEnv] = true
+		envSet[info.Env] = true
 	}
 
 	var envs []string
@@ -257,7 +251,7 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	for _, env := range s.SelectedEnvs {
 		task := types.DeployRequest{
 			Service:   service,
-			Env:       strings.ToLower(env), // Normalize env
+			Env:       env,
 			Version:   s.Version,
 			Timestamp: time.Now(),
 			UserName:  s.UserName,
@@ -266,11 +260,7 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 		// Persist deployment info immediately to ensure history is recorded
 		storage.PersistDeployment(cfg, task.Service, task.Env, "", "pending", task.UserName)
 	}
-	msg := tgbotapi.NewMessage(chatID, "部署任务已提交。\nDeployment task(s) submitted.")
-	msg.ParseMode = "Markdown"
-	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
-		s.Messages = append(s.Messages, sentMsg.MessageID)
-	}
+	sendMessage(cfg, chatID, "部署任务已提交。\nDeployment task(s) submitted.")
 
 	// Prompt for continuing interaction
 	s.Stage = "continue"
@@ -282,12 +272,10 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 		},
 	}
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msg = tgbotapi.NewMessage(chatID, "是否继续提交另一个部署任务？\nWould you like to submit another deployment task?")
+	msg := tgbotapi.NewMessage(chatID, "是否继续提交另一个部署任务？\nWould you like to submit another deployment task?")
 	msg.ReplyMarkup = keyboard
 	msg.ParseMode = "Markdown"
-	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
-		s.Messages = append(s.Messages, sentMsg.MessageID)
-	}
+	sendMessage(cfg, chatID, msg)
 
 	// Start timeout after submission
 	go monitorDialogTimeout(userID, chatID, cfg, s)
@@ -300,6 +288,20 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 		return
 	}
 	s := state.(*DialogState)
+
+	if strings.HasPrefix(input, "confirm_api:") {
+		// Do nothing for confirmation in API mode
+		sendMessage(cfg, chatID, "Deployment confirmed.")
+		return
+	} else if strings.HasPrefix(input, "cancel_api:") {
+		keysStr := strings.TrimPrefix(input, "cancel_api:")
+		keys := strings.Split(keysStr, ",")
+		for _, k := range keys {
+			GlobalTaskQueue.CompleteTask(strings.TrimSpace(k))
+		}
+		sendMessage(cfg, chatID, "Deployment canceled.")
+		return
+	}
 
 	switch s.Stage {
 	case "service":
@@ -330,10 +332,7 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 				return
 			} else if input == "env:confirm" {
 				if len(s.SelectedEnvs) == 0 {
-					msg := tgbotapi.NewMessage(chatID, "Please select at least one environment.")
-					if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
-						s.Messages = append(s.Messages, sentMsg.MessageID)
-					}
+					sendMessage(cfg, chatID, "Please select at least one environment.")
 					return
 				}
 				s.Stage = "version"
@@ -388,11 +387,7 @@ func CancelDialog(userID, chatID int64, cfg *config.Config) bool {
 	deleteMessages(s, cfg)
 	dialogs.Delete(userID)
 	log.Printf("Dialog cancelled for user %d in chat %d", userID, chatID)
-	msg := tgbotapi.NewMessage(chatID, "当前会话已关闭。\nCurrent session has been closed.")
-	msg.ParseMode = "Markdown"
-	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
-		s.Messages = []int{sentMsg.MessageID} // Keep only the final message
-	}
+	sendMessage(cfg, chatID, "当前会话已关闭。\nCurrent session has been closed.")
 	return true
 }
 
@@ -407,11 +402,7 @@ func monitorDialogTimeout(userID, chatID int64, cfg *config.Config, s *DialogSta
 		if _, loaded := dialogs.Load(userID); loaded {
 			log.Printf("Dialog timed out for user %d in chat %d", userID, chatID)
 			deleteMessages(s, cfg)
-			msg := tgbotapi.NewMessage(chatID, "对话已超时，请重新触发部署。\nDialog timed out, please trigger deployment again.")
-			msg.ParseMode = "Markdown"
-			if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
-				s.Messages = []int{sentMsg.MessageID}
-			}
+			sendMessage(cfg, chatID, "对话已超时，请重新触发部署。\nDialog timed out, please trigger deployment again.")
 			dialogs.Delete(userID)
 		}
 	case <-s.timeoutCancel:

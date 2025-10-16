@@ -214,6 +214,8 @@ func (c *Client) CheckPodReadiness(ctx context.Context, service, namespace strin
 		return false, fmt.Errorf("failed to list pods: %v", err)
 	}
 
+	var errMsg strings.Builder
+	allReady := true
 	for _, pod := range pods.Items {
 		conditions, _, _ := unstructured.NestedSlice(pod.Object, "status", "conditions")
 		ready := false
@@ -228,8 +230,34 @@ func (c *Client) CheckPodReadiness(ctx context.Context, service, namespace strin
 			}
 		}
 		if !ready {
-			return false, fmt.Errorf("pod %s not ready", pod.GetName())
+			allReady = false
+			podName := pod.GetName()
+			events := c.getPodEvents(ctx, podName, namespace)
+			errMsg.WriteString(fmt.Sprintf("Pod %s not ready. Events: %s\n", podName, events))
 		}
 	}
+	if !allReady {
+		return false, fmt.Errorf(errMsg.String())
+	}
 	return true, nil
+}
+
+func (c *Client) getPodEvents(ctx context.Context, podName, namespace string) string {
+	eventsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "events"}
+	events, err := c.client.Resource(eventsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=Pod", podName),
+	})
+	if err != nil {
+		return fmt.Sprintf("Failed to get pod events: %v", err)
+	}
+
+	var eventsStr strings.Builder
+	for _, ev := range events.Items {
+		message, _, _ := unstructured.NestedString(ev.Object, "message")
+		eventsStr.WriteString(fmt.Sprintf("• %s\n", message))
+	}
+	if eventsStr.Len() == 0 {
+		return "No events found"
+	}
+	return eventsStr.String()
 }
