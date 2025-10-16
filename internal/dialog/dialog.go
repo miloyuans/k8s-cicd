@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort" // Added import for sort package
 	"strings"
 	"sync"
 	"time"
@@ -151,7 +152,7 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
 	for env := range envSet {
 		envs = append(envs, env)
 	}
-	sort.Strings(envs)
+	sort.Strings(envs) // Sort environments for consistent display
 	return envs
 }
 
