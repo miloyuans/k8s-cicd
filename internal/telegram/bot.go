@@ -209,7 +209,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 		md.WriteString(fmt.Sprintf("回滚版本 / Rollback Version: **%s**\n", getVersionFromImage(result.OldImage)))
 		md.WriteString(fmt.Sprintf("错误 / Error: **%s**\n", result.ErrorMsg))
 		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", result.Request.UserName))
-		md.WriteString("\n**🔍 诊断信息 / Diagnostics**\n\n"))
+		md.WriteString("\n**🔍 诊断信息 / Diagnostics**\n\n")
 		md.WriteString(fmt.Sprintf("事件 / Events:\n%s\n", result.Events))
 		md.WriteString("环境变量 / Environment Variables:\n")
 		for k, v := range result.Envs {
