@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
-	"sort" // Added import for sort package
+	"sort"
 	"strings"
 	"time"
 
@@ -229,7 +229,7 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 			}
 			// Merge and dedup again
 			for _, svc := range dedup {
-				if svc != "" && !config.contains(existing, svc) { // Changed to config.contains
+				if svc != "" && !contains(existing, svc) { // Use local contains function
 					existing = append(existing, svc)
 				}
 			}
@@ -373,4 +373,14 @@ func getClientIP(r *http.Request) string {
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return ip
+}
+
+// contains checks if a string exists in a slice
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
