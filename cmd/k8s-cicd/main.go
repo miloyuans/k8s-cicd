@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort" // Added import for sort package
+	"sort"
 	"strings"
 	"time"
 
@@ -248,8 +248,8 @@ func worker() {
 		result.Success, result.ErrorMsg, result.OldImage = k8sClient.UpdateDeployment(ctx, task.DeployRequest.Service, newImage, namespace)
 
 		if result.Success {
-			// Observe stability for 2 minutes
-			observeCtx, observeCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			// Observe stability for 5 minutes
+			observeCtx, observeCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer observeCancel()
 			stable, err := observeDeploymentStability(observeCtx, k8sClient, task.DeployRequest.Service, namespace, task.DeployRequest.Version)
 			if stable {
@@ -287,7 +287,7 @@ func handleDeploymentFailure(cfg *config.Config, result *storage.DeployResult, t
 
 	if retrySuccess {
 		// Observe stability again
-		observeCtx, observeCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		observeCtx, observeCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer observeCancel()
 		stable, err := observeDeploymentStability(observeCtx, k8sClient, result.Request.Service, namespace, result.Request.Version)
 		if stable {
@@ -328,7 +328,7 @@ func observeDeploymentStability(ctx context.Context, client *k8s.Client, service
 	for {
 		select {
 		case <-ctx.Done():
-			return false, fmt.Errorf("observation timed out after 2 minutes")
+			return false, fmt.Errorf("observation timed out after 5 minutes")
 		case <-ticker.C:
 			// Check deployment status
 			rolloutOK := client.WaitForRollout(ctx, service, namespace)

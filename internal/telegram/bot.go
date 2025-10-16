@@ -111,7 +111,8 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				if tasks, ok := dialog.PendingConfirmations.Load(id); ok {
 					taskList := tasks.([]types.DeployRequest)
 					for _, task := range taskList {
-						dialog.GlobalTaskQueue.ConfirmTask(task)
+						task.Status = "pending" // Explicitly update status
+						dialog.GlobalTaskQueue.Enqueue(queue.Task{DeployRequest: task}) // Enqueue to add to taskMap and process
 					}
 					dialog.PendingConfirmations.Delete(id)
 					sendMessage(bot, chatID, "Deployment confirmed via API.")
