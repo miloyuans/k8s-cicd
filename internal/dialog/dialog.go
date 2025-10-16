@@ -141,10 +141,10 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
 		}
 	}
 
-	// Extract unique environments
+	// Extract unique environments from config.Environments keys
 	envSet := make(map[string]bool)
-	for _, info := range infos {
-		envSet[info.Env] = true
+	for env := range cfg.Environments {
+		envSet[strings.ToLower(env)] = true
 	}
 
 	var envs []string
@@ -251,7 +251,7 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	for _, env := range s.SelectedEnvs {
 		task := types.DeployRequest{
 			Service:   service,
-			Env:       env,
+			Env:       strings.ToLower(env), // Normalize env
 			Version:   s.Version,
 			Timestamp: time.Now(),
 			UserName:  s.UserName,
@@ -275,7 +275,9 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	msg := tgbotapi.NewMessage(chatID, "是否继续提交另一个部署任务？\nWould you like to submit another deployment task?")
 	msg.ReplyMarkup = keyboard
 	msg.ParseMode = "Markdown"
-	sendMessage(cfg, chatID, msg)
+	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
+		s.Messages = append(s.Messages, sentMsg.MessageID)
+	}
 
 	// Start timeout after submission
 	go monitorDialogTimeout(userID, chatID, cfg, s)
@@ -290,7 +292,6 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 	s := state.(*DialogState)
 
 	if strings.HasPrefix(input, "confirm_api:") {
-		// Do nothing for confirmation in API mode
 		sendMessage(cfg, chatID, "Deployment confirmed.")
 		return
 	} else if strings.HasPrefix(input, "cancel_api:") {
