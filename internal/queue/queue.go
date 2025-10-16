@@ -105,6 +105,7 @@ func (q *Queue) CompleteTask(taskKey string) {
 		q.taskMap.Store(taskKey, t)
 		q.persistTask(t)
 		log.Printf("Marked task %s as completed", taskKey)
+		q.taskMap.Delete(taskKey) // Remove from map after completion
 	}
 }
 

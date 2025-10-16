@@ -148,9 +148,18 @@ func handleReport(cfg *config.Config) http.HandlerFunc {
 			}
 		}
 
-		// Store merged data using storage package
-		storage.UpdateDeploymentInfo(cfg, existingInfos)
-		log.Printf("Processed report with %d deployment infos", len(infos))
+		// Save merged data
+		updatedData, err := json.MarshalIndent(existingInfos, "", "  ")
+		if err != nil {
+			log.Printf("Failed to marshal merged deploy file %s: %v", fileName, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(fileName, updatedData, 0644); err != nil {
+			log.Printf("Failed to write merged deploy file %s: %v", fileName, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
 
 		w.WriteHeader(http.StatusOK)
 	}
@@ -174,8 +183,7 @@ func handleComplete(cfg *config.Config) http.HandlerFunc {
 		}
 
 		taskQueue.CompleteTask(req.TaskKey)
-		log.Printf("Received completion for task %s", req.TaskKey)
-
+		log.Printf("Completed task %s", req.TaskKey)
 		w.WriteHeader(http.StatusOK)
 	}
 }
@@ -195,36 +203,50 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Merge and deduplicate services
-		existingServices, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
-		if err != nil {
-			log.Printf("Failed to load existing services: %v", err)
-		}
-
-		// Global deduplication across all categories
-		globalSeen := make(map[string]bool)
-		for _, svcs := range existingServices {
-			for _, s := range svcs {
-				globalSeen[s] = true
-			}
-		}
-
-		for category, newSvcs := range services {
-			existing := existingServices[category]
-			for _, s := range newSvcs {
-				if !globalSeen[s] {
-					existing = append(existing, s)
-					globalSeen[s] = true
+		for category, list := range services {
+			// Deduplicate list
+			seen := make(map[string]bool)
+			var dedup []string
+			for _, svc := range list {
+				if !seen[svc] {
+					seen[svc] = true
+					dedup = append(dedup, svc)
 				}
 			}
-			existingServices[category] = existing
+			// Sort for consistency
+			sort.Strings(dedup)
+			// Load existing list to merge
+			existingPath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
+			existingData, err := os.ReadFile(existingPath)
+			var existing []string
+			if err == nil {
+				existing = strings.Split(string(existingData), "\n")
+				for i := range existing {
+					existing[i] = strings.TrimSpace(existing[i])
+				}
+			}
+			// Merge and dedup again
+			for _, svc := range dedup {
+				if svc != "" && !contains(existing, svc) {
+					existing = append(existing, svc)
+				}
+			}
+			sort.Strings(existing)
+			// Remove empty lines
+			var clean []string
+			for _, s := range existing {
+				if s != "" {
+					clean = append(clean, s)
+				}
+			}
+			existingServices[category] = clean
 			// Save updated list
 			filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
-			data := strings.Join(existing, "\n")
+			data := strings.Join(clean, "\n")
 			if err := os.WriteFile(filePath, []byte(data), 0644); err != nil {
 				log.Printf("Failed to write service list %s: %v", filePath, err)
 			} else {
-				log.Printf("Updated service list %s with %d services", filePath, len(existing))
+				log.Printf("Updated service list %s with %d services", filePath, len(clean))
 			}
 		}
 

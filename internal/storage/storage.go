@@ -146,14 +146,19 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 			}
 			container := containers[0].(map[string]interface{})
 			image, _, _ := unstructured.NestedString(container, "image")
-
+			if seen[env][service] {
+				continue
+			}
+			seen[env][service] = true
 			found := false
 			for i := range infos {
 				if infos[i].Service == service && infos[i].Env == env {
-					infos[i].Image = image
-					infos[i].Timestamp = time.Now()
+					if infos[i].Image != image {
+						infos[i].Image = image
+						infos[i].Timestamp = time.Now()
+						updated = true
+					}
 					found = true
-					updated = true
 					break
 				}
 			}
@@ -163,66 +168,73 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 					Env:       env,
 					Image:     image,
 					Timestamp: time.Now(),
+					Status:    "initial",
+					UserName:  "system",
 				})
 				updated = true
 			}
-			seen[env][service] = true
 		}
 	}
 
 	if updated {
 		newData, err := json.MarshalIndent(infos, "", "  ")
 		if err != nil {
-			fmt.Printf("Failed to marshal deploy file %s: %v\n", fileName, err)
+			fmt.Printf("Failed to marshal updated deploy file %s: %v\n", fileName, err)
 			return
 		}
 		if err := os.WriteFile(fileName, newData, 0644); err != nil {
-			fmt.Printf("Failed to write deploy file %s: %v\n", fileName, err)
+			fmt.Printf("Failed to write updated deploy file %s: %v\n", fileName, err)
 		}
 	}
 }
 
 func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config) error {
-	storageMutex.Lock()
-	defer storageMutex.Unlock()
-
-	var data []byte = []byte("[]")
-	var err error
-	if client != nil {
-		// For deploy files, initialize with current deployments
-		var infos []DeploymentInfo
-		for env, namespace := range cfg.Environments {
-			deployments, err := client.Resource(schema.GroupVersionResource{
-				Group:    "apps",
-				Version:  "v1",
-				Resource: "deployments",
-			}).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
-			if err != nil {
-				fmt.Printf("Failed to list deployments for env %s: %v\n", env, err)
+	if err := os.WriteFile(fileName, []byte("[]"), 0644); err != nil {
+		fmt.Printf("Failed to create daily file %s: %v\n", fileName, err)
+		return err
+	}
+	data, err := os.ReadFile(fileName)
+	if err != nil {
+		fmt.Printf("Failed to read daily file %s: %v\n", fileName, err)
+		return err
+	}
+	var infos []DeploymentInfo
+	if err := json.Unmarshal(data, &infos); err != nil {
+		fmt.Printf("Failed to unmarshal daily file %s: %v\n", fileName, err)
+		return err
+	}
+	for env, namespace := range cfg.Environments {
+		deployments, err := client.Resource(schema.GroupVersionResource{
+			Group:    "apps",
+			Version:  "v1",
+			Resource: "deployments",
+		}).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			fmt.Printf("Failed to list deployments for namespace %s: %v\n", namespace, err)
+			continue
+		}
+		for _, dep := range deployments.Items {
+			service := dep.GetName()
+			containers, _, _ := unstructured.NestedSlice(dep.Object, "spec", "template", "spec", "containers")
+			if len(containers) == 0 {
 				continue
 			}
-
-			for _, dep := range deployments.Items {
-				service := dep.GetName()
-				containers, _, _ := unstructured.NestedSlice(dep.Object, "spec", "template", "spec", "containers")
-				if len(containers) == 0 {
-					continue
-				}
-				container := containers[0].(map[string]interface{})
-				image, _, _ := unstructured.NestedString(container, "image")
-				infos = append(infos, DeploymentInfo{
-					Service:   service,
-					Env:       env,
-					Image:     image,
-					Timestamp: time.Now(),
-				})
-			}
+			container := containers[0].(map[string]interface{})
+			image, _, _ := unstructured.NestedString(container, "image")
+			infos = append(infos, DeploymentInfo{
+				Service:   service,
+				Env:       env,
+				Image:     image,
+				Timestamp: time.Now(),
+				Status:    "initial",
+				UserName:  "system",
+			})
 		}
-		data, err = json.MarshalIndent(infos, "", "  ")
-		if err != nil {
-			fmt.Printf("Failed to marshal initial deploy data for %s: %v\n", fileName, err)
-			return err
-		}
+	}
+	data, err = json.MarshalIndent(infos, "", "  ")
+	if err != nil {
+		fmt.Printf("Failed to marshal daily file %s: %v\n", fileName, err)
+		return err
 	}
 	if err := os.WriteFile(fileName, data, 0644); err != nil {
 		fmt.Printf("Failed to write daily file %s: %v\n", fileName, err)

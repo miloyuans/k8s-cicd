@@ -31,6 +31,7 @@ type Config struct {
 	Environments       map[string]string   `yaml:"environments"`
 	DialogTimeout      int                 `yaml:"dialog_timeout"`
 	StorageDir         string              // Added for configurable storage directory
+	DeployCategory     string              `yaml:"deploy_category"` // New: category for deploy team notifications
 }
 
 func LoadConfig(filePath string) *Config {
@@ -80,6 +81,9 @@ func LoadConfig(filePath string) *Config {
 	}
 	if len(cfg.Environments) == 0 {
 		cfg.Environments = make(map[string]string)
+	}
+	if cfg.DeployCategory == "" {
+		cfg.DeployCategory = "deploy" // Default deploy category
 	}
 	return &cfg
 }

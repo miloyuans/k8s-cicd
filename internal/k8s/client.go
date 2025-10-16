@@ -261,3 +261,25 @@ func (c *Client) getPodEvents(ctx context.Context, podName, namespace string) st
 	}
 	return eventsStr.String()
 }
+
+func (c *Client) RestartDeployment(ctx context.Context, service, namespace string) error {
+	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	dep, err := c.client.Resource(gvr).Namespace(namespace).Get(ctx, service, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get deployment for restart: %v", err)
+	}
+
+	// Add annotation to trigger restart
+	annotations, _, _ := unstructured.NestedMap(dep.Object, "spec", "template", "metadata", "annotations")
+	if annotations == nil {
+		annotations = make(map[string]interface{})
+	}
+	annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
+	unstructured.SetNestedMap(dep.Object, annotations, "spec", "template", "metadata", "annotations")
+
+	_, err = c.client.Resource(gvr).Namespace(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to restart deployment: %v", err)
+	}
+	return nil
+}
