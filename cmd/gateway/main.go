@@ -1,4 +1,4 @@
-// gateway_main.go
+// cmd/gateway/main.go
 package main
 
 import (
@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
+	"sort" // Added import for sort package
 	"strings"
 	"time"
+
 	"github.com/google/uuid"
 
 	"k8s-cicd/internal/config"
@@ -227,10 +229,11 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 			}
 			// Merge and dedup again
 			for _, svc := range dedup {
-				if svc != "" && !contains(existing, svc) {
+				if svc != "" && !config.contains(existing, svc) { // Changed to config.contains
 					existing = append(existing, svc)
 				}
 			}
+			// Sort for consistency
 			sort.Strings(existing)
 			// Remove empty lines
 			var clean []string
@@ -239,7 +242,6 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 					clean = append(clean, s)
 				}
 			}
-			existingServices[category] = clean
 			// Save updated list
 			filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
 			data := strings.Join(clean, "\n")
