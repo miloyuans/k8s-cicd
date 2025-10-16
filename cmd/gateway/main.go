@@ -300,7 +300,7 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 		}
 
 		id := uuid.New().String()[:8] // Short ID
-		dialog.pendingConfirmations.Store(id, tasks)
+		dialog.PendingConfirmations.Store(id, tasks)
 
 		message := fmt.Sprintf("确认部署服务 %s 到环境 %s，版本 %s，由用户 %s 提交？\nConfirm deployment for service %s to envs %s, version %s by %s?",
 			req.Service, strings.Join(req.Envs, ","), req.Version, req.Username,
@@ -315,8 +315,8 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
-			"status":  "submitted",
-			"message": "Task submitted, awaiting confirmation in Telegram",
+			"status":          "submitted",
+			"message":         "Task submitted, awaiting confirmation in Telegram",
 			"confirmation_id": id,
 		})
 	}

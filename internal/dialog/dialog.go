@@ -35,7 +35,7 @@ var (
 	dialogs             sync.Map // map[int64]*DialogState
 	taskQueue           *queue.Queue
 	GlobalTaskQueue     *queue.Queue     // Added for API confirmation
-	pendingConfirmations sync.Map         // map[string][]string for confirmationID -> taskKeys
+	PendingConfirmations sync.Map         // map[string][]types.DeployRequest for confirmationID -> tasks
 )
 
 func SetTaskQueue(q *queue.Queue) {
@@ -295,24 +295,27 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 		s := state.(*DialogState)
 		if strings.HasPrefix(input, "confirm_api:") {
 			id := strings.TrimPrefix(input, "confirm_api:")
-			taskKeysI, ok := pendingConfirmations.LoadAndDelete(id)
+			taskRequestsI, ok := PendingConfirmations.LoadAndDelete(id)
 			if !ok {
 				sendMessage(cfg, chatID, "Confirmation ID not found.")
 				return
 			}
-			taskKeys := taskKeysI.([]string)
-			sendMessage(cfg, chatID, fmt.Sprintf("Deployment confirmed for %d tasks.", len(taskKeys)))
+			taskRequests := taskRequestsI.([]types.DeployRequest)
+			for _, task := range taskRequests {
+				GlobalTaskQueue.ConfirmTask(task)
+			}
+			sendMessage(cfg, chatID, fmt.Sprintf("Deployment confirmed for %d tasks.", len(taskRequests)))
 			return
 		} else if strings.HasPrefix(input, "cancel_api:") {
 			id := strings.TrimPrefix(input, "cancel_api:")
-			taskKeysI, ok := pendingConfirmations.LoadAndDelete(id)
+			taskRequestsI, ok := PendingConfirmations.LoadAndDelete(id)
 			if !ok {
 				sendMessage(cfg, chatID, "Confirmation ID not found.")
 				return
 			}
-			taskKeys := taskKeysI.([]string)
-			for _, k := range taskKeys {
-				GlobalTaskQueue.CompleteTask(strings.TrimSpace(k))
+			taskRequests := taskRequestsI.([]types.DeployRequest)
+			for _, task := range taskRequests {
+				GlobalTaskQueue.CompleteTask(queue.ComputeTaskKey(task))
 			}
 			sendMessage(cfg, chatID, "Deployment canceled.")
 			return
