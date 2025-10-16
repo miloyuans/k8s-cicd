@@ -32,9 +32,10 @@ type DialogState struct {
 }
 
 var (
-	dialogs   sync.Map // map[int64]*DialogState
-	taskQueue *queue.Queue
-	GlobalTaskQueue *queue.Queue // Added for API confirmation
+	dialogs             sync.Map // map[int64]*DialogState
+	taskQueue           *queue.Queue
+	GlobalTaskQueue     *queue.Queue     // Added for API confirmation
+	pendingConfirmations sync.Map         // map[string][]string for confirmationID -> taskKeys
 )
 
 func SetTaskQueue(q *queue.Queue) {
@@ -141,10 +142,10 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
 		}
 	}
 
-	// Extract unique environments
+	// Extract unique environments from config.Environments keys
 	envSet := make(map[string]bool)
-	for _, info := range infos {
-		envSet[info.Env] = true
+	for env := range cfg.Environments {
+		envSet[strings.ToLower(env)] = true
 	}
 
 	var envs []string
@@ -247,15 +248,18 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	default:
 	}
 
+	var taskKeys []string
 	service := s.Selected[0]
 	for _, env := range s.SelectedEnvs {
 		task := types.DeployRequest{
 			Service:   service,
-			Env:       env,
+			Env:       strings.ToLower(env), // Normalize env
 			Version:   s.Version,
 			Timestamp: time.Now(),
 			UserName:  s.UserName,
 		}
+		taskKey := queue.ComputeTaskKey(task)
+		taskKeys = append(taskKeys, taskKey)
 		taskQueue.Enqueue(queue.Task{DeployRequest: task})
 		// Persist deployment info immediately to ensure history is recorded
 		storage.PersistDeployment(cfg, task.Service, task.Env, "", "pending", task.UserName)
@@ -275,7 +279,9 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	msg := tgbotapi.NewMessage(chatID, "是否继续提交另一个部署任务？\nWould you like to submit another deployment task?")
 	msg.ReplyMarkup = keyboard
 	msg.ParseMode = "Markdown"
-	sendMessage(cfg, chatID, msg)
+	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
+		s.Messages = append(s.Messages, sentMsg.MessageID)
+	}
 
 	// Start timeout after submission
 	go monitorDialogTimeout(userID, chatID, cfg, s)
@@ -285,98 +291,98 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 	state, loaded := dialogs.Load(userID)
 	if !loaded {
 		log.Printf("No active dialog for user %d in chat %d", userID, chatID)
-		return
-	}
-	s := state.(*DialogState)
-
-	if strings.HasPrefix(input, "confirm_api:") {
-		id := strings.TrimPrefix(input, "confirm_api:")
-		taskKeys, ok := pendingConfirmations.LoadAndDelete(id)
-		if ok {
-			sendMessage(cfg, chatID, "Deployment confirmed.")
-		} else {
-			sendMessage(cfg, chatID, "Confirmation ID not found.")
-		}
-		return
-	} else if strings.HasPrefix(input, "cancel_api:") {
-		id := strings.TrimPrefix(input, "cancel_api:")
-		taskKeysI, ok := pendingConfirmations.LoadAndDelete(id)
-		if ok {
+	} else {
+		s := state.(*DialogState)
+		if strings.HasPrefix(input, "confirm_api:") {
+			id := strings.TrimPrefix(input, "confirm_api:")
+			taskKeysI, ok := pendingConfirmations.LoadAndDelete(id)
+			if !ok {
+				sendMessage(cfg, chatID, "Confirmation ID not found.")
+				return
+			}
+			taskKeys := taskKeysI.([]string)
+			sendMessage(cfg, chatID, fmt.Sprintf("Deployment confirmed for %d tasks.", len(taskKeys)))
+			return
+		} else if strings.HasPrefix(input, "cancel_api:") {
+			id := strings.TrimPrefix(input, "cancel_api:")
+			taskKeysI, ok := pendingConfirmations.LoadAndDelete(id)
+			if !ok {
+				sendMessage(cfg, chatID, "Confirmation ID not found.")
+				return
+			}
 			taskKeys := taskKeysI.([]string)
 			for _, k := range taskKeys {
 				GlobalTaskQueue.CompleteTask(strings.TrimSpace(k))
 			}
 			sendMessage(cfg, chatID, "Deployment canceled.")
-		} else {
-			sendMessage(cfg, chatID, "Confirmation ID not found.")
+			return
 		}
-		return
-	}
 
-	switch s.Stage {
-	case "service":
-		s.Selected = append(s.Selected, input)
-		s.Stage = "env"
-		dialogs.Store(userID, s)
-		sendEnvSelection(userID, chatID, cfg, s)
-	case "env":
-		if strings.HasPrefix(input, "env:") {
-			parts := strings.Split(input, ":")
-			if len(parts) == 3 && parts[2] == "select" {
-				env := parts[1]
-				if contains(s.SelectedEnvs, env) {
-					// Deselect
-					for i, e := range s.SelectedEnvs {
-						if e == env {
-							s.SelectedEnvs = append(s.SelectedEnvs[:i], s.SelectedEnvs[i+1:]...)
-							break
-						}
-					}
-				} else {
-					// Select
-					s.SelectedEnvs = append(s.SelectedEnvs, env)
-				}
-				dialogs.Store(userID, s)
-				// Refresh buttons with selected state
-				sendEnvSelection(userID, chatID, cfg, s)
-				return
-			} else if input == "env:confirm" {
-				if len(s.SelectedEnvs) == 0 {
-					sendMessage(cfg, chatID, "Please select at least one environment.")
-					return
-				}
-				s.Stage = "version"
-				dialogs.Store(userID, s)
-				sendVersionInput(userID, chatID, cfg)
-			}
-		}
-	case "version":
-		s.Version = input
-		s.Stage = "confirm"
-		dialogs.Store(userID, s)
-		sendConfirmation(userID, chatID, cfg, s)
-	case "confirm":
-		if input == "confirm" {
-			submitTasks(userID, chatID, cfg, s)
-		} else if input == "cancel" {
-			CancelDialog(userID, chatID, cfg)
-		}
-	case "continue":
-		if input == "yes" {
-			// Cancel timeout if continuing
-			select {
-			case s.timeoutCancel <- true:
-			default:
-			}
-			s.Stage = "service"
-			s.Selected = []string{}
-			s.SelectedEnvs = []string{}
-			s.Version = ""
-			s.Messages = []int{} // Reset messages for new dialog
+		switch s.Stage {
+		case "service":
+			s.Selected = append(s.Selected, input)
+			s.Stage = "env"
 			dialogs.Store(userID, s)
-			sendServiceSelection(userID, chatID, cfg, s)
-		} else if input == "no" {
-			CancelDialog(userID, chatID, cfg)
+			sendEnvSelection(userID, chatID, cfg, s)
+		case "env":
+			if strings.HasPrefix(input, "env:") {
+				parts := strings.Split(input, ":")
+				if len(parts) == 3 && parts[2] == "select" {
+					env := parts[1]
+					if contains(s.SelectedEnvs, env) {
+						// Deselect
+						for i, e := range s.SelectedEnvs {
+							if e == env {
+								s.SelectedEnvs = append(s.SelectedEnvs[:i], s.SelectedEnvs[i+1:]...)
+								break
+							}
+						}
+					} else {
+						// Select
+						s.SelectedEnvs = append(s.SelectedEnvs, env)
+					}
+					dialogs.Store(userID, s)
+					// Refresh buttons with selected state
+					sendEnvSelection(userID, chatID, cfg, s)
+					return
+				} else if input == "env:confirm" {
+					if len(s.SelectedEnvs) == 0 {
+						sendMessage(cfg, chatID, "Please select at least one environment.")
+						return
+					}
+					s.Stage = "version"
+					dialogs.Store(userID, s)
+					sendVersionInput(userID, chatID, cfg)
+				}
+			}
+		case "version":
+			s.Version = input
+			s.Stage = "confirm"
+			dialogs.Store(userID, s)
+			sendConfirmation(userID, chatID, cfg, s)
+		case "confirm":
+			if input == "confirm" {
+				submitTasks(userID, chatID, cfg, s)
+			} else if input == "cancel" {
+				CancelDialog(userID, chatID, cfg)
+			}
+		case "continue":
+			if input == "yes" {
+				// Cancel timeout if continuing
+				select {
+				case s.timeoutCancel <- true:
+				default:
+				}
+				s.Stage = "service"
+				s.Selected = []string{}
+				s.SelectedEnvs = []string{}
+				s.Version = ""
+				s.Messages = []int{} // Reset messages for new dialog
+				dialogs.Store(userID, s)
+				sendServiceSelection(userID, chatID, cfg, s)
+			} else if input == "no" {
+				CancelDialog(userID, chatID, cfg)
+			}
 		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +22,8 @@ type Task struct {
 
 type Queue struct {
 	tasks     chan Task
-	taskMap   sync.Map // map[string]Task for tracking
+	taskMap   sync.Map // map[string]Task for tracking uniqueness
+	perKey    sync.Map // map[string]chan Task for per-service-env channels
 	cfg       *config.Config
 	storageMu sync.Mutex
 }
@@ -32,22 +34,50 @@ func NewQueue(cfg *config.Config, capacity int) *Queue {
 		cfg:     cfg,
 	}
 	go q.loadPendingTasks()
-	go q.cleanupExpiredTasks() // Start cleanup goroutine
+	go q.cleanupExpiredTasks()
 	return q
 }
 
 func (q *Queue) Enqueue(task Task) {
 	taskKey := ComputeTaskKey(task.DeployRequest)
 	if _, exists := q.taskMap.Load(taskKey); exists {
-		fmt.Printf("Task %s already exists, skipping enqueue\n", taskKey)
+		log.Printf("Task %s already exists, skipping enqueue", taskKey)
 		return
 	}
-	task.DeployRequest.Status = "pending"
 	q.taskMap.Store(taskKey, task)
-	q.tasks <- task
+	key := task.DeployRequest.Service + "-" + task.DeployRequest.Env
+	ch, loaded := q.perKey.LoadOrStore(key, make(chan Task, 100))
+	taskCh := ch.(chan Task)
+	taskCh <- task
+	if !loaded {
+		go q.processKey(key, taskCh)
+	}
 	q.persistTask(task)
-	fmt.Printf("Enqueued task %s (service=%s, env=%s, version=%s)\n", taskKey, task.DeployRequest.Service, task.DeployRequest.Env, task.DeployRequest.Version)
-	log.Printf("Enqueued task %s for env %s", taskKey, task.DeployRequest.Env)
+	log.Printf("Enqueued task %s for key %s (service=%s, env=%s, version=%s)", taskKey, key, task.DeployRequest.Service, task.DeployRequest.Env, task.DeployRequest.Version)
+}
+
+func (q *Queue) processKey(key string, ch chan Task) {
+	var pending []Task
+	ticker := time.NewTicker(1 * time.Second) // Batch every second
+	defer ticker.Stop()
+	for {
+		select {
+		case task := <-ch:
+			pending = append(pending, task)
+		case <-ticker.C:
+			if len(pending) > 0 {
+				sort.Slice(pending, func(i, j int) bool {
+					return pending[i].DeployRequest.Timestamp.Before(pending[j].DeployRequest.Timestamp)
+				})
+				for _, t := range pending {
+					if t.DeployRequest.Status == "pending" {
+						q.tasks <- t
+					}
+				}
+				pending = nil
+			}
+		}
+	}
 }
 
 func (q *Queue) Dequeue() <-chan Task {
@@ -74,7 +104,23 @@ func (q *Queue) CompleteTask(taskKey string) {
 		t.DeployRequest.Status = "completed"
 		q.taskMap.Store(taskKey, t)
 		q.persistTask(t)
-		fmt.Printf("Marked task %s as completed\n", taskKey)
+		log.Printf("Marked task %s as completed", taskKey)
+	}
+}
+
+func (q *Queue) ConfirmTask(task types.DeployRequest) {
+	taskKey := ComputeTaskKey(task)
+	if t, exists := q.taskMap.Load(taskKey); exists {
+		existingTask := t.(Task)
+		existingTask.DeployRequest.Status = "pending"
+		q.taskMap.Store(taskKey, existingTask)
+		q.persistTask(existingTask)
+		key := existingTask.DeployRequest.Service + "-" + existingTask.DeployRequest.Env
+		if ch, loaded := q.perKey.Load(key); loaded {
+			taskCh := ch.(chan Task)
+			taskCh <- existingTask
+		}
+		log.Printf("Confirmed task %s, status set to pending", taskKey)
 	}
 }
 
@@ -85,19 +131,19 @@ func (q *Queue) persistTask(task Task) {
 	fileName := filepath.Join(q.cfg.StorageDir, fmt.Sprintf("tasks_%s.json", time.Now().Format("2006-01-02")))
 	if _, err := os.Stat(fileName); os.IsNotExist(err) {
 		if err := os.WriteFile(fileName, []byte("[]"), 0644); err != nil {
-			fmt.Printf("Failed to initialize tasks file %s: %v\n", fileName, err)
+			log.Printf("Failed to initialize tasks file %s: %v", fileName, err)
 			return
 		}
 	}
 
 	data, err := os.ReadFile(fileName)
 	if err != nil {
-		fmt.Printf("Failed to read tasks file %s: %v\n", fileName, err)
+		log.Printf("Failed to read tasks file %s: %v", fileName, err)
 		return
 	}
 	var tasks []types.DeployRequest
 	if err := json.Unmarshal(data, &tasks); err != nil {
-		fmt.Printf("Failed to unmarshal tasks file %s: %v\n", fileName, err)
+		log.Printf("Failed to unmarshal tasks file %s: %v", fileName, err)
 		return
 	}
 
@@ -116,11 +162,11 @@ func (q *Queue) persistTask(task Task) {
 
 	newData, err := json.MarshalIndent(tasks, "", "  ")
 	if err != nil {
-		fmt.Printf("Failed to marshal tasks file %s: %v\n", fileName, err)
+		log.Printf("Failed to marshal tasks file %s: %v", fileName, err)
 		return
 	}
 	if err := os.WriteFile(fileName, newData, 0644); err != nil {
-		fmt.Printf("Failed to write tasks file %s: %v\n", fileName, err)
+		log.Printf("Failed to write tasks file %s: %v", fileName, err)
 	}
 }
 
@@ -132,29 +178,31 @@ func (q *Queue) loadPendingTasks() {
 
 	data, err := os.ReadFile(fileName)
 	if err != nil {
-		fmt.Printf("Failed to read tasks file %s: %v\n", fileName, err)
+		log.Printf("Failed to read tasks file %s: %v", fileName, err)
 		return
 	}
 	var tasks []types.DeployRequest
 	if err := json.Unmarshal(data, &tasks); err != nil {
-		fmt.Printf("Failed to unmarshal tasks file %s: %v\n", fileName, err)
+		log.Printf("Failed to unmarshal tasks file %s: %v", fileName, err)
 		return
 	}
 
 	for _, t := range tasks {
-		if t.Status == "pending" {
+		if t.Status == "pending" || t.Status == "pending_confirmation" {
 			taskKey := ComputeTaskKey(t)
 			if _, exists := q.taskMap.Load(taskKey); !exists {
 				task := Task{DeployRequest: t}
-				q.taskMap.Store(taskKey, task)
-				q.tasks <- task
-				fmt.Printf("Loaded pending task %s (service=%s, env=%s, version=%s)\n", taskKey, t.Service, t.Env, t.Version)
+				if t.Status == "pending" {
+					q.Enqueue(task) // Only enqueue pending tasks
+				} else {
+					q.taskMap.Store(taskKey, task) // Store pending_confirmation tasks
+					q.persistTask(task)
+				}
 			}
 		}
 	}
 }
 
-// cleanupExpiredTasks periodically cleans up pending tasks older than 30 minutes
 func (q *Queue) cleanupExpiredTasks() {
 	ticker := time.NewTicker(5 * time.Minute) // Check every 5 minutes
 	defer ticker.Stop()
@@ -163,8 +211,8 @@ func (q *Queue) cleanupExpiredTasks() {
 		now := time.Now()
 		q.taskMap.Range(func(key, value interface{}) bool {
 			task := value.(Task)
-			if task.DeployRequest.Status == "pending" && now.Sub(task.DeployRequest.Timestamp) > 30*time.Minute {
-				log.Printf("Cleaning up expired pending task %s (age: %v)", key, now.Sub(task.DeployRequest.Timestamp))
+			if (task.DeployRequest.Status == "pending" || task.DeployRequest.Status == "pending_confirmation") && now.Sub(task.DeployRequest.Timestamp) > 30*time.Minute {
+				log.Printf("Cleaning up expired task %s (status: %s, age: %v)", key, task.DeployRequest.Status, now.Sub(task.DeployRequest.Timestamp))
 				task.DeployRequest.Status = "expired"
 				q.persistTask(task)
 				q.taskMap.Delete(key)
