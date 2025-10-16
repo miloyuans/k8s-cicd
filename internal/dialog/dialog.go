@@ -141,10 +141,10 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
 		}
 	}
 
-	// Extract unique environments from config.Environments keys
+	// Extract unique environments
 	envSet := make(map[string]bool)
-	for env := range cfg.Environments {
-		envSet[strings.ToLower(env)] = true
+	for _, info := range infos {
+		envSet[info.Env] = true
 	}
 
 	var envs []string
@@ -251,7 +251,7 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	for _, env := range s.SelectedEnvs {
 		task := types.DeployRequest{
 			Service:   service,
-			Env:       strings.ToLower(env), // Normalize env
+			Env:       env,
 			Version:   s.Version,
 			Timestamp: time.Now(),
 			UserName:  s.UserName,
@@ -275,9 +275,7 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	msg := tgbotapi.NewMessage(chatID, "是否继续提交另一个部署任务？\nWould you like to submit another deployment task?")
 	msg.ReplyMarkup = keyboard
 	msg.ParseMode = "Markdown"
-	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
-		s.Messages = append(s.Messages, sentMsg.MessageID)
-	}
+	sendMessage(cfg, chatID, msg)
 
 	// Start timeout after submission
 	go monitorDialogTimeout(userID, chatID, cfg, s)
@@ -292,15 +290,26 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 	s := state.(*DialogState)
 
 	if strings.HasPrefix(input, "confirm_api:") {
-		sendMessage(cfg, chatID, "Deployment confirmed.")
+		id := strings.TrimPrefix(input, "confirm_api:")
+		taskKeys, ok := pendingConfirmations.LoadAndDelete(id)
+		if ok {
+			sendMessage(cfg, chatID, "Deployment confirmed.")
+		} else {
+			sendMessage(cfg, chatID, "Confirmation ID not found.")
+		}
 		return
 	} else if strings.HasPrefix(input, "cancel_api:") {
-		keysStr := strings.TrimPrefix(input, "cancel_api:")
-		keys := strings.Split(keysStr, ",")
-		for _, k := range keys {
-			GlobalTaskQueue.CompleteTask(strings.TrimSpace(k))
+		id := strings.TrimPrefix(input, "cancel_api:")
+		taskKeysI, ok := pendingConfirmations.LoadAndDelete(id)
+		if ok {
+			taskKeys := taskKeysI.([]string)
+			for _, k := range taskKeys {
+				GlobalTaskQueue.CompleteTask(strings.TrimSpace(k))
+			}
+			sendMessage(cfg, chatID, "Deployment canceled.")
+		} else {
+			sendMessage(cfg, chatID, "Confirmation ID not found.")
 		}
-		sendMessage(cfg, chatID, "Deployment canceled.")
 		return
 	}
 

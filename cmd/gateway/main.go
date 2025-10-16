@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"github.com/google/uuid"
 
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/dialog"
@@ -23,6 +24,7 @@ import (
 
 var (
 	taskQueue *queue.Queue
+	pendingConfirmations sync.Map // map[string][]string for id -> taskKeys
 )
 
 func main() {
@@ -69,9 +71,9 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 				http.Error(w, "Missing env parameter", http.StatusBadRequest)
 				return
 			}
-			lowerEnv := strings.ToLower(env)
-			tasks := taskQueue.GetPendingTasks(lowerEnv)
-			log.Printf("Serving %d pending tasks for env %s", len(tasks), lowerEnv)
+
+			tasks := taskQueue.GetPendingTasks(env)
+			log.Printf("Serving %d pending tasks for env %s", len(tasks), env)
 
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(tasks); err != nil {
@@ -83,7 +85,7 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 			storage.PersistInteraction(cfg, map[string]interface{}{
 				"endpoint":  "/tasks",
 				"method":    "GET",
-				"env":       lowerEnv,
+				"env":       env,
 				"tasks":     len(tasks),
 				"timestamp": time.Now().Format(time.RFC3339),
 			})
@@ -179,6 +181,7 @@ func handleComplete(cfg *config.Config) http.HandlerFunc {
 	}
 }
 
+// New handler for receiving services from k8s-cicd
 func handleServices(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -254,40 +257,27 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 		}
 
 		if req.Service == "" || len(req.Envs) == 0 || req.Version == "" || req.Username == "" {
-			log.Printf("Missing required fields in submit-task request")
 			http.Error(w, "Missing required fields: service, envs, version, username", http.StatusBadRequest)
 			return
 		}
 
-		// Validate environments
-		for _, env := range req.Envs {
-			if _, ok := cfg.Environments[strings.ToLower(env)]; !ok {
-				log.Printf("Invalid environment %s in submit-task request", env)
-				http.Error(w, fmt.Sprintf("Invalid environment: %s", env), http.StatusBadRequest)
-				return
-			}
-		}
-
 		category := classifyService(req.Service, cfg.ServiceKeywords)
 		if category == "" {
-			log.Printf("No category found for service %s", req.Service)
 			http.Error(w, "No category found for service", http.StatusBadRequest)
 			return
 		}
 
 		chatID, ok := cfg.TelegramChats[category]
 		if !ok {
-			log.Printf("No chat configured for category %s", category)
 			http.Error(w, "No chat configured for category", http.StatusInternalServerError)
 			return
 		}
 
 		var taskKeys []string
 		for _, env := range req.Envs {
-			lowerEnv := strings.ToLower(env)
 			deployReq := types.DeployRequest{
 				Service:   req.Service,
-				Env:       lowerEnv,
+				Env:       env,
 				Version:   req.Version,
 				Timestamp: time.Now(),
 				UserName:  req.Username,
@@ -296,18 +286,22 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 			taskKeys = append(taskKeys, queue.ComputeTaskKey(deployReq))
 		}
 
+		id := uuid.New().String()[:8] // Short ID
+		pendingConfirmations.Store(id, taskKeys)
+
 		message := fmt.Sprintf("确认部署服务 %s 到环境 %s，版本 %s，由用户 %s 提交？\nConfirm deployment for service %s to envs %s, version %s by %s?",
 			req.Service, strings.Join(req.Envs, ","), req.Version, req.Username,
 			req.Service, strings.Join(req.Envs, ","), req.Version, req.Username)
-		callbackData := strings.Join(taskKeys, ",")
+		callbackData := id
 
 		if err := telegram.SendConfirmation(category, chatID, message, callbackData); err != nil {
 			log.Printf("Failed to send confirmation for submit-task: %v", err)
-			http.Error(w, "Failed to send confirmation", http.StatusInternalServerError)
+			http.Error(w, "Failed to send confirmation to Telegram", http.StatusInternalServerError)
 			return
 		}
 
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "submitted", "message": "Task submitted, awaiting confirmation in Telegram"})
 	}
 }
 
