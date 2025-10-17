@@ -57,9 +57,9 @@ func (c *Client) GetNewImage(service, version, namespace string) (string, error)
 	}
 
 	container := containers[0].(map[string]interface{})
-	currentImage, _, _ := unstructured.NestedString(container, "image")
-	if currentImage == "" {
-		return "", fmt.Errorf("no image found in deployment")
+	currentImage, found, err := unstructured.NestedString(container, "image")
+	if err != nil || !found {
+		return "", fmt.Errorf("no image found in deployment: %v", err)
 	}
 
 	parts := strings.Split(currentImage, ":")
@@ -86,7 +86,10 @@ func (c *Client) UpdateDeployment(ctx context.Context, service, newImage, namesp
 	}
 
 	container := containers[0].(map[string]interface{})
-	oldImage, _, _ := unstructured.NestedString(container, "image")
+	oldImage, found, err := unstructured.NestedString(container, "image")
+	if err != nil || !found {
+		return false, fmt.Sprintf("No image found in container: %v", err), ""
+	}
 
 	unstructured.SetNestedField(container, newImage, "image")
 	unstructured.SetNestedSlice(dep.Object, containers, "spec", "template", "spec", "containers")
@@ -157,7 +160,10 @@ func (c *Client) getEvents(ctx context.Context, service, namespace string) strin
 
 	var eventsStr strings.Builder
 	for _, ev := range events.Items {
-		message, _, _ := unstructured.NestedString(ev.Object, "message")
+		message, found, err := unstructured.NestedString(ev.Object, "message")
+		if err != nil || !found {
+			continue
+		}
 		eventsStr.WriteString(fmt.Sprintf("• %s\n", message))
 	}
 	return eventsStr.String()
@@ -172,7 +178,10 @@ func (c *Client) getPodLogs(ctx context.Context, service, namespace string) stri
 		return "No pods found or error getting pods"
 	}
 
-	podName := pods.Items[0].GetName()
+	podName, found, err := unstructured.NestedString(pods.Items[0].Object, "metadata", "name")
+	if err != nil || !found {
+		return "Failed to get pod name"
+	}
 	return fmt.Sprintf("Pod: %s - Logs retrieval requires REST client", podName)
 }
 
@@ -194,9 +203,9 @@ func (c *Client) getDeploymentEnvs(ctx context.Context, service, namespace strin
 	result := make(map[string]string)
 	for _, env := range envs {
 		if e, ok := env.(map[string]interface{}); ok {
-			name, _, _ := unstructured.NestedString(e, "name")
-			value, _, _ := unstructured.NestedString(e, "value")
-			if name != "" && value != "" {
+			name, nameFound, nameErr := unstructured.NestedString(e, "name")
+			value, valueFound, valueErr := unstructured.NestedString(e, "value")
+			if nameErr == nil && valueErr == nil && nameFound && valueFound && name != "" && value != "" {
 				result[name] = value
 			}
 		}
@@ -208,6 +217,7 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
 	const maxAttempts = 10
 	const interval = 5 * time.Second
 
+	var errMsg strings.Builder
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		podsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
 		pods, err := c.client.Resource(podsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
@@ -218,18 +228,26 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
 		}
 
 		var newPodsReady bool = true
-		var errMsg strings.Builder
+		errMsg.Reset()
 		for _, pod := range pods.Items {
 			containers, _, _ := unstructured.NestedSlice(pod.Object, "spec", "containers")
 			if len(containers) == 0 {
 				continue
 			}
-			podImage, _ := unstructured.NestedString(containers[0].(map[string]interface{}), "image")
+			podImage, found, err := unstructured.NestedString(containers[0].(map[string]interface{}), "image")
+			if err != nil || !found {
+				continue
+			}
 			if newImage != "" && podImage != newImage {
 				continue // Only check pods with the new image
 			}
 
-			phase, _ := unstructured.NestedString(pod.Object, "status", "phase")
+			phase, found, err := unstructured.NestedString(pod.Object, "status", "phase")
+			if err != nil || !found {
+				newPodsReady = false
+				errMsg.WriteString(fmt.Sprintf("Pod %s: failed to get status phase: %v\n", pod.GetName(), err))
+				continue
+			}
 			if phase != "Running" {
 				newPodsReady = false
 				errMsg.WriteString(fmt.Sprintf("Pod %s phase: %s (not Running)\n", pod.GetName(), phase))
@@ -279,7 +297,10 @@ func (c *Client) getPodEvents(ctx context.Context, podName, namespace string) st
 
 	var eventsStr strings.Builder
 	for _, ev := range events.Items {
-		message, _, _ := unstructured.NestedString(ev.Object, "message")
+		message, found, err := unstructured.NestedString(ev.Object, "message")
+		if err != nil || !found {
+			continue
+		}
 		eventsStr.WriteString(fmt.Sprintf("• %s\n", message))
 	}
 	if eventsStr.Len() == 0 {
@@ -294,7 +315,10 @@ func (c *Client) RollbackDeployment(ctx context.Context, service, namespace stri
 	if err != nil {
 		return fmt.Errorf("failed to get deployment: %v", err)
 	}
-	currentRevision, _ := unstructured.NestedInt64(dep.Object, "status", "observedGeneration")
+	currentRevision, found, err := unstructured.NestedInt64(dep.Object, "status", "observedGeneration")
+	if err != nil || !found {
+		return fmt.Errorf("failed to get current revision: %v", err)
+	}
 
 	rollback := &unstructured.Unstructured{
 		Object: map[string]interface{}{
