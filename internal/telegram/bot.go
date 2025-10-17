@@ -16,8 +16,30 @@ import (
 	"k8s-cicd/internal/types"
 )
 
+var bots map[string]*tgbotapi.BotAPI
+
 func StartBot(cfg *config.Config, q *queue.Queue) {
 	dialog.SetTaskQueue(q)
+	bots = make(map[string]*tgbotapi.BotAPI)
+
+	for service, token := range cfg.TelegramBots {
+		bot, err := tgbotapi.NewBotAPI(token)
+		if err != nil {
+			log.Printf("Failed to create bot for service %s: %v", service, err)
+			continue
+		}
+		bots[service] = bot
+		log.Printf("Started bot for service %s", service)
+		go handleBot(bot, cfg, service)
+	}
+}
+
+func GetBot(service string) (*tgbotapi.BotAPI, error) {
+	bot, ok := bots[service]
+	if !ok {
+		return nil, fmt.Errorf("no bot configured for service %s", service)
+	}
+	return bot, nil
 }
 
 func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
@@ -31,6 +53,8 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 			userID := update.Message.From.ID
 			text := strings.TrimSpace(update.Message.Text)
 			userName := update.Message.From.UserName
+
+			log.Printf("Received message from user %d in chat %d: %s", userID, chatID, text)
 
 			if cfg.TelegramChats[service] != chatID {
 				log.Printf("Ignoring message from chat %d: not in allowed chats for service %s", chatID, service)
@@ -132,8 +156,14 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 	category := classifyService(result.Request.Service, cfg.ServiceKeywords)
 	chatID, ok := cfg.TelegramChats[category]
 	if !ok {
-		log.Printf("No chat configured for category %s, skipping notification for service %s", category, result.Request.Service)
-		return
+		log.Printf("No chat configured for category %s, trying default chat", category)
+		if defaultChatID, ok := cfg.TelegramChats["other"]; ok {
+			chatID = defaultChatID
+			category = "other"
+		} else {
+			log.Printf("No default chat configured, skipping notification for service %s", result.Request.Service)
+			return
+		}
 	}
 	token, ok := cfg.TelegramBots[category]
 	if !ok {
@@ -195,18 +225,20 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 
 func NotifyDeployTeam(cfg *config.Config, result *storage.DeployResult) {
 	category := cfg.DeployCategory
-	token, ok := cfg.TelegramBots[category]
-	if !ok {
-		log.Printf("Skipping deploy notification: no bot configured for category %s", category)
-		return
+	if category == "" {
+		log.Printf("No deploy category configured, trying default chat")
+		category = "other"
 	}
-
 	chatID, ok := cfg.TelegramChats[category]
 	if !ok {
-		log.Printf("Skipping deploy notification: no chat configured for category %s", category)
+		log.Printf("No chat configured for category %s, skipping deploy notification", category)
 		return
 	}
-
+	token, ok := cfg.TelegramBots[category]
+	if !ok {
+		log.Printf("No bot configured for category %s, skipping deploy notification", category)
+		return
+	}
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		log.Printf("Failed to create bot for deploy category %s: %v", category, err)
@@ -270,5 +302,5 @@ func classifyService(service string, keywords map[string][]string) string {
 			}
 		}
 	}
-	return ""
+	return "other" // Default to "other" if no category matches
 }

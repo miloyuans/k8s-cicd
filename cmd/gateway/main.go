@@ -33,7 +33,7 @@ func main() {
 		log.Fatalf("Failed to create storage dir: %v", err)
 	}
 
-	initServicesDir(cfg) // Initialize services directory
+	initServicesDir(cfg)
 
 	storage.InitAllDailyFiles(cfg, nil)
 	go storage.DailyMaintenance(cfg, nil)
@@ -57,14 +57,19 @@ func initServicesDir(cfg *config.Config) {
 		if err := os.MkdirAll(cfg.ServicesDir, 0755); err != nil {
 			log.Fatalf("Failed to create services dir %s: %v", cfg.ServicesDir, err)
 		}
-		for category := range cfg.TelegramBots {
-			filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
-			if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
-				log.Printf("Failed to init service file %s: %v", filePath, err)
-			}
-		}
-		log.Println("Initialized services directory and files")
 	}
+	for category := range cfg.TelegramBots {
+		filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
+		if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+			log.Printf("Failed to init service file %s: %v", filePath, err)
+		}
+	}
+	// Ensure default "other" service file
+	filePath := filepath.Join(cfg.ServicesDir, "other.svc.list")
+	if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+		log.Printf("Failed to init service file %s: %v", filePath, err)
+	}
+	log.Println("Initialized services directory and files")
 }
 
 func handleTasks(cfg *config.Config) http.HandlerFunc {
@@ -238,7 +243,6 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Ensure services directory exists
 		if err := os.MkdirAll(cfg.ServicesDir, 0755); err != nil {
 			log.Printf("Failed to create services dir %s: %v", cfg.ServicesDir, err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -297,7 +301,7 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 		}
 
 		for _, env := range req.Envs {
-			if _, ok := cfg.Environments[strings.ToLower(env)]; !ok {
+			if !validateEnvironment(env, cfg) {
 				log.Printf("Invalid environment %s in submit-task request", env)
 				http.Error(w, fmt.Sprintf("Invalid environment: %s", env), http.StatusBadRequest)
 				return
@@ -305,17 +309,17 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 		}
 
 		category := classifyService(req.Service, cfg.ServiceKeywords)
-		if category == "" {
-			log.Printf("No category found for service %s", req.Service)
-			http.Error(w, "No category found for service", http.StatusBadRequest)
-			return
-		}
-
 		chatID, ok := cfg.TelegramChats[category]
 		if !ok {
-			log.Printf("No chat configured for category %s", category)
-			http.Error(w, "No chat configured for category", http.StatusInternalServerError)
-			return
+			log.Printf("No chat configured for category %s, trying default chat", category)
+			if defaultChatID, ok := cfg.TelegramChats["other"]; ok {
+				chatID = defaultChatID
+				category = "other"
+			} else {
+				log.Printf("No default chat configured for category %s", category)
+				http.Error(w, "No chat configured for category", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		var taskKeys []string
@@ -357,6 +361,22 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 	}
 }
 
+func validateEnvironment(env string, cfg *config.Config) bool {
+	fileName := filepath.Join(cfg.StorageDir, "environments.json")
+	if data, err := os.ReadFile(fileName); err == nil {
+		var envs []string
+		if err := json.Unmarshal(data, &envs); err == nil {
+			for _, e := range envs {
+				if strings.ToLower(e) == strings.ToLower(env) {
+					return true
+				}
+			}
+		}
+	}
+	_, exists := cfg.Environments[strings.ToLower(env)]
+	return exists
+}
+
 func classifyService(service string, keywords map[string][]string) string {
 	lowerService := strings.ToLower(service)
 	for category, patterns := range keywords {
@@ -372,7 +392,7 @@ func classifyService(service string, keywords map[string][]string) string {
 			}
 		}
 	}
-	return ""
+	return "other"
 }
 
 func getClientIP(r *http.Request) string {

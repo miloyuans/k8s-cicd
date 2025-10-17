@@ -37,7 +37,6 @@ var (
 	taskQueue           *queue.Queue
 	GlobalTaskQueue     *queue.Queue
 	PendingConfirmations sync.Map
-	bots                map[string]*tgbotapi.BotAPI
 )
 
 func SetTaskQueue(q *queue.Queue) {
@@ -65,6 +64,7 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config, userN
 	dialogs.Store(userID, newState)
 
 	log.Printf("Started dialog for user %d in chat %d for service %s", userID, chatID, service)
+	sendMessage(cfg, chatID, fmt.Sprintf("开始部署对话 / Starting deployment dialog for service %s", service))
 	sendServiceSelection(userID, chatID, cfg, newState)
 	go monitorDialogTimeout(userID, chatID, cfg, newState)
 }
@@ -73,15 +73,18 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 	serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
 	if err != nil {
 		log.Printf("Failed to load service lists for user %d: %v", userID, err)
+		sendMessage(cfg, chatID, "无法加载服务列表 / Failed to load service list.")
 		return
 	}
 	services, exists := serviceLists[s.Service]
 	if !exists {
 		log.Printf("No service list found for %s for user %d", s.Service, userID)
+		sendMessage(cfg, chatID, "未找到服务列表 / No service list found.")
 		return
 	}
 	if len(services) == 0 {
 		log.Printf("No services available for %s for user %d", s.Service, userID)
+		sendMessage(cfg, chatID, "无可用服务 / No services available.")
 		return
 	}
 
@@ -160,11 +163,13 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 			serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
 			if err != nil {
 				log.Printf("Failed to load service lists: %v", err)
+				sendMessage(cfg, chatID, "无法加载服务列表 / Failed to load service list.")
 				return
 			}
 			services, exists := serviceLists[s.Service]
 			if !exists {
 				log.Printf("No service list found for %s", s.Service)
+				sendMessage(cfg, chatID, "未找到服务列表 / No service list found.")
 				return
 			}
 			var buttons [][]tgbotapi.InlineKeyboardButton
@@ -204,7 +209,7 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 			}
 		}
 	case "env":
-		if contains(getEnvironmentsFromDeployFile(cfg), input) {
+		if validateEnvironment(input, cfg) {
 			s.SelectedEnvs = []string{input}
 			s.Stage = "version"
 			dialogs.Store(userID, s)
@@ -212,7 +217,7 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 		} else if input == "cancel" {
 			CancelDialog(userID, chatID, cfg)
 		} else {
-			sendMessage(cfg, chatID, "无效环境 / Invalid environment. Please select a valid environment.")
+			sendMessage(cfg, chatID, fmt.Sprintf("无效环境 %s / Invalid environment %s. Please select a valid environment.", input, input))
 		}
 	case "version":
 		s.Version = input
@@ -242,6 +247,24 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 			CancelDialog(userID, chatID, cfg)
 		}
 	}
+}
+
+func validateEnvironment(env string, cfg *config.Config) bool {
+	// First, check environments.json
+	fileName := filepath.Join(cfg.StorageDir, "environments.json")
+	if data, err := os.ReadFile(fileName); err == nil {
+		var envs []string
+		if err := json.Unmarshal(data, &envs); err == nil {
+			for _, e := range envs {
+				if strings.ToLower(e) == strings.ToLower(env) {
+					return true
+				}
+			}
+		}
+	}
+	// Fallback to cfg.Environments
+	_, exists := cfg.Environments[strings.ToLower(env)]
+	return exists
 }
 
 func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
@@ -416,17 +439,18 @@ func sendMessage(cfg *config.Config, chatID int64, text interface{}) (tgbotapi.M
 		}
 	}
 	if service == "" {
-		log.Printf("No service found for chat %d", chatID)
-		return tgbotapi.Message{}, fmt.Errorf("no service found for chat %d", chatID)
+		log.Printf("No service found for chat %d, trying default chat", chatID)
+		if defaultChatID, ok := cfg.TelegramChats["other"]; ok {
+			chatID = defaultChatID
+			service = "other"
+		} else {
+			log.Printf("No default chat configured for chat %d", chatID)
+			return tgbotapi.Message{}, fmt.Errorf("no service or default chat found for chat %d", chatID)
+		}
 	}
-	token, ok := cfg.TelegramBots[service]
-	if !ok {
-		log.Printf("No bot configured for service: %s", service)
-		return tgbotapi.Message{}, fmt.Errorf("no bot configured for service %s", service)
-	}
-	bot, err := tgbotapi.NewBotAPI(token)
+	bot, err := telegram.GetBot(service)
 	if err != nil {
-		log.Printf("Failed to create bot for service %s: %v", service, err)
+		log.Printf("Failed to get bot for service %s: %v", service, err)
 		return tgbotapi.Message{}, err
 	}
 
@@ -463,17 +487,18 @@ func deleteMessages(s *DialogState, cfg *config.Config) {
 		}
 	}
 	if service == "" {
-		log.Printf("No service found for chat %d", s.ChatID)
-		return
+		log.Printf("No service found for chat %d, trying default chat", s.ChatID)
+		if defaultChatID, ok := cfg.TelegramChats["other"]; ok {
+			s.ChatID = defaultChatID
+			service = "other"
+		} else {
+			log.Printf("No default chat configured for chat %d", s.ChatID)
+			return
+		}
 	}
-	token, ok := cfg.TelegramBots[service]
-	if !ok {
-		log.Printf("No bot configured for service: %s", service)
-		return
-	}
-	bot, err := tgbotapi.NewBotAPI(token)
+	bot, err := telegram.GetBot(service)
 	if err != nil {
-		log.Printf("Failed to create bot for service %s: %v", service, err)
+		log.Printf("Failed to get bot for service %s: %v", service, err)
 		return
 	}
 
@@ -488,9 +513,9 @@ func deleteMessages(s *DialogState, cfg *config.Config) {
 }
 
 func SendConfirmation(category string, chatID int64, message string, callbackData string) error {
-	bot, ok := bots[category]
-	if !ok {
-		return fmt.Errorf("no bot for category %s", category)
+	bot, err := telegram.GetBot(category)
+	if err != nil {
+		return fmt.Errorf("no bot for category %s: %v", category, err)
 	}
 
 	buttons := [][]tgbotapi.InlineKeyboardButton{
@@ -503,7 +528,7 @@ func SendConfirmation(category string, chatID int64, message string, callbackDat
 	msg := tgbotapi.NewMessage(chatID, message)
 	msg.ReplyMarkup = keyboard
 	msg.ParseMode = "HTML"
-	_, err := bot.Send(msg)
+	_, err = bot.Send(msg)
 	return err
 }
 
