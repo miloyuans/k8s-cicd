@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
+	"k8s-cicd/internal/telegram"
 	"k8s-cicd/internal/types"
 )
 
@@ -250,7 +252,6 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 }
 
 func validateEnvironment(env string, cfg *config.Config) bool {
-	// First, check environments.json
 	fileName := filepath.Join(cfg.StorageDir, "environments.json")
 	if data, err := os.ReadFile(fileName); err == nil {
 		var envs []string
@@ -262,7 +263,6 @@ func validateEnvironment(env string, cfg *config.Config) bool {
 			}
 		}
 	}
-	// Fallback to cfg.Environments
 	_, exists := cfg.Environments[strings.ToLower(env)]
 	return exists
 }
