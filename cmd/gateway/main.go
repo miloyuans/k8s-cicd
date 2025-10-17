@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -357,27 +356,6 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 			"message":         "Task submitted, awaiting confirmation in Telegram",
 			"confirmation_id": id,
 		})
-	}
-}
-
-func notifyK8sCICD(cfg *config.Config) {
-	url := cfg.K8sCICDURL + "/fetch-tasks"
-	req, err := http.NewRequest("POST", url, nil)
-	if err != nil {
-		log.Printf("Failed to create fetch-tasks request: %v", err)
-		return
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Failed to notify k8s-cicd to fetch tasks: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("k8s-cicd fetch-tasks failed with status %d", resp.StatusCode)
-	} else {
-		log.Printf("Successfully notified k8s-cicd to fetch tasks")
 	}
 }
 
