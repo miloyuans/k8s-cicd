@@ -1,4 +1,4 @@
-// dialog.go
+// internal/dialog/dialog.go
 package dialog
 
 import (
@@ -15,7 +15,6 @@ import (
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
-	"k8s-cicd/internal/types"
 )
 
 type DialogState struct {
@@ -45,13 +44,13 @@ func SetTaskQueue(q *queue.Queue) {
 }
 
 func StartDialog(userID, chatID int64, service string, cfg *config.Config, userName string) {
-	if state, loaded := dialogs.Load(userID); loaded {
+	if _, loaded := dialogs.Load(userID); loaded {
 		log.Printf("Cancelling existing dialog for user %d in chat %d", userID, chatID)
 		CancelDialog(userID, chatID, cfg) // Reset stuck dialog
 		sendMessage(cfg, chatID, "Previous dialog was active and has been cancelled. Starting new deployment dialog.")
 	}
 
-	state := &DialogState{
+	newState := &DialogState{
 		UserID:        userID,
 		ChatID:        chatID,
 		Service:       service,
@@ -61,11 +60,11 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config, userN
 		timeoutCancel: make(chan bool),
 		Messages:      []int{},
 	}
-	dialogs.Store(userID, state)
+	dialogs.Store(userID, newState)
 
 	log.Printf("Started dialog for user %d in chat %d for service %s", userID, chatID, service)
-	sendServiceSelection(userID, chatID, cfg, state)
-	go monitorDialogTimeout(userID, chatID, cfg, state) // Ensure timeout monitor starts
+	sendServiceSelection(userID, chatID, cfg, newState)
+	go monitorDialogTimeout(userID, chatID, cfg, newState)
 }
 
 func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogState) {
@@ -217,7 +216,6 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 			}
 		}
 	case "env":
-		// Existing env handling (assumed unchanged)
 		if contains(getEnvironmentsFromDeployFile(cfg), input) {
 			s.SelectedEnvs = append(s.SelectedEnvs, input)
 			s.Stage = "version"
@@ -289,19 +287,19 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
 }
 
 func sendEnvSelection(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	// Placeholder for env selection (assumed unchanged)
+	// Placeholder for env selection
 }
 
 func sendConfirmation(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	// Placeholder for confirmation (assumed unchanged)
+	// Placeholder for confirmation
 }
 
 func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	// Placeholder for task submission (assumed unchanged)
+	// Placeholder for task submission
 }
 
 func sendVersionPrompt(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	// Placeholder for version prompt (assumed unchanged)
+	// Placeholder for version prompt
 }
 
 func CancelDialog(userID, chatID int64, cfg *config.Config) bool {
