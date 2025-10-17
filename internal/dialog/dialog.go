@@ -15,7 +15,6 @@ import (
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
-	"k8s-cicd/internal/telegram"
 	"k8s-cicd/internal/types"
 )
 
@@ -38,6 +37,7 @@ var (
 	taskQueue           *queue.Queue
 	GlobalTaskQueue     *queue.Queue
 	PendingConfirmations sync.Map
+	bots                map[string]*tgbotapi.BotAPI
 )
 
 func SetTaskQueue(q *queue.Queue) {
@@ -353,7 +353,7 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
 		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
 	)
-	if err := telegram.SendConfirmation(s.Service, chatID, message, id); err != nil {
+	if err := SendConfirmation(s.Service, chatID, message, id); err != nil {
 		log.Printf("Failed to send confirmation: %v", err)
 		sendMessage(cfg, chatID, "Failed to send confirmation to Telegram.")
 		return
@@ -485,6 +485,26 @@ func deleteMessages(s *DialogState, cfg *config.Config) {
 			log.Printf("Deleted message %d in chat %d", msgID, s.ChatID)
 		}
 	}
+}
+
+func SendConfirmation(category string, chatID int64, message string, callbackData string) error {
+	bot, ok := bots[category]
+	if !ok {
+		return fmt.Errorf("no bot for category %s", category)
+	}
+
+	buttons := [][]tgbotapi.InlineKeyboardButton{
+		{
+			tgbotapi.NewInlineKeyboardButtonData("确认 / Confirm", "confirm_api:"+callbackData),
+			tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel_api:"+callbackData),
+		},
+	}
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	msg := tgbotapi.NewMessage(chatID, message)
+	msg.ReplyMarkup = keyboard
+	msg.ParseMode = "HTML"
+	_, err := bot.Send(msg)
+	return err
 }
 
 func remove(slice []string, item string) []string {

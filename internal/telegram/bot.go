@@ -16,22 +16,8 @@ import (
 	"k8s-cicd/internal/types"
 )
 
-var bots map[string]*tgbotapi.BotAPI
-
 func StartBot(cfg *config.Config, q *queue.Queue) {
 	dialog.SetTaskQueue(q)
-	bots = make(map[string]*tgbotapi.BotAPI)
-
-	for service, token := range cfg.TelegramBots {
-		bot, err := tgbotapi.NewBotAPI(token)
-		if err != nil {
-			log.Printf("Failed to create bot for service %s: %v", service, err)
-			continue
-		}
-		bots[service] = bot
-		log.Printf("Started bot for service %s", service)
-		go handleBot(bot, cfg, service)
-	}
 }
 
 func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
@@ -267,26 +253,6 @@ func getVersionFromImage(image string) string {
 		return parts[1]
 	}
 	return "unknown"
-}
-
-func SendConfirmation(category string, chatID int64, message string, callbackData string) error {
-	bot, ok := bots[category]
-	if !ok {
-		return fmt.Errorf("no bot for category %s", category)
-	}
-
-	buttons := [][]tgbotapi.InlineKeyboardButton{
-		{
-			tgbotapi.NewInlineKeyboardButtonData("确认 / Confirm", "confirm_api:"+callbackData),
-			tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel_api:"+callbackData),
-		},
-	}
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msg := tgbotapi.NewMessage(chatID, message)
-	msg.ReplyMarkup = keyboard
-	msg.ParseMode = "HTML"
-	_, err := bot.Send(msg)
-	return err
 }
 
 func classifyService(service string, keywords map[string][]string) string {
