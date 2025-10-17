@@ -105,7 +105,6 @@ func reportServicesToGateway(cfg *config.Config) {
 	}
 
 	attempt := 1
-	maxBackoff := 60 * time.Second
 	for {
 		req, err := http.NewRequest("POST", cfg.GatewayURL+"/services", bytes.NewBuffer(data))
 		if err != nil {
