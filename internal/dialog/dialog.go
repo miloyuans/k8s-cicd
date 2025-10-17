@@ -1,4 +1,3 @@
-// internal/dialog/dialog.go
 package dialog
 
 import (
@@ -22,20 +21,20 @@ type DialogState struct {
 	ChatID        int64
 	Service       string
 	Stage         string // "service", "env", "version", "confirm", "continue"
-	Selected      []string
-	SelectedEnvs  []string // For multi-select envs
+	Selected      string // Single selection for service
+	SelectedEnvs  []string
 	StartedAt     time.Time
 	UserName      string
 	Version       string
-	timeoutCancel chan bool // Channel to cancel timeout
-	Messages      []int     // Store message IDs for cleanup
+	timeoutCancel chan bool
+	Messages      []int
 }
 
 var (
-	dialogs             sync.Map // map[int64]*DialogState
+	dialogs             sync.Map
 	taskQueue           *queue.Queue
-	GlobalTaskQueue     *queue.Queue     // Added for API confirmation
-	PendingConfirmations sync.Map         // map[string][]types.DeployRequest for confirmationID -> tasks
+	GlobalTaskQueue     *queue.Queue
+	PendingConfirmations sync.Map
 )
 
 func SetTaskQueue(q *queue.Queue) {
@@ -46,7 +45,7 @@ func SetTaskQueue(q *queue.Queue) {
 func StartDialog(userID, chatID int64, service string, cfg *config.Config, userName string) {
 	if _, loaded := dialogs.Load(userID); loaded {
 		log.Printf("Cancelling existing dialog for user %d in chat %d", userID, chatID)
-		CancelDialog(userID, chatID, cfg) // Reset stuck dialog
+		CancelDialog(userID, chatID, cfg)
 		sendMessage(cfg, chatID, "Previous dialog was active and has been cancelled. Starting new deployment dialog.")
 	}
 
@@ -85,7 +84,6 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 
 	log.Printf("Loaded %d services for %s: %v", len(services), s.Service, services)
 
-	// Calculate columns based on service name lengths and count
 	maxLen := 0
 	for _, svc := range services {
 		if len(svc) > maxLen {
@@ -94,30 +92,28 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 	}
 	cols := 2
 	if maxLen < 10 {
-		cols = 4 // Short names, use 4 columns
+		cols = 4
 	} else if maxLen < 15 {
-		cols = 3 // Medium names, use 3 columns
+		cols = 3
 	}
 	if len(services) < cols {
-		cols = len(services) // Fewer services than columns, use service count
+		cols = len(services)
 	}
 
-	// Build multi-column button layout with visual marks
 	var buttons [][]tgbotapi.InlineKeyboardButton
 	var row []tgbotapi.InlineKeyboardButton
 	for i, svc := range services {
-		prefix := ""
-		if contains(s.Selected, svc) {
-			prefix = "✓ " // Visual mark for selected
+		displayText := svc
+		if svc == s.Selected {
+			displayText = fmt.Sprintf("<b>✅ %s</b>", svc) // Green checkmark for selected
 		}
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(prefix+svc, svc))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, svc))
 		if len(row) == cols || i == len(services)-1 {
 			buttons = append(buttons, row)
 			row = []tgbotapi.InlineKeyboardButton{}
 		}
 	}
 
-	// Add Next and Cancel buttons
 	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
 		tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_service"),
 		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
@@ -126,12 +122,10 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 	log.Printf("Generated %d rows with %d columns for %d services for user %d", len(buttons), cols, len(services), userID)
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msgText := "请选择一个或多个服务（已选将标记 ✓）：\nPlease select one or more services (selected will be marked ✓):"
-	if len(s.Selected) > 0 {
-		msgText += fmt.Sprintf("\n已选 / Selected: %s", strings.Join(s.Selected, ", "))
-	}
+	msgText := fmt.Sprintf("请选择服务 / Please select a service:\n当前选中 / Currently selected: %s", s.Selected)
 	msg := tgbotapi.NewMessage(chatID, msgText)
 	msg.ReplyMarkup = keyboard
+	msg.ParseMode = "HTML"
 	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
 		s.Messages = append(s.Messages, sentMsg.MessageID)
 	}
@@ -148,8 +142,8 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 	switch s.Stage {
 	case "service":
 		if input == "next_service" {
-			if len(s.Selected) == 0 {
-				sendMessage(cfg, chatID, "请至少选择一个服务。\nPlease select at least one service.")
+			if s.Selected == "" {
+				sendMessage(cfg, chatID, "请先选择一个服务。\nPlease select a service first.")
 				return
 			}
 			s.Stage = "env"
@@ -158,14 +152,8 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 		} else if input == "cancel" {
 			CancelDialog(userID, chatID, cfg)
 		} else {
-			// Toggle selection
-			if contains(s.Selected, input) {
-				s.Selected = remove(s.Selected, input)
-			} else {
-				s.Selected = append(s.Selected, input)
-			}
+			s.Selected = input // Single selection
 			dialogs.Store(userID, s)
-			// Refresh keyboard by editing the message
 			serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
 			if err != nil {
 				log.Printf("Failed to load service lists: %v", err)
@@ -183,11 +171,11 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 				cols = len(services)
 			}
 			for i, svc := range services {
-				prefix := ""
-				if contains(s.Selected, svc) {
-					prefix = "✓ "
+				displayText := svc
+				if svc == s.Selected {
+					displayText = fmt.Sprintf("<b>✅ %s</b>", svc)
 				}
-				row = append(row, tgbotapi.NewInlineKeyboardButtonData(prefix+svc, svc))
+				row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, svc))
 				if len(row) == cols || i == len(services)-1 {
 					buttons = append(buttons, row)
 					row = []tgbotapi.InlineKeyboardButton{}
@@ -198,17 +186,14 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 				tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
 			})
 			keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-			msgText := "请选择一个或多个服务（已选将标记 ✓）：\nPlease select one or more services (selected will be marked ✓):"
-			if len(s.Selected) > 0 {
-				msgText += fmt.Sprintf("\n已选 / Selected: %s", strings.Join(s.Selected, ", "))
-			}
+			msgText := fmt.Sprintf("请选择服务 / Please select a service:\n当前选中 / Currently selected: %s", s.Selected)
 			edit := tgbotapi.EditMessageTextConfig{
 				BaseEdit: tgbotapi.BaseEdit{
 					ChatID:    chatID,
 					MessageID: s.Messages[len(s.Messages)-1],
 				},
 				Text:      msgText,
-				ParseMode: "Markdown",
+				ParseMode: "HTML",
 			}
 			edit.ReplyMarkup = &keyboard
 			if _, err := sendMessage(cfg, chatID, edit); err != nil {
@@ -217,14 +202,14 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 		}
 	case "env":
 		if contains(getEnvironmentsFromDeployFile(cfg), input) {
-			s.SelectedEnvs = append(s.SelectedEnvs, input)
+			s.SelectedEnvs = []string{input} // Single environment selection for consistency
 			s.Stage = "version"
 			dialogs.Store(userID, s)
 			sendVersionPrompt(userID, chatID, cfg, s)
 		} else if input == "cancel" {
 			CancelDialog(userID, chatID, cfg)
 		} else {
-			sendMessage(cfg, chatID, "Invalid environment. Please select a valid environment.")
+			sendMessage(cfg, chatID, "无效环境 / Invalid environment. Please select a valid environment.")
 		}
 	case "version":
 		s.Version = input
@@ -244,7 +229,7 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 			default:
 			}
 			s.Stage = "service"
-			s.Selected = []string{}
+			s.Selected = ""
 			s.SelectedEnvs = []string{}
 			s.Version = ""
 			s.Messages = []int{}
@@ -287,19 +272,99 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
 }
 
 func sendEnvSelection(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	// Placeholder for env selection
+	envs := getEnvironmentsFromDeployFile(cfg)
+	if len(envs) == 0 {
+		log.Printf("No environments available for user %d in chat %d", userID, chatID)
+		sendMessage(cfg, chatID, "无可用环境 / No environments available.")
+		return
+	}
+
+	var buttons [][]tgbotapi.InlineKeyboardButton
+	var row []tgbotapi.InlineKeyboardButton
+	cols := 2
+	if len(envs) < cols {
+		cols = len(envs)
+	}
+	for i, env := range envs {
+		displayText := env
+		if contains(s.SelectedEnvs, env) {
+			displayText = fmt.Sprintf("<b>✅ %s</b>", env)
+		}
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, env))
+		if len(row) == cols || i == len(envs)-1 {
+			buttons = append(buttons, row)
+			row = []tgbotapi.InlineKeyboardButton{}
+		}
+	}
+	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_env"),
+		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
+	})
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	msgText := fmt.Sprintf("请选择环境 / Please select an environment:\n当前选中 / Currently selected: %s", strings.Join(s.SelectedEnvs, ", "))
+	msg := tgbotapi.NewMessage(chatID, msgText)
+	msg.ReplyMarkup = keyboard
+	msg.ParseMode = "HTML"
+	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
+		s.Messages = append(s.Messages, sentMsg.MessageID)
+	}
 }
 
 func sendConfirmation(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	// Placeholder for confirmation
+	message := fmt.Sprintf(
+		"确认部署服务 / Confirm deployment:\n服务 / Service: %s\n环境 / Environment: %s\n版本 / Version: %s\n提交用户 / Submitted by: %s",
+		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
+	)
+	buttons := [][]tgbotapi.InlineKeyboardButton{
+		{
+			tgbotapi.NewInlineKeyboardButtonData("确认 / Confirm", "confirm"),
+			tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
+		},
+	}
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	msg := tgbotapi.NewMessage(chatID, message)
+	msg.ReplyMarkup = keyboard
+	msg.ParseMode = "HTML"
+	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
+		s.Messages = append(s.Messages, sentMsg.MessageID)
+	}
 }
 
 func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	// Placeholder for task submission
+	id := uuid.New().String()[:8]
+	tasks := []types.DeployRequest{
+		{
+			Service:   s.Selected,
+			Env:       s.SelectedEnvs[0],
+			Version:   s.Version,
+			Timestamp: time.Now(),
+			UserName:  s.UserName,
+			Status:    "pending_confirmation",
+		},
+	}
+	PendingConfirmations.Store(id, tasks)
+
+	message := fmt.Sprintf(
+		"确认部署服务 %s 到环境 %s，版本 %s，由用户 %s 提交？\nConfirm deployment for service %s to env %s, version %s by %s?",
+		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
+		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
+	)
+	if err := SendConfirmation(s.Service, chatID, message, id); err != nil {
+		log.Printf("Failed to send confirmation: %v", err)
+		sendMessage(cfg, chatID, "Failed to send confirmation to Telegram.")
+		return
+	}
+
+	sendMessage(cfg, chatID, "Task submitted, awaiting confirmation in Telegram.")
 }
 
 func sendVersionPrompt(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	// Placeholder for version prompt
+	msg := tgbotapi.NewMessage(chatID, "请输入版本号 / Please enter the version number:")
+	msg.ParseMode = "HTML"
+	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
+		s.Messages = append(s.Messages, sentMsg.MessageID)
+	}
 }
 
 func CancelDialog(userID, chatID int64, cfg *config.Config) bool {
@@ -366,10 +431,10 @@ func sendMessage(cfg *config.Config, chatID int64, text interface{}) (tgbotapi.M
 	switch t := text.(type) {
 	case string:
 		msg := tgbotapi.NewMessage(chatID, t)
-		msg.ParseMode = "Markdown"
+		msg.ParseMode = "HTML"
 		sentMsg, err = bot.Send(msg)
 	case tgbotapi.MessageConfig:
-		t.ParseMode = "Markdown"
+		t.ParseMode = "HTML"
 		sentMsg, err = bot.Send(t)
 	case tgbotapi.EditMessageTextConfig:
 		sentMsg, err = bot.Send(t)

@@ -1,4 +1,3 @@
-// cmd/k8s-cicd/main.go
 package main
 
 import (
@@ -42,7 +41,7 @@ func main() {
 
 	storage.InitAllDailyFiles(cfg, k8sClient.Client())
 	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
-	reportToGateway(cfg)
+	go reportToGateway(cfg) // Run in goroutine for persistent retries
 
 	taskQueue = queue.NewQueue(cfg, 100)
 
@@ -80,7 +79,7 @@ func initServicesDir(cfg *config.Config) {
 func updateAndReportServices() {
 	log.Println("Immediate updating services")
 	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
-	reportServicesToGateway(cfg)
+	go reportServicesToGateway(cfg) // Run in goroutine for persistent retries
 }
 
 func periodicUpdateServices() {
@@ -105,11 +104,14 @@ func reportServicesToGateway(cfg *config.Config) {
 		return
 	}
 
-	const maxRetries = 3
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	attempt := 1
+	maxBackoff := 60 * time.Second
+	for {
 		req, err := http.NewRequest("POST", cfg.GatewayURL+"/services", bytes.NewBuffer(data))
 		if err != nil {
-			log.Printf("Failed to create services request (attempt %d/%d): %v", attempt, maxRetries, err)
+			log.Printf("Failed to create services request (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -117,26 +119,31 @@ func reportServicesToGateway(cfg *config.Config) {
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("Failed to send services to gateway (attempt %d/%d): %v", attempt, maxRetries, err)
-			if attempt == maxRetries {
-				return
-			}
-			time.Sleep(time.Duration(attempt) * time.Second)
+			log.Printf("Failed to send services to gateway (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
 			continue
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			log.Printf("Gateway services failed with status %d (attempt %d/%d)", resp.StatusCode, attempt, maxRetries)
-			if attempt == maxRetries {
-				return
-			}
+			log.Printf("Gateway services failed with status %d (attempt %d)", resp.StatusCode, attempt)
+			time.Sleep(getBackoff(attempt))
+			attempt++
 			continue
 		}
 
 		log.Printf("Successfully reported services to gateway")
 		return
 	}
+}
+
+func getBackoff(attempt int) time.Duration {
+	backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+	if backoff > 60*time.Second {
+		return 60 * time.Second
+	}
+	return backoff
 }
 
 func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error) {
@@ -230,7 +237,7 @@ func worker() {
 			log.Printf("Failed to get new image for task %s: %v", taskKey, err)
 			continue
 		}
-		result.OldImage = strings.Split(newImage, ":")[0] + ":latest" // Fallback for logging
+		result.OldImage = strings.Split(newImage, ":")[0] + ":latest"
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 		defer cancel()
@@ -301,11 +308,13 @@ func feedbackCompleteToGateway(cfg *config.Config, taskKey string) {
 		return
 	}
 
-	const maxRetries = 3
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	attempt := 1
+	for {
 		req, err := http.NewRequest("POST", cfg.GatewayURL+"/complete", bytes.NewBuffer(data))
 		if err != nil {
-			log.Printf("Failed to create complete request for task %s (attempt %d/%d): %v", taskKey, attempt, maxRetries, err)
+			log.Printf("Failed to create complete request for task %s (attempt %d): %v", taskKey, attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -313,20 +322,17 @@ func feedbackCompleteToGateway(cfg *config.Config, taskKey string) {
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("Failed to send complete to gateway for task %s (attempt %d/%d): %v", taskKey, attempt, maxRetries, err)
-			if attempt == maxRetries {
-				return
-			}
-			time.Sleep(time.Duration(attempt) * time.Second)
+			log.Printf("Failed to send complete to gateway for task %s (attempt %d): %v", taskKey, attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
 			continue
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			log.Printf("Gateway complete failed with status %d for task %s (attempt %d/%d)", resp.StatusCode, taskKey, attempt, maxRetries)
-			if attempt == maxRetries {
-				return
-			}
+			log.Printf("Gateway complete failed with status %d for task %s (attempt %d)", resp.StatusCode, taskKey, attempt)
+			time.Sleep(getBackoff(attempt))
+			attempt++
 			continue
 		}
 
@@ -337,28 +343,36 @@ func feedbackCompleteToGateway(cfg *config.Config, taskKey string) {
 
 func reportToGateway(cfg *config.Config) {
 	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
-	data, err := os.ReadFile(fileName)
-	if err != nil {
-		log.Printf("Failed to read deploy file for report: %v", err)
-		return
-	}
-	var infos []storage.DeploymentInfo
-	if err := json.Unmarshal(data, &infos); err != nil {
-		log.Printf("Failed to unmarshal deploy file for report: %v", err)
-		return
-	}
+	attempt := 1
+	for {
+		data, err := os.ReadFile(fileName)
+		if err != nil {
+			log.Printf("Failed to read deploy file for report (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		var infos []storage.DeploymentInfo
+		if err := json.Unmarshal(data, &infos); err != nil {
+			log.Printf("Failed to unmarshal deploy file for report (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
 
-	reportData, err := json.Marshal(infos)
-	if err != nil {
-		log.Printf("Failed to marshal report: %v", err)
-		return
-	}
+		reportData, err := json.Marshal(infos)
+		if err != nil {
+			log.Printf("Failed to marshal report (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
 
-	const maxRetries = 3
-	for attempt := 1; attempt <= maxRetries; attempt++ {
 		req, err := http.NewRequest("POST", cfg.GatewayURL+"/report", bytes.NewBuffer(reportData))
 		if err != nil {
-			log.Printf("Failed to create report request (attempt %d/%d): %v", attempt, maxRetries, err)
+			log.Printf("Failed to create report request (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -366,20 +380,17 @@ func reportToGateway(cfg *config.Config) {
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("Failed to send report to gateway (attempt %d/%d): %v", attempt, maxRetries, err)
-			if attempt == maxRetries {
-				return
-			}
-			time.Sleep(time.Duration(attempt) * time.Second)
+			log.Printf("Failed to send report to gateway (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
 			continue
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			log.Printf("Gateway report failed with status %d (attempt %d/%d)", resp.StatusCode, attempt, maxRetries)
-			if attempt == maxRetries {
-				return
-			}
+			log.Printf("Gateway report failed with status %d (attempt %d)", resp.StatusCode, attempt)
+			time.Sleep(getBackoff(attempt))
+			attempt++
 			continue
 		}
 

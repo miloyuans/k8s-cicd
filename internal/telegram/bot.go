@@ -1,4 +1,3 @@
-// internal/telegram/bot.go
 package telegram
 
 import (
@@ -95,7 +94,6 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 			log.Printf("Invalid input from user %d in chat %d: %s, responding with: %s", userID, chatID, text, response)
 			sendMessage(bot, chatID, response)
 		} else if update.CallbackQuery != nil {
-			// Handle Inline Keyboard button clicks
 			chatID := update.CallbackQuery.Message.Chat.ID
 			userID := update.CallbackQuery.From.ID
 			data := update.CallbackQuery.Data
@@ -131,7 +129,6 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				log.Printf("No active dialog for user %d in chat %d, ignoring callback: %s", userID, chatID, data)
 			}
 
-			// Answer the callback query to remove the loading state
 			callback := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
 			if _, err := bot.Send(callback); err != nil {
 				log.Printf("Failed to answer callback query for user %d in chat %d: %v", userID, chatID, err)
@@ -142,7 +139,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 
 func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "Markdown"
+	msg.ParseMode = "HTML"
 	if _, err := bot.Send(msg); err != nil {
 		log.Printf("Failed to send message to chat %d: %v", chatID, err)
 	}
@@ -168,34 +165,34 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 
 	var md strings.Builder
 	if result.Success {
-		md.WriteString(fmt.Sprintf("**✅ 部署成功 / Deployment Succeeded**\n\n"))
-		md.WriteString(fmt.Sprintf("服务 / Service: **%s**\n", result.Request.Service))
-		md.WriteString(fmt.Sprintf("环境 / Environment: **%s**\n", result.Request.Env))
-		md.WriteString(fmt.Sprintf("版本 / Version: **%s**\n", result.Request.Version))
-		md.WriteString(fmt.Sprintf("旧版本 / Old Version: **%s**\n", getVersionFromImage(result.OldImage)))
-		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", result.Request.UserName))
-		md.WriteString("\n✅ 部署成功完成！\n✅ Deployment completed successfully!\n")
-		md.WriteString(fmt.Sprintf("\n**部署时间 / Deployed at**: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
+		md.WriteString(fmt.Sprintf("<b>✅ 部署成功 / Deployment Succeeded</b>\n\n"))
+		md.WriteString(fmt.Sprintf("服务 / Service: <b>%s</b>\n", result.Request.Service))
+		md.WriteString(fmt.Sprintf("环境 / Environment: <b>%s</b>\n", result.Request.Env))
+		md.WriteString(fmt.Sprintf("版本 / Version: <b>%s</b>\n", result.Request.Version))
+		md.WriteString(fmt.Sprintf("旧版本 / Old Version: <b>%s</b>\n", getVersionFromImage(result.OldImage)))
+		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: <b>%s</b>\n", result.Request.UserName))
+		md.WriteString("\n<b>✅ 部署成功完成！\n✅ Deployment completed successfully!</b>\n")
+		md.WriteString(fmt.Sprintf("\n<b>部署时间 / Deployed at</b>: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
 	} else {
-		md.WriteString(fmt.Sprintf("**❌ 部署失败 / Deployment Failed**\n\n"))
-		md.WriteString(fmt.Sprintf("服务 / Service: **%s**\n", result.Request.Service))
-		md.WriteString(fmt.Sprintf("环境 / Environment: **%s**\n", result.Request.Env))
-		md.WriteString(fmt.Sprintf("尝试版本 / Attempted Version: **%s**\n", result.Request.Version))
-		md.WriteString(fmt.Sprintf("回滚版本 / Rollback Version: **%s**\n", getVersionFromImage(result.OldImage)))
-		md.WriteString(fmt.Sprintf("错误 / Error: **%s**\n", result.ErrorMsg))
-		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", result.Request.UserName))
-		md.WriteString("\n**🔍 诊断信息 / Diagnostics**\n\n")
+		md.WriteString(fmt.Sprintf("<b>❌ 部署失败 / Deployment Failed</b>\n\n"))
+		md.WriteString(fmt.Sprintf("服务 / Service: <b>%s</b>\n", result.Request.Service))
+		md.WriteString(fmt.Sprintf("环境 / Environment: <b>%s</b>\n", result.Request.Env))
+		md.WriteString(fmt.Sprintf("尝试版本 / Attempted Version: <b>%s</b>\n", result.Request.Version))
+		md.WriteString(fmt.Sprintf("回滚版本 / Rollback Version: <b>%s</b>\n", getVersionFromImage(result.OldImage)))
+		md.WriteString(fmt.Sprintf("错误 / Error: <b>%s</b>\n", result.ErrorMsg))
+		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: <b>%s</b>\n", result.Request.UserName))
+		md.WriteString("\n<b>🔍 诊断信息 / Diagnostics</b>\n\n")
 		md.WriteString(fmt.Sprintf("事件 / Events:\n%s\n", result.Events))
 		md.WriteString("环境变量 / Environment Variables:\n")
 		for k, v := range result.Envs {
-			md.WriteString(fmt.Sprintf("- %s: **%s**\n", k, v))
+			md.WriteString(fmt.Sprintf("- %s: <b>%s</b>\n", k, v))
 		}
-		md.WriteString(fmt.Sprintf("\n日志 / Logs: **%s**\n", result.Logs))
-		md.WriteString(fmt.Sprintf("\n**失败时间 / Failed at**: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
+		md.WriteString(fmt.Sprintf("\n日志 / Logs: <b>%s</b>\n", result.Logs))
+		md.WriteString(fmt.Sprintf("\n<b>失败时间 / Failed at</b>: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
 	}
 
 	msg := tgbotapi.NewMessage(chatID, md.String())
-	msg.ParseMode = "Markdown"
+	msg.ParseMode = "HTML"
 
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -234,22 +231,22 @@ func NotifyDeployTeam(cfg *config.Config, result *storage.DeployResult) {
 	}
 
 	var md strings.Builder
-	md.WriteString(fmt.Sprintf("**⚠️ CI/CD 部署失败，需要人工干预 / CI/CD Deployment Failed, Manual Intervention Needed**\n\n"))
-	md.WriteString(fmt.Sprintf("服务 / Service: **%s**\n", result.Request.Service))
-	md.WriteString(fmt.Sprintf("环境 / Environment: **%s**\n", result.Request.Env))
-	md.WriteString(fmt.Sprintf("尝试版本 / Attempted Version: **%s**\n", result.Request.Version))
-	md.WriteString(fmt.Sprintf("错误 / Error: **%s**\n", result.ErrorMsg))
-	md.WriteString("\n**🔍 诊断信息 / Diagnostics**\n\n")
+	md.WriteString(fmt.Sprintf("<b>⚠️ CI/CD 部署失败，需要人工干预 / CI/CD Deployment Failed, Manual Intervention Needed</b>\n\n"))
+	md.WriteString(fmt.Sprintf("服务 / Service: <b>%s</b>\n", result.Request.Service))
+	md.WriteString(fmt.Sprintf("环境 / Environment: <b>%s</b>\n", result.Request.Env))
+	md.WriteString(fmt.Sprintf("尝试版本 / Attempted Version: <b>%s</b>\n", result.Request.Version))
+	md.WriteString(fmt.Sprintf("错误 / Error: <b>%s</b>\n", result.ErrorMsg))
+	md.WriteString("\n<b>🔍 诊断信息 / Diagnostics</b>\n\n")
 	md.WriteString(fmt.Sprintf("事件 / Events:\n%s\n", result.Events))
 	md.WriteString("环境变量 / Environment Variables:\n")
 	for k, v := range result.Envs {
-		md.WriteString(fmt.Sprintf("- %s: **%s**\n", k, v))
+		md.WriteString(fmt.Sprintf("- %s: <b>%s</b>\n", k, v))
 	}
-	md.WriteString(fmt.Sprintf("\n日志 / Logs: **%s**\n", result.Logs))
-	md.WriteString(fmt.Sprintf("\n**失败时间 / Failed at**: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
+	md.WriteString(fmt.Sprintf("\n日志 / Logs: <b>%s</b>\n", result.Logs))
+	md.WriteString(fmt.Sprintf("\n<b>失败时间 / Failed at</b>: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
 
 	msg := tgbotapi.NewMessage(chatID, md.String())
-	msg.ParseMode = "Markdown"
+	msg.ParseMode = "HTML"
 
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -290,7 +287,7 @@ func SendConfirmation(category string, chatID int64, message string, callbackDat
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
 	msg := tgbotapi.NewMessage(chatID, message)
 	msg.ReplyMarkup = keyboard
-	msg.ParseMode = "Markdown"
+	msg.ParseMode = "HTML"
 	_, err := bot.Send(msg)
 	return err
 }

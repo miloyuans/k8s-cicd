@@ -1,11 +1,9 @@
-// cmd/gateway/main.go
 package main
 
 import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"path/filepath"
 	"regexp"
@@ -14,7 +12,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/dialog"
 	"k8s-cicd/internal/queue"
@@ -30,18 +27,14 @@ var (
 
 func main() {
 	cfg := config.LoadConfig("config.yaml")
-	cfg.StorageDir = "gateway_storage" // Set gateway-specific storage directory
+	cfg.StorageDir = "gateway_storage"
 	if err := storage.EnsureStorageDir(cfg.StorageDir); err != nil {
 		log.Fatalf("Failed to create storage dir: %v", err)
 	}
 
-	// Initialize all daily files
 	storage.InitAllDailyFiles(cfg, nil)
+	go storage.DailyMaintenance(cfg, nil)
 
-	// Initialize service lists dynamically from reports
-	go storage.DailyMaintenance(cfg, nil) // Adjusted for gateway, no k8s client
-
-	// Initialize task queue
 	taskQueue = queue.NewQueue(cfg, 100)
 	dialog.GlobalTaskQueue = taskQueue
 
@@ -112,7 +105,6 @@ func handleReport(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Read existing data to merge with new report
 		fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
 		if err := storage.EnsureDailyFile(fileName, nil, cfg); err != nil {
 			log.Printf("Failed to ensure deploy file %s: %v", fileName, err)
@@ -135,8 +127,13 @@ func handleReport(cfg *config.Config) http.HandlerFunc {
 			}
 		}
 
-		// Merge reported data, updating or appending as needed
+		seen := make(map[string]bool) // service-env key for deduplication
 		for _, newInfo := range infos {
+			key := newInfo.Service + "-" + newInfo.Env
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 			found := false
 			for i, info := range existingInfos {
 				if info.Service == newInfo.Service && info.Env == newInfo.Env {
@@ -150,19 +147,38 @@ func handleReport(cfg *config.Config) http.HandlerFunc {
 			}
 		}
 
-		// Save merged data
-		updatedData, err := json.MarshalIndent(existingInfos, "", "  ")
+		newData, err := json.MarshalIndent(existingInfos, "", "  ")
 		if err != nil {
-			log.Printf("Failed to marshal merged deploy file %s: %v", fileName, err)
+			log.Printf("Failed to marshal deploy file %s: %v", fileName, err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
-		if err := os.WriteFile(fileName, updatedData, 0644); err != nil {
-			log.Printf("Failed to write merged deploy file %s: %v", fileName, err)
+		if err := os.WriteFile(fileName, newData, 0644); err != nil {
+			log.Printf("Failed to write deploy file %s: %v", fileName, err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
 
+		// Persist environment list for dialog usage
+		envSet := make(map[string]bool)
+		for _, info := range existingInfos {
+			envSet[info.Env] = true
+		}
+		var envs []string
+		for env := range envSet {
+			envs = append(envs, env)
+		}
+		sort.Strings(envs)
+		envFile := filepath.Join(cfg.StorageDir, "environments.json")
+		if envData, err := json.MarshalIndent(envs, "", "  "); err == nil {
+			if err := os.WriteFile(envFile, envData, 0644); err != nil {
+				log.Printf("Failed to write environment file %s: %v", envFile, err)
+			} else {
+				log.Printf("Updated environment list %s with %d environments", envFile, len(envs))
+			}
+		}
+
+		log.Printf("Processed report with %d deployment infos", len(existingInfos))
 		w.WriteHeader(http.StatusOK)
 	}
 }
@@ -205,45 +221,17 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		for category, list := range services {
-			// Deduplicate list
+		for category, svcList := range services {
+			filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
+			clean := make([]string, 0, len(svcList))
 			seen := make(map[string]bool)
-			var dedup []string
-			for _, svc := range list {
+			for _, svc := range svcList {
 				if !seen[svc] {
 					seen[svc] = true
-					dedup = append(dedup, svc)
+					clean = append(clean, svc)
 				}
 			}
-			// Sort for consistency
-			sort.Strings(dedup)
-			// Load existing list to merge
-			existingPath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
-			existingData, err := os.ReadFile(existingPath)
-			var existing []string
-			if err == nil {
-				existing = strings.Split(string(existingData), "\n")
-				for i := range existing {
-					existing[i] = strings.TrimSpace(existing[i])
-				}
-			}
-			// Merge and dedup again
-			for _, svc := range dedup {
-				if svc != "" && !contains(existing, svc) { // Use local contains function
-					existing = append(existing, svc)
-				}
-			}
-			// Sort for consistency
-			sort.Strings(existing)
-			// Remove empty lines
-			var clean []string
-			for _, s := range existing {
-				if s != "" {
-					clean = append(clean, s)
-				}
-			}
-			// Save updated list
-			filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
+			sort.Strings(clean)
 			data := strings.Join(clean, "\n")
 			if err := os.WriteFile(filePath, []byte(data), 0644); err != nil {
 				log.Printf("Failed to write service list %s: %v", filePath, err)
@@ -253,7 +241,6 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 		}
 
 		log.Printf("Processed services update with %d categories", len(services))
-
 		w.WriteHeader(http.StatusOK)
 	}
 }
@@ -284,7 +271,6 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Validate environments
 		for _, env := range req.Envs {
 			if _, ok := cfg.Environments[strings.ToLower(env)]; !ok {
 				log.Printf("Invalid environment %s in submit-task request", env)
@@ -317,13 +303,13 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 				Version:   req.Version,
 				Timestamp: time.Now(),
 				UserName:  req.Username,
-				Status:    "pending_confirmation", // Initial status
+				Status:    "pending_confirmation",
 			}
 			taskKeys = append(taskKeys, queue.ComputeTaskKey(deployReq))
 			tasks = append(tasks, deployReq)
 		}
 
-		id := uuid.New().String()[:8] // Short ID
+		id := uuid.New().String()[:8]
 		dialog.PendingConfirmations.Store(id, tasks)
 
 		message := fmt.Sprintf("确认部署服务 %s 到环境 %s，版本 %s，由用户 %s 提交？\nConfirm deployment for service %s to envs %s, version %s by %s?",
@@ -351,14 +337,12 @@ func classifyService(service string, keywords map[string][]string) string {
 	for category, patterns := range keywords {
 		for _, pattern := range patterns {
 			lowerPattern := strings.ToLower(pattern)
-			// Try regex match if pattern looks like a regex
 			if strings.HasPrefix(lowerPattern, "^") || strings.HasSuffix(lowerPattern, "$") || strings.Contains(lowerPattern, ".*") {
 				re, err := regexp.Compile(lowerPattern)
 				if err == nil && re.MatchString(lowerService) {
 					return category
 				}
 			} else if strings.Contains(lowerService, lowerPattern) {
-				// Fallback to substring match
 				return category
 			}
 		}
@@ -373,14 +357,4 @@ func getClientIP(r *http.Request) string {
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return ip
-}
-
-// contains checks if a string exists in a slice
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
 }
