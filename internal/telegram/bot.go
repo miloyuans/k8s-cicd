@@ -7,13 +7,12 @@ import (
 	"math/rand"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/dialog"
-	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
-	"k8s-cicd/internal/types"
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 var bots map[string]*tgbotapi.BotAPI
@@ -83,6 +82,8 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				log.Printf("Processing dialog input for user %d in chat %d: %s", userID, chatID, text)
 				dialog.ProcessDialog(userID, chatID, text, cfg)
 				continue
+			} else if triggered {
+				continue
 			}
 
 			// If no trigger or cancel keyword matched, send invalid response
@@ -132,9 +133,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 
 			// Answer the callback query to remove the loading state
 			callback := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
-			if _, err := bot.Request(callback); err != nil {
-				log.Printf("Failed to answer callback query for user %d: %v", userID, err)
-			}
+			bot.Send(callback)
 		}
 	}
 }
@@ -148,44 +147,17 @@ func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) {
 }
 
 func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) {
-	log.Printf("Attempting to send notification for service %s in env %s with success %t", result.Request.Service, result.Request.Env, result.Success)
-
-	// Find category for service
-	category := ""
-	for categoryName, patterns := range cfg.ServiceKeywords {
-		for _, pattern := range patterns {
-			if strings.HasPrefix(pattern, "^") || strings.HasSuffix(pattern, "$") || strings.Contains(pattern, ".*") {
-				re, err := regexp.Compile(pattern)
-				if err == nil && re.MatchString(result.Request.Service) {
-					category = categoryName
-					break
-				}
-			} else if strings.Contains(result.Request.Service, pattern) {
-				category = categoryName
-				break
-			}
-		}
-		if category != "" {
-			break
-		}
-	}
-	if category == "" {
-		log.Printf("Skipping notification: no category found for service %s", result.Request.Service)
-		return
-	}
-
-	token, ok := cfg.TelegramBots[category]
-	if !ok {
-		log.Printf("Skipping notification: no bot configured for category %s", category)
-		return
-	}
-
+	category := classifyService(result.Request.Service, cfg.ServiceKeywords)
 	chatID, ok := cfg.TelegramChats[category]
 	if !ok {
-		log.Printf("Skipping notification: no chat configured for category %s", category)
+		log.Printf("No chat configured for category %s, skipping notification for service %s", category, result.Request.Service)
 		return
 	}
-
+	token, ok := cfg.TelegramBots[category]
+	if !ok {
+		log.Printf("No bot configured for category %s, skipping notification for service %s", category, result.Request.Service)
+		return
+	}
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		log.Printf("Failed to create bot for category %s: %v", category, err)
@@ -194,10 +166,10 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 
 	var md strings.Builder
 	if result.Success {
-		md.WriteString(fmt.Sprintf("**🚀 部署成功 / Deployment Success**\n\n"))
+		md.WriteString(fmt.Sprintf("**✅ 部署成功 / Deployment Succeeded**\n\n"))
 		md.WriteString(fmt.Sprintf("服务 / Service: **%s**\n", result.Request.Service))
 		md.WriteString(fmt.Sprintf("环境 / Environment: **%s**\n", result.Request.Env))
-		md.WriteString(fmt.Sprintf("新版本 / New Version: **%s**\n", result.Request.Version))
+		md.WriteString(fmt.Sprintf("版本 / Version: **%s**\n", result.Request.Version))
 		md.WriteString(fmt.Sprintf("旧版本 / Old Version: **%s**\n", getVersionFromImage(result.OldImage)))
 		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: **%s**\n", result.Request.UserName))
 		md.WriteString("\n✅ 部署成功完成！\n✅ Deployment completed successfully!\n")
@@ -222,10 +194,20 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 
 	msg := tgbotapi.NewMessage(chatID, md.String())
 	msg.ParseMode = "Markdown"
-	if _, err := bot.Send(msg); err != nil {
-		log.Printf("Failed to send telegram notification to chat %d: %v", chatID, err)
-	} else {
+
+	const maxRetries = 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		_, err := bot.Send(msg)
+		if err != nil {
+			log.Printf("Failed to send notification to chat %d for service %s (attempt %d/%d): %v", chatID, result.Request.Service, attempt, maxRetries, err)
+			if attempt == maxRetries {
+				return
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
 		log.Printf("Successfully sent notification for service %s in env %s with success %t", result.Request.Service, result.Request.Env, result.Success)
+		return
 	}
 }
 
@@ -266,10 +248,20 @@ func NotifyDeployTeam(cfg *config.Config, result *storage.DeployResult) {
 
 	msg := tgbotapi.NewMessage(chatID, md.String())
 	msg.ParseMode = "Markdown"
-	if _, err := bot.Send(msg); err != nil {
-		log.Printf("Failed to send deploy notification to chat %d: %v", chatID, err)
-	} else {
+
+	const maxRetries = 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		_, err := bot.Send(msg)
+		if err != nil {
+			log.Printf("Failed to send deploy notification to chat %d (attempt %d/%d): %v", chatID, attempt, maxRetries, err)
+			if attempt == maxRetries {
+				return
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
 		log.Printf("Successfully sent deploy notification for failed deployment of service %s in env %s", result.Request.Service, result.Request.Env)
+		return
 	}
 }
 
@@ -299,4 +291,22 @@ func SendConfirmation(category string, chatID int64, message string, callbackDat
 	msg.ParseMode = "Markdown"
 	_, err := bot.Send(msg)
 	return err
+}
+
+func classifyService(service string, keywords map[string][]string) string {
+	lowerService := strings.ToLower(service)
+	for category, patterns := range keywords {
+		for _, pattern := range patterns {
+			lowerPattern := strings.ToLower(pattern)
+			if strings.HasPrefix(lowerPattern, "^") || strings.HasSuffix(lowerPattern, "$") || strings.Contains(lowerPattern, ".*") {
+				re, err := regexp.Compile(lowerPattern)
+				if err == nil && re.MatchString(lowerService) {
+					return category
+				}
+			} else if strings.Contains(lowerService, lowerPattern) {
+				return category
+			}
+		}
+	}
+	return ""
 }

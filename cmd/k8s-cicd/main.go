@@ -1,3 +1,4 @@
+// cmd/k8s-cicd/main.go
 package main
 
 import (
@@ -251,25 +252,30 @@ func worker() {
 		if ready {
 			result.Success = true
 			result.ErrorMsg = ""
-			log.Printf("Deployment successful for task %s", taskKey)
+			log.Printf("Deployment successful for task %s: service=%s, env=%s, version=%s, user=%s, oldImage=%s",
+				taskKey, result.Request.Service, result.Request.Env, result.Request.Version, result.Request.UserName, result.OldImage)
 			storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "success", result.Request.UserName)
 			go telegram.SendTelegramNotification(cfg, &result)
 		} else {
 			result.Success = false
 			result.ErrorMsg = fmt.Sprintf("Pods not ready: %v", err)
 			result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(checkCtx, result.Request.Service, namespace)
-			log.Printf("Deployment failed for task %s: %s", taskKey, result.ErrorMsg)
+			log.Printf("Deployment failed for task %s: service=%s, env=%s, version=%s, user=%s, error=%s, events=%s, logs=%s, envs=%v",
+				taskKey, result.Request.Service, result.Request.Env, result.Request.Version, result.Request.UserName, result.ErrorMsg, result.Events, result.Logs, result.Envs)
 			err = k8sClient.RollbackDeployment(checkCtx, result.Request.Service, namespace)
 			if err != nil {
 				result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", err)
+				log.Printf("Rollback failed for task %s: %v", taskKey, err)
 			} else {
 				rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 1*time.Minute)
 				defer rollbackCancel()
 				rollbackReady, rollbackErr := k8sClient.CheckNewPodStatus(rollbackCtx, result.Request.Service, "", namespace)
 				if rollbackReady {
 					result.ErrorMsg += "; Rollback succeeded."
+					log.Printf("Rollback succeeded for task %s", taskKey)
 				} else {
 					result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+					log.Printf("Rollback check failed for task %s: %v", taskKey, rollbackErr)
 				}
 			}
 			storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)

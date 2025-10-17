@@ -1,3 +1,4 @@
+// dialog.go
 package dialog
 
 import (
@@ -14,6 +15,7 @@ import (
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
+	"k8s-cicd/internal/types"
 )
 
 type DialogState struct {
@@ -43,9 +45,10 @@ func SetTaskQueue(q *queue.Queue) {
 }
 
 func StartDialog(userID, chatID int64, service string, cfg *config.Config, userName string) {
-	if _, loaded := dialogs.Load(userID); loaded {
-		log.Printf("User %d already has an active dialog in chat %d", userID, chatID)
-		return
+	if state, loaded := dialogs.Load(userID); loaded {
+		log.Printf("Cancelling existing dialog for user %d in chat %d", userID, chatID)
+		CancelDialog(userID, chatID, cfg) // Reset stuck dialog
+		sendMessage(cfg, chatID, "Previous dialog was active and has been cancelled. Starting new deployment dialog.")
 	}
 
 	state := &DialogState{
@@ -62,6 +65,7 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config, userN
 
 	log.Printf("Started dialog for user %d in chat %d for service %s", userID, chatID, service)
 	sendServiceSelection(userID, chatID, cfg, state)
+	go monitorDialogTimeout(userID, chatID, cfg, state) // Ensure timeout monitor starts
 }
 
 func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogState) {
