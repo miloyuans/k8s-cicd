@@ -122,6 +122,8 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 					}
 					dialog.PendingConfirmations.Delete(id)
 					sendMessage(bot, chatID, "Deployment confirmed via API.")
+					// Notify k8s-cicd to fetch tasks immediately
+					go notifyK8sCICD(cfg)
 				} else {
 					sendMessage(bot, chatID, "Confirmation ID not found or already processed.")
 				}
@@ -136,9 +138,12 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				log.Printf("No active dialog for user %d in chat %d, ignoring callback: %s", userID, chatID, data)
 			}
 
+			// Use Request instead of Send for Callback
 			callback := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
-			if _, err := bot.Send(callback); err != nil {
+			if _, err := bot.Request(callback); err != nil {
 				log.Printf("Failed to answer callback query for user %d in chat %d: %v", userID, chatID, err)
+			} else {
+				log.Printf("Successfully answered callback query for user %d in chat %d", userID, chatID)
 			}
 		}
 	}
@@ -149,6 +154,28 @@ func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) {
 	msg.ParseMode = "HTML"
 	if _, err := bot.Send(msg); err != nil {
 		log.Printf("Failed to send message to chat %d: %v", chatID, err)
+	}
+}
+
+func notifyK8sCICD(cfg *config.Config) {
+	// Send HTTP notification to k8s-cicd to trigger immediate task fetch
+	url := cfg.K8sCICDURL + "/fetch-tasks"
+	req, err := http.NewRequest("POST", url, nil)
+	if err != nil {
+		log.Printf("Failed to create fetch-tasks request: %v", err)
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Failed to notify k8s-cicd to fetch tasks: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("k8s-cicd fetch-tasks failed with status %d", resp.StatusCode)
+	} else {
+		log.Printf("Successfully notified k8s-cicd to fetch tasks")
 	}
 }
 

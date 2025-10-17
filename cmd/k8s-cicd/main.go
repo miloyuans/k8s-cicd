@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s-cicd/internal/config"
@@ -23,9 +24,11 @@ import (
 )
 
 var (
-	cfg       *config.Config
-	k8sClient *k8s.Client
-	taskQueue *queue.Queue
+	cfg           *config.Config
+	k8sClient     *k8s.Client
+	taskQueue     *queue.Queue
+	taskNotify    = make(chan struct{}, 1)
+	taskNotifyMu  sync.Mutex
 )
 
 func main() {
@@ -58,7 +61,30 @@ func main() {
 	updateAndReportServices()
 	go periodicUpdateServices()
 
+	// Start HTTP server for task fetch notifications
+	go func() {
+		http.HandleFunc("/fetch-tasks", handleFetchTasks)
+		log.Printf("k8s-cicd server starting on %s", cfg.K8sCICDListenAddr)
+		log.Fatal(http.ListenAndServe(cfg.K8sCICDListenAddr, nil))
+	}()
+
 	select {}
+}
+
+func handleFetchTasks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		log.Printf("Method not allowed for /fetch-tasks: %s", r.Method)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	taskNotifyMu.Lock()
+	select {
+	case taskNotify <- struct{}{}:
+	default:
+	}
+	taskNotifyMu.Unlock()
+	log.Printf("Received fetch-tasks notification")
+	w.WriteHeader(http.StatusOK)
 }
 
 func initServicesDir(cfg *config.Config) {
@@ -71,6 +97,10 @@ func initServicesDir(cfg *config.Config) {
 			if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
 				log.Printf("Failed to init service file %s: %v", filePath, err)
 			}
+		}
+		filePath := filepath.Join(cfg.ServicesDir, "other.svc.list")
+		if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+			log.Printf("Failed to init service file %s: %v", filePath, err)
 		}
 		log.Println("Initialized services directory and files")
 	}
@@ -190,7 +220,7 @@ func classifyService(service string, keywords map[string][]string) string {
 			}
 		}
 	}
-	return ""
+	return "other"
 }
 
 func retryPendingTasks() {
@@ -202,6 +232,8 @@ func retryPendingTasks() {
 		}
 		for _, task := range tasks {
 			if task.Status == "pending" {
+				taskKey := queue.ComputeTaskKey(task)
+				log.Printf("Enqueued task %s for key %s", taskKey, taskKey)
 				taskQueue.Enqueue(queue.Task{DeployRequest: task})
 			}
 		}
@@ -212,8 +244,14 @@ func pollGateway() {
 	ticker := time.NewTicker(time.Duration(cfg.PollInterval) * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		retryPendingTasks()
+	for {
+		select {
+		case <-ticker.C:
+			retryPendingTasks()
+		case <-taskNotify:
+			log.Printf("Received task notification, fetching tasks immediately")
+			retryPendingTasks()
+		}
 	}
 }
 
@@ -227,8 +265,8 @@ func worker() {
 		}
 		namespace := cfg.Environments[task.DeployRequest.Env]
 		if namespace == "" {
-			log.Printf("No namespace for env %s", task.DeployRequest.Env)
-			continue
+			log.Printf("No namespace for env %s, using default namespace 'international'", task.DeployRequest.Env)
+			namespace = "international"
 		}
 
 		newImage, err := k8sClient.GetNewImage(task.DeployRequest.Service, task.DeployRequest.Version, namespace)
@@ -381,7 +419,7 @@ func reportToGateway(cfg *config.Config) {
 		if err != nil {
 			log.Printf("Failed to send report to gateway (attempt %d): %v", attempt, err)
 			time.Sleep(getBackoff(attempt))
-			attempt++
+			approach++
 			continue
 		}
 		defer resp.Body.Close()

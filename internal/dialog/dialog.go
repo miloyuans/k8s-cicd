@@ -222,10 +222,8 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 			CancelDialog(userID, chatID, cfg)
 		} else if validateEnvironment(input, cfg) {
 			if contains(s.SelectedEnvs, input) {
-				// Deselect environment if already selected
 				s.SelectedEnvs = remove(s.SelectedEnvs, input)
 			} else {
-				// Add environment to selection
 				s.SelectedEnvs = append(s.SelectedEnvs, input)
 			}
 			dialogs.Store(userID, s)
@@ -241,6 +239,9 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 	case "confirm":
 		if input == "confirm" {
 			submitTasks(userID, chatID, cfg, s)
+			s.Stage = "continue"
+			dialogs.Store(userID, s)
+			sendContinuePrompt(userID, chatID, cfg, s)
 		} else if input == "cancel" {
 			CancelDialog(userID, chatID, cfg)
 		}
@@ -345,7 +346,6 @@ func sendEnvSelection(userID, chatID int64, cfg *config.Config, s *DialogState) 
 	msg.ReplyMarkup = keyboard
 	msg.ParseMode = "HTML"
 	if len(s.Messages) > 0 {
-		// Edit the existing message if possible
 		edit := tgbotapi.EditMessageTextConfig{
 			BaseEdit: tgbotapi.BaseEdit{
 				ChatID:    chatID,
@@ -357,7 +357,6 @@ func sendEnvSelection(userID, chatID int64, cfg *config.Config, s *DialogState) 
 		edit.ReplyMarkup = &keyboard
 		if _, err := sendMessage(cfg, chatID, edit); err != nil {
 			log.Printf("Failed to edit message: %v", err)
-			// Fallback to sending a new message
 			if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
 				s.Messages = append(s.Messages, sentMsg.MessageID)
 			}
@@ -420,6 +419,23 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 
 func sendVersionPrompt(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	msg := tgbotapi.NewMessage(chatID, "请输入版本号 / Please enter the version number:")
+	msg.ParseMode = "HTML"
+	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
+		s.Messages = append(s.Messages, sentMsg.MessageID)
+	}
+}
+
+func sendContinuePrompt(userID, chatID int64, cfg *config.Config, s *DialogState) {
+	message := "是否继续部署其他服务？\nWould you like to continue deploying another service?"
+	buttons := [][]tgbotapi.InlineKeyboardButton{
+		{
+			tgbotapi.NewInlineKeyboardButtonData("是 / Yes", "yes"),
+			tgbotapi.NewInlineKeyboardButtonData("否 / No", "no"),
+		},
+	}
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	msg := tgbotapi.NewMessage(chatID, message)
+	msg.ReplyMarkup = keyboard
 	msg.ParseMode = "HTML"
 	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
 		s.Messages = append(s.Messages, sentMsg.MessageID)

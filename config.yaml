@@ -1,35 +1,89 @@
-gateway_url: "http://18.13.24.10:8081"
+# Gateway 服务监听地址，格式为 "host:port"，用于 Gateway HTTP 服务器
 gateway_listen_addr: "0.0.0.0:8099"
+
+# Gateway 的 URL，供 k8s-cicd 访问（如任务拉取和上报）
+gateway_url: "http://18.13.24.10:8081"
+
+# 允许访问 /tasks 端点的 IP 地址或 CIDR 范围
 allowed_ips:
   - "10.1.0.0/16"
   - "10.1.2.3/32"
   - "10.1.2.5"
+
+# k8s-cicd 轮询 Gateway /tasks 端点的间隔（秒），默认 60 秒，建议 5-60 秒以平衡延迟和性能
 poll_interval: 60
-namespace: "international"
-timeout_seconds: 600
-max_concurrency: 10
+# poll_interval: 5 # 示例：更频繁的轮询以减少任务获取延迟
+
+# 存储目录，用于保存部署信息和服务列表文件
 services_dir: "services"
+# services_dir: "gateway_services" # 默认值，可自定义
+
+# 存储目录，用于保存 environments.json 和部署日志
+storage_dir: "gateway_storage"
+# storage_dir: "cicd_storage" # 默认值，可自定义
+
+# 部署操作的超时时间（秒），默认 600 秒
+timeout_seconds: 600
+# timeout_seconds: 300 # 示例：较短的超时时间
+
+# 最大并发部署任务数，默认 10
+max_concurrency: 10
+# max_concurrency: 5 # 示例：减少并发以降低资源占用
+
+# Telegram 交互对话超时时间（秒），默认 300 秒
 dialog_timeout: 300
+# dialog_timeout: 600 # 示例：更长的对话超时时间
+
+# 触发部署的关键词列表
 trigger_keyword:
   - "deploy"
   - "发布"
   - "update"
   - "upgrade"
+# trigger_keyword: ["start", "deploy"] # 示例：自定义触发关键词
+
+# 取消部署的关键词列表
 cancel_keyword:
   - "cancel"
   - "取消"
   - "停止"
   - "tingzhi"
   - "quxiao"
+# cancel_keyword: ["stop", "abort"] # 示例：自定义取消关键词
+
+# 无效输入的响应消息（随机选择），可选
+invalid_responses:
+  - "请输入有效的触发关键词以开始部署。\nPlease enter a valid trigger keyword to start deployment."
+  - "无效输入，请使用触发关键词。\nInvalid input, please use a trigger keyword."
+# invalid_responses: [] # 默认值：空列表，使用默认响应
+
+# Telegram 机器人 token，按服务类别配置
 telegram_bots:
   api-service: "YOUR_BOT_TOKEN"
   web-service: "YOUR_BOT_TOKEN"
+  other: "YOUR_DEFAULT_BOT_TOKEN" # 默认类别，建议配置以支持回退
+# other: "YOUR_DEFAULT_BOT_TOKEN" # 示例：默认 bot token
+
+# Telegram 聊天 ID，按服务类别配置
 telegram_chats:
-  api-service: -482wewew05
+  api-service: -4829719305
   web-service: -4829719305
+  other: -4829719305 # 默认聊天 ID，建议配置以支持回退
+# other: -123456789 # 示例：默认聊天 ID
+
+# 服务分类关键词，用于将服务分配到类别（如 api-service, web-service）
 service_keywords:
-  api-service: "international"
-  web-service: "gaming"
+  api-service: ["international", "manager"]
+  web-service: ["gaming", "frontend"]
+# other: [] # 默认类别，自动分配未匹配的服务
+
+# 环境到 Kubernetes 命名空间的映射
 environments:
   eks-test: "international"
   eks-pre: "pre"
+  prod: "international"
+# eks-sa: "international" # 示例：支持动态环境
+
+# 部署失败通知的默认类别，可选，默认为 "other"
+deploy_category: "other"
+# deploy_category: "deploy-team" # 示例：自定义部署失败通知类别
