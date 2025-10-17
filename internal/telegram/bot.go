@@ -118,12 +118,12 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 					taskList := tasks.([]types.DeployRequest)
 					for _, task := range taskList {
 						task.Status = "pending"
+						taskKey := queue.ComputeTaskKey(task)
+						log.Printf("Enqueued task %s for key %s (service=%s, env=%s, version=%s)", taskKey, taskKey, task.Service, task.Env, task.Version)
 						dialog.GlobalTaskQueue.Enqueue(queue.Task{DeployRequest: task})
 					}
 					dialog.PendingConfirmations.Delete(id)
 					sendMessage(bot, chatID, "Deployment confirmed via API.")
-					// Notify k8s-cicd to fetch tasks immediately
-					go notifyK8sCICD(cfg)
 				} else {
 					sendMessage(bot, chatID, "Confirmation ID not found or already processed.")
 				}
@@ -154,28 +154,6 @@ func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) {
 	msg.ParseMode = "HTML"
 	if _, err := bot.Send(msg); err != nil {
 		log.Printf("Failed to send message to chat %d: %v", chatID, err)
-	}
-}
-
-func notifyK8sCICD(cfg *config.Config) {
-	// Send HTTP notification to k8s-cicd to trigger immediate task fetch
-	url := cfg.K8sCICDURL + "/fetch-tasks"
-	req, err := http.NewRequest("POST", url, nil)
-	if err != nil {
-		log.Printf("Failed to create fetch-tasks request: %v", err)
-		return
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Failed to notify k8s-cicd to fetch tasks: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("k8s-cicd fetch-tasks failed with status %d", resp.StatusCode)
-	} else {
-		log.Printf("Successfully notified k8s-cicd to fetch tasks")
 	}
 }
 

@@ -210,5 +210,3 @@ deploy_category: "other"
   - 确认服务列表（`services/*.svc.list`）和 `environments.json` 正确更新。
   - 检查部署日志和通知，验证包含详细诊断信息。
   - 确保 Kubernetes 部署的 `revisionHistoryLimit` ≥ 2 以支持回滚。
-
-此配置文件与 `cmd/gateway/main.go` 和整个系统逻辑兼容，包含所有必要字段和默认值注释，移除对 `K8sCICDURL` 的依赖，支持 `k8s-cicd` 主动轮询。如需进一步调整（如优化 `poll_interval` 或添加其他字段），请告知！
