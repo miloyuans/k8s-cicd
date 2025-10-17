@@ -1,4 +1,3 @@
-// cmd/k8s-cicd/main.go
 package main
 
 import (
@@ -31,25 +30,21 @@ var (
 
 func main() {
 	cfg = config.LoadConfig("config.yaml")
-	cfg.StorageDir = "cicd_storage" // Set k8s-cicd-specific storage directory
+	cfg.StorageDir = "cicd_storage"
 	k8sClient = k8s.NewClient(cfg.KubeConfigPath)
 
 	if err := storage.EnsureStorageDir(cfg.StorageDir); err != nil {
 		log.Fatalf("Failed to create storage dir: %v", err)
 	}
 
-	// Check and initialize services directory if not exist
 	initServicesDir(cfg)
 
-	// Initialize all daily files and update deployment versions
 	storage.InitAllDailyFiles(cfg, k8sClient.Client())
 	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
 	reportToGateway(cfg)
 
-	// Initialize task queue
 	taskQueue = queue.NewQueue(cfg, 100)
 
-	// Immediate poll to reduce initial delay
 	log.Println("Performing initial task poll")
 	retryPendingTasks()
 
@@ -60,11 +55,10 @@ func main() {
 	go storage.DailyMaintenance(cfg, k8sClient.Client())
 	go pollGateway()
 
-	// Immediate update services and report, then periodic
 	updateAndReportServices()
 	go periodicUpdateServices()
 
-	select {} // Keep running
+	select {}
 }
 
 func initServicesDir(cfg *config.Config) {
@@ -84,7 +78,7 @@ func initServicesDir(cfg *config.Config) {
 
 func updateAndReportServices() {
 	log.Println("Immediate updating services")
-	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client()) // Collects services
+	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
 	reportServicesToGateway(cfg)
 }
 
@@ -110,7 +104,6 @@ func reportServicesToGateway(cfg *config.Config) {
 		return
 	}
 
-	// Retry logic for gateway connection
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		req, err := http.NewRequest("POST", cfg.GatewayURL+"/services", bytes.NewBuffer(data))
@@ -127,7 +120,7 @@ func reportServicesToGateway(cfg *config.Config) {
 			if attempt == maxRetries {
 				return
 			}
-			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
+			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
 		}
 		defer resp.Body.Close()
@@ -157,25 +150,21 @@ func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error)
 	}
 
 	classified := make(map[string][]string)
-	seenServices := make(map[string]bool) // Global service deduplication across namespaces
-
+	seenServices := make(map[string]bool)
 	for _, info := range infos {
 		if seenServices[info.Service] {
-			continue // Skip duplicate service across namespaces
+			continue
 		}
 		seenServices[info.Service] = true
 		category := classifyService(info.Service, cfg.ServiceKeywords)
 		if category == "" {
-			category = "other" // Fallback category
+			category = "other"
 		}
 		classified[category] = append(classified[category], info.Service)
 	}
-
-	// Sort lists for consistency
-	for cat := range classified {
-		sort.Strings(classified[cat])
+	for _, services := range classified {
+		sort.Strings(services)
 	}
-
 	return classified, nil
 }
 
@@ -197,6 +186,21 @@ func classifyService(service string, keywords map[string][]string) string {
 	return ""
 }
 
+func retryPendingTasks() {
+	for _, env := range cfg.Environments {
+		tasks, err := k8shttp.FetchTasks(context.Background(), cfg.GatewayURL, env)
+		if err != nil {
+			log.Printf("Failed to fetch tasks for env %s: %v", env, err)
+			continue
+		}
+		for _, task := range tasks {
+			if task.Status == "pending" {
+				taskQueue.Enqueue(queue.Task{DeployRequest: task})
+			}
+		}
+	}
+}
+
 func pollGateway() {
 	ticker := time.NewTicker(time.Duration(cfg.PollInterval) * time.Second)
 	defer ticker.Stop()
@@ -206,47 +210,44 @@ func pollGateway() {
 	}
 }
 
-func retryPendingTasks() {
-	for env := range cfg.Environments {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		tasks, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
-		if err != nil {
-			log.Printf("Failed to fetch tasks for env %s: %v", env, err)
-			continue
-		}
-		for _, task := range tasks {
-			taskKey := queue.ComputeTaskKey(task)
-			if !taskQueue.Exists(taskKey) {
-				taskQueue.Enqueue(queue.Task{DeployRequest: task})
-			}
-		}
-	}
-}
-
 func worker() {
 	for task := range taskQueue.Dequeue() {
 		taskKey := queue.ComputeTaskKey(task.DeployRequest)
-		log.Printf("Processing task %s: service=%s, env=%s, version=%s", taskKey, task.DeployRequest.Service, task.DeployRequest.Env, task.DeployRequest.Version)
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
-		defer cancel()
+		log.Printf("Processing task %s", taskKey)
 
+		result := storage.DeployResult{
+			Request: task.DeployRequest,
+		}
 		namespace := cfg.Environments[task.DeployRequest.Env]
+		if namespace == "" {
+			log.Printf("No namespace for env %s", task.DeployRequest.Env)
+			continue
+		}
+
 		newImage, err := k8sClient.GetNewImage(task.DeployRequest.Service, task.DeployRequest.Version, namespace)
 		if err != nil {
 			log.Printf("Failed to get new image for task %s: %v", taskKey, err)
+			continue
+		}
+		result.OldImage = strings.Split(newImage, ":")[0] + ":latest" // Fallback for logging
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
+		defer cancel()
+		success, errMsg, oldImage := k8sClient.UpdateDeployment(ctx, task.DeployRequest.Service, newImage, namespace)
+		result.OldImage = oldImage
+		if !success {
+			result.Success = false
+			result.ErrorMsg = errMsg
+			log.Printf("Failed to update deployment for task %s: %s", taskKey, errMsg)
+			storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
+			go telegram.SendTelegramNotification(cfg, &result)
 			feedbackCompleteToGateway(cfg, taskKey)
 			continue
 		}
 
-		var result storage.DeployResult
-		result.Request = task.DeployRequest
-		result.Success, result.ErrorMsg, result.OldImage = k8sClient.UpdateDeployment(ctx, task.DeployRequest.Service, newImage, namespace)
-
-		// Check pod status immediately after update
-		checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 1*time.Minute)
 		defer checkCancel()
-		ready, err := k8sClient.CheckPodReadiness(checkCtx, result.Request.Service, namespace)
+		ready, err := k8sClient.CheckNewPodStatus(checkCtx, result.Request.Service, newImage, namespace)
 		if ready {
 			result.Success = true
 			result.ErrorMsg = ""
@@ -258,19 +259,24 @@ func worker() {
 			result.ErrorMsg = fmt.Sprintf("Pods not ready: %v", err)
 			result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(checkCtx, result.Request.Service, namespace)
 			log.Printf("Deployment failed for task %s: %s", taskKey, result.ErrorMsg)
-			// Rollback to old image
-			k8sClient.RestoreDeployment(checkCtx, result.Request.Service, result.OldImage, namespace)
-			rollbackReady, rollbackErr := k8sClient.CheckPodReadiness(checkCtx, result.Request.Service, namespace)
-			if rollbackReady {
-				result.ErrorMsg += "; Rollback succeeded."
+			err = k8sClient.RollbackDeployment(checkCtx, result.Request.Service, namespace)
+			if err != nil {
+				result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", err)
 			} else {
-				result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+				rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 1*time.Minute)
+				defer rollbackCancel()
+				rollbackReady, rollbackErr := k8sClient.CheckNewPodStatus(rollbackCtx, result.Request.Service, "", namespace)
+				if rollbackReady {
+					result.ErrorMsg += "; Rollback succeeded."
+				} else {
+					result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+				}
 			}
 			storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
 			go telegram.SendTelegramNotification(cfg, &result)
+			go telegram.NotifyDeployTeam(cfg, &result)
 		}
 		feedbackCompleteToGateway(cfg, taskKey)
-		time.Sleep(1 * time.Minute) // 1 minute silence between tasks for the same service
 	}
 }
 
@@ -289,7 +295,6 @@ func feedbackCompleteToGateway(cfg *config.Config, taskKey string) {
 		return
 	}
 
-	// Retry logic for gateway complete
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		req, err := http.NewRequest("POST", cfg.GatewayURL+"/complete", bytes.NewBuffer(data))
@@ -306,7 +311,7 @@ func feedbackCompleteToGateway(cfg *config.Config, taskKey string) {
 			if attempt == maxRetries {
 				return
 			}
-			time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
+			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
 		}
 		defer resp.Body.Close()
@@ -343,7 +348,6 @@ func reportToGateway(cfg *config.Config) {
 		return
 	}
 
-	// Retry logic
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		req, err := http.NewRequest("POST", cfg.GatewayURL+"/report", bytes.NewBuffer(reportData))

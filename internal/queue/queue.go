@@ -1,4 +1,3 @@
-// internal/queue/queue.go
 package queue
 
 import (
@@ -58,7 +57,7 @@ func (q *Queue) Enqueue(task Task) {
 
 func (q *Queue) processKey(key string, ch chan Task) {
 	var pending []Task
-	ticker := time.NewTicker(1 * time.Second) // Batch every second
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -69,9 +68,12 @@ func (q *Queue) processKey(key string, ch chan Task) {
 				sort.Slice(pending, func(i, j int) bool {
 					return pending[i].DeployRequest.Timestamp.Before(pending[j].DeployRequest.Timestamp)
 				})
-				for _, t := range pending {
+				for i, t := range pending {
 					if t.DeployRequest.Status == "pending" {
 						q.tasks <- t
+						if i < len(pending)-1 {
+							time.Sleep(1 * time.Minute) // 1-minute interval between tasks for same service-env
+						}
 					}
 				}
 				pending = nil
@@ -105,7 +107,7 @@ func (q *Queue) CompleteTask(taskKey string) {
 		q.taskMap.Store(taskKey, t)
 		q.persistTask(t)
 		log.Printf("Marked task %s as completed", taskKey)
-		q.taskMap.Delete(taskKey) // Remove from map after completion
+		q.taskMap.Delete(taskKey)
 	}
 }
 
@@ -125,7 +127,6 @@ func (q *Queue) ConfirmTask(task types.DeployRequest) {
 	}
 }
 
-// Exists checks if a task with the given key exists in the queue
 func (q *Queue) Exists(taskKey string) bool {
 	_, exists := q.taskMap.Load(taskKey)
 	return exists
@@ -200,9 +201,9 @@ func (q *Queue) loadPendingTasks() {
 			if _, exists := q.taskMap.Load(taskKey); !exists {
 				task := Task{DeployRequest: t}
 				if t.Status == "pending" {
-					q.Enqueue(task) // Only enqueue pending tasks
+					q.Enqueue(task)
 				} else {
-					q.taskMap.Store(taskKey, task) // Store pending_confirmation tasks
+					q.taskMap.Store(taskKey, task)
 					q.persistTask(task)
 				}
 			}
@@ -211,7 +212,7 @@ func (q *Queue) loadPendingTasks() {
 }
 
 func (q *Queue) cleanupExpiredTasks() {
-	ticker := time.NewTicker(5 * time.Minute) // Check every 5 minutes
+	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
