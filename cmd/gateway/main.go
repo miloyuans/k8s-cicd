@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -33,6 +33,8 @@ func main() {
 		log.Fatalf("Failed to create storage dir: %v", err)
 	}
 
+	initServicesDir(cfg) // Initialize services directory
+
 	storage.InitAllDailyFiles(cfg, nil)
 	go storage.DailyMaintenance(cfg, nil)
 
@@ -48,6 +50,21 @@ func main() {
 	http.HandleFunc("/submit-task", handleSubmitTask(cfg))
 	log.Printf("Gateway server starting on %s", cfg.GatewayListenAddr)
 	log.Fatal(http.ListenAndServe(cfg.GatewayListenAddr, nil))
+}
+
+func initServicesDir(cfg *config.Config) {
+	if _, err := os.Stat(cfg.ServicesDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(cfg.ServicesDir, 0755); err != nil {
+			log.Fatalf("Failed to create services dir %s: %v", cfg.ServicesDir, err)
+		}
+		for category := range cfg.TelegramBots {
+			filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
+			if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+				log.Printf("Failed to init service file %s: %v", filePath, err)
+			}
+		}
+		log.Println("Initialized services directory and files")
+	}
 }
 
 func handleTasks(cfg *config.Config) http.HandlerFunc {
@@ -221,6 +238,13 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
+		// Ensure services directory exists
+		if err := os.MkdirAll(cfg.ServicesDir, 0755); err != nil {
+			log.Printf("Failed to create services dir %s: %v", cfg.ServicesDir, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+
 		for category, svcList := range services {
 			filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
 			clean := make([]string, 0, len(svcList))
@@ -235,9 +259,10 @@ func handleServices(cfg *config.Config) http.HandlerFunc {
 			data := strings.Join(clean, "\n")
 			if err := os.WriteFile(filePath, []byte(data), 0644); err != nil {
 				log.Printf("Failed to write service list %s: %v", filePath, err)
-			} else {
-				log.Printf("Updated service list %s with %d services", filePath, len(clean))
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
 			}
+			log.Printf("Updated service list %s with %d services", filePath, len(clean))
 		}
 
 		log.Printf("Processed services update with %d categories", len(services))
