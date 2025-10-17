@@ -210,13 +210,26 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 			}
 		}
 	case "env":
-		if validateEnvironment(input, cfg) {
-			s.SelectedEnvs = []string{input}
+		if input == "next_env" {
+			if len(s.SelectedEnvs) == 0 {
+				sendMessage(cfg, chatID, "请至少选择一个环境。\nPlease select at least one environment.")
+				return
+			}
 			s.Stage = "version"
 			dialogs.Store(userID, s)
 			sendVersionPrompt(userID, chatID, cfg, s)
 		} else if input == "cancel" {
 			CancelDialog(userID, chatID, cfg)
+		} else if validateEnvironment(input, cfg) {
+			if contains(s.SelectedEnvs, input) {
+				// Deselect environment if already selected
+				s.SelectedEnvs = remove(s.SelectedEnvs, input)
+			} else {
+				// Add environment to selection
+				s.SelectedEnvs = append(s.SelectedEnvs, input)
+			}
+			dialogs.Store(userID, s)
+			sendEnvSelection(userID, chatID, cfg, s)
 		} else {
 			sendMessage(cfg, chatID, fmt.Sprintf("无效环境 %s / Invalid environment %s. Please select a valid environment.", input, input))
 		}
@@ -327,19 +340,39 @@ func sendEnvSelection(userID, chatID int64, cfg *config.Config, s *DialogState) 
 	})
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msgText := fmt.Sprintf("请选择环境 / Please select an environment:\n当前选中 / Currently selected: %s", strings.Join(s.SelectedEnvs, ", "))
+	msgText := fmt.Sprintf("请选择环境（可多选） / Please select environments (multiple selection allowed):\n当前选中 / Currently selected: %s", strings.Join(s.SelectedEnvs, ", "))
 	msg := tgbotapi.NewMessage(chatID, msgText)
 	msg.ReplyMarkup = keyboard
 	msg.ParseMode = "HTML"
-	if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
-		s.Messages = append(s.Messages, sentMsg.MessageID)
+	if len(s.Messages) > 0 {
+		// Edit the existing message if possible
+		edit := tgbotapi.EditMessageTextConfig{
+			BaseEdit: tgbotapi.BaseEdit{
+				ChatID:    chatID,
+				MessageID: s.Messages[len(s.Messages)-1],
+			},
+			Text:      msgText,
+			ParseMode: "HTML",
+		}
+		edit.ReplyMarkup = &keyboard
+		if _, err := sendMessage(cfg, chatID, edit); err != nil {
+			log.Printf("Failed to edit message: %v", err)
+			// Fallback to sending a new message
+			if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
+				s.Messages = append(s.Messages, sentMsg.MessageID)
+			}
+		}
+	} else {
+		if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
+			s.Messages = append(s.Messages, sentMsg.MessageID)
+		}
 	}
 }
 
 func sendConfirmation(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	message := fmt.Sprintf(
-		"确认部署服务 / Confirm deployment:\n服务 / Service: %s\n环境 / Environment: %s\n版本 / Version: %s\n提交用户 / Submitted by: %s",
-		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
+		"确认部署服务 / Confirm deployment:\n服务 / Service: %s\n环境 / Environments: %s\n版本 / Version: %s\n提交用户 / Submitted by: %s",
+		s.Selected, strings.Join(s.SelectedEnvs, ", "), s.Version, s.UserName,
 	)
 	buttons := [][]tgbotapi.InlineKeyboardButton{
 		{
@@ -358,22 +391,23 @@ func sendConfirmation(userID, chatID int64, cfg *config.Config, s *DialogState) 
 
 func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 	id := uuid.New().String()[:8]
-	tasks := []types.DeployRequest{
-		{
+	var tasks []types.DeployRequest
+	for _, env := range s.SelectedEnvs {
+		tasks = append(tasks, types.DeployRequest{
 			Service:   s.Selected,
-			Env:       s.SelectedEnvs[0],
+			Env:       env,
 			Version:   s.Version,
 			Timestamp: time.Now(),
 			UserName:  s.UserName,
 			Status:    "pending_confirmation",
-		},
+		})
 	}
 	PendingConfirmations.Store(id, tasks)
 
 	message := fmt.Sprintf(
-		"确认部署服务 %s 到环境 %s，版本 %s，由用户 %s 提交？\nConfirm deployment for service %s to env %s, version %s by %s?",
-		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
-		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
+		"确认部署服务 %s 到环境 %s，版本 %s，由用户 %s 提交？\nConfirm deployment for service %s to envs %s, version %s by %s?",
+		s.Selected, strings.Join(s.SelectedEnvs, ","), s.Version, s.UserName,
+		s.Selected, strings.Join(s.SelectedEnvs, ","), s.Version, s.UserName,
 	)
 	if err := SendConfirmation(s.Service, chatID, message, id, cfg); err != nil {
 		log.Printf("Failed to send confirmation: %v", err)

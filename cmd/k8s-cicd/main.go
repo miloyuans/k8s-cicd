@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -71,6 +70,10 @@ func initServicesDir(cfg *config.Config) {
 			if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
 				log.Printf("Failed to init service file %s: %v", filePath, err)
 			}
+		}
+		filePath := filepath.Join(cfg.ServicesDir, "other.svc.list")
+		if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+			log.Printf("Failed to init service file %s: %v", filePath, err)
 		}
 		log.Println("Initialized services directory and files")
 	}
@@ -190,7 +193,7 @@ func classifyService(service string, keywords map[string][]string) string {
 			}
 		}
 	}
-	return ""
+	return "other"
 }
 
 func retryPendingTasks() {
@@ -227,8 +230,9 @@ func worker() {
 		}
 		namespace := cfg.Environments[task.DeployRequest.Env]
 		if namespace == "" {
-			log.Printf("No namespace for env %s", task.DeployRequest.Env)
-			continue
+			// Fallback to default namespace if not found
+			log.Printf("No namespace for env %s, using default namespace 'international'", task.DeployRequest.Env)
+			namespace = "international"
 		}
 
 		newImage, err := k8sClient.GetNewImage(task.DeployRequest.Service, task.DeployRequest.Version, namespace)
