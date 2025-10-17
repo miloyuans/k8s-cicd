@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"path/filepath"
 	"regexp"
@@ -16,7 +17,6 @@ import (
 	"k8s-cicd/internal/dialog"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
-	"k8s-cicd/internal/telegram"
 	"k8s-cicd/internal/types"
 	"os"
 )
@@ -316,7 +316,7 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 			req.Service, strings.Join(req.Envs, ","), req.Version, req.Username)
 		callbackData := id
 
-		if err := telegram.SendConfirmation(category, chatID, message, callbackData); err != nil {
+		if err := dialog.SendConfirmation(category, chatID, message, callbackData); err != nil {
 			log.Printf("Failed to send confirmation for submit-task: %v", err)
 			http.Error(w, "Failed to send confirmation to Telegram", http.StatusInternalServerError)
 			return
