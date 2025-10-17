@@ -41,7 +41,7 @@ func main() {
 
 	storage.InitAllDailyFiles(cfg, k8sClient.Client())
 	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
-	go reportToGateway(cfg) // Run in goroutine for persistent retries
+	go reportToGateway(cfg)
 
 	taskQueue = queue.NewQueue(cfg, 100)
 
@@ -79,7 +79,7 @@ func initServicesDir(cfg *config.Config) {
 func updateAndReportServices() {
 	log.Println("Immediate updating services")
 	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
-	go reportServicesToGateway(cfg) // Run in goroutine for persistent retries
+	go reportServicesToGateway(cfg)
 }
 
 func periodicUpdateServices() {

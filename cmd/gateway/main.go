@@ -127,7 +127,7 @@ func handleReport(cfg *config.Config) http.HandlerFunc {
 			}
 		}
 
-		seen := make(map[string]bool) // service-env key for deduplication
+		seen := make(map[string]bool)
 		for _, newInfo := range infos {
 			key := newInfo.Service + "-" + newInfo.Env
 			if seen[key] {
@@ -159,7 +159,6 @@ func handleReport(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Persist environment list for dialog usage
 		envSet := make(map[string]bool)
 		for _, info := range existingInfos {
 			envSet[info.Env] = true

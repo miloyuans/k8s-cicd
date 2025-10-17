@@ -11,9 +11,12 @@ import (
 	"time"
 
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/google/uuid"
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
+	"k8s-cicd/internal/telegram"
+	"k8s-cicd/internal/types"
 )
 
 type DialogState struct {
@@ -105,7 +108,7 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 	for i, svc := range services {
 		displayText := svc
 		if svc == s.Selected {
-			displayText = fmt.Sprintf("<b>✅ %s</b>", svc) // Green checkmark for selected
+			displayText = fmt.Sprintf("<b>✅ %s</b>", svc)
 		}
 		row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, svc))
 		if len(row) == cols || i == len(services)-1 {
@@ -152,7 +155,7 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 		} else if input == "cancel" {
 			CancelDialog(userID, chatID, cfg)
 		} else {
-			s.Selected = input // Single selection
+			s.Selected = input
 			dialogs.Store(userID, s)
 			serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
 			if err != nil {
@@ -202,7 +205,7 @@ func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
 		}
 	case "env":
 		if contains(getEnvironmentsFromDeployFile(cfg), input) {
-			s.SelectedEnvs = []string{input} // Single environment selection for consistency
+			s.SelectedEnvs = []string{input}
 			s.Stage = "version"
 			dialogs.Store(userID, s)
 			sendVersionPrompt(userID, chatID, cfg, s)
@@ -350,7 +353,7 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
 		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
 	)
-	if err := SendConfirmation(s.Service, chatID, message, id); err != nil {
+	if err := telegram.SendConfirmation(s.Service, chatID, message, id); err != nil {
 		log.Printf("Failed to send confirmation: %v", err)
 		sendMessage(cfg, chatID, "Failed to send confirmation to Telegram.")
 		return

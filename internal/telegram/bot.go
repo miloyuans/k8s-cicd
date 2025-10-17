@@ -51,7 +51,6 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				continue
 			}
 
-			// Check for trigger keywords
 			triggered := false
 			for _, trigger := range cfg.TriggerKeywords {
 				if text == trigger {
@@ -65,7 +64,6 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				continue
 			}
 
-			// Check for cancel keywords
 			canceled := false
 			for _, cancel := range cfg.CancelKeywords {
 				if text == cancel {
@@ -85,7 +83,6 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				continue
 			}
 
-			// If no trigger or cancel keyword matched, send invalid response
 			triggerList := strings.Join(cfg.TriggerKeywords, ", ")
 			response := fmt.Sprintf("请使用触发关键字（如 %s）开始部署。\nPlease use a trigger keyword (e.g., %s) to start a deployment.", triggerList, triggerList)
 			if len(cfg.InvalidResponses) > 0 {
