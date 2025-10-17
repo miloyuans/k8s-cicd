@@ -64,7 +64,6 @@ func initServicesDir(cfg *config.Config) {
 			log.Printf("Failed to init service file %s: %v", filePath, err)
 		}
 	}
-	// Ensure default "other" service file
 	filePath := filepath.Join(cfg.ServicesDir, "other.svc.list")
 	if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
 		log.Printf("Failed to init service file %s: %v", filePath, err)
@@ -346,7 +345,7 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 			req.Service, strings.Join(req.Envs, ","), req.Version, req.Username)
 		callbackData := id
 
-		if err := dialog.SendConfirmation(category, chatID, message, callbackData); err != nil {
+		if err := dialog.SendConfirmation(category, chatID, message, callbackData, cfg); err != nil {
 			log.Printf("Failed to send confirmation for submit-task: %v", err)
 			http.Error(w, "Failed to send confirmation to Telegram", http.StatusInternalServerError)
 			return

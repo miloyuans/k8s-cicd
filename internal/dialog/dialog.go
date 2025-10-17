@@ -375,7 +375,7 @@ func submitTasks(userID, chatID int64, cfg *config.Config, s *DialogState) {
 		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
 		s.Selected, s.SelectedEnvs[0], s.Version, s.UserName,
 	)
-	if err := SendConfirmation(s.Service, chatID, message, id); err != nil {
+	if err := SendConfirmation(s.Service, chatID, message, id, cfg); err != nil {
 		log.Printf("Failed to send confirmation: %v", err)
 		sendMessage(cfg, chatID, "Failed to send confirmation to Telegram.")
 		return
@@ -521,7 +521,7 @@ func deleteMessages(s *DialogState, cfg *config.Config) {
 	}
 }
 
-func SendConfirmation(category string, chatID int64, message string, callbackData string) error {
+func SendConfirmation(category string, chatID int64, message string, callbackData string, cfg *config.Config) error {
 	token, ok := cfg.TelegramBots[category]
 	if !ok {
 		log.Printf("No bot configured for category %s", category)
