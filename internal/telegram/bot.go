@@ -1,4 +1,4 @@
-// telegram/bot.go
+// internal/telegram/bot.go
 package telegram
 
 import (
@@ -12,7 +12,9 @@ import (
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/dialog"
+	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
+	"k8s-cicd/internal/types"
 )
 
 var bots map[string]*tgbotapi.BotAPI
@@ -82,8 +84,6 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				log.Printf("Processing dialog input for user %d in chat %d: %s", userID, chatID, text)
 				dialog.ProcessDialog(userID, chatID, text, cfg)
 				continue
-			} else if triggered {
-				continue
 			}
 
 			// If no trigger or cancel keyword matched, send invalid response
@@ -112,8 +112,8 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				if tasks, ok := dialog.PendingConfirmations.Load(id); ok {
 					taskList := tasks.([]types.DeployRequest)
 					for _, task := range taskList {
-						task.Status = "pending" // Explicitly update status
-						dialog.GlobalTaskQueue.Enqueue(queue.Task{DeployRequest: task}) // Enqueue to add to taskMap and process
+						task.Status = "pending"
+						dialog.GlobalTaskQueue.Enqueue(queue.Task{DeployRequest: task})
 					}
 					dialog.PendingConfirmations.Delete(id)
 					sendMessage(bot, chatID, "Deployment confirmed via API.")
@@ -133,7 +133,9 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 
 			// Answer the callback query to remove the loading state
 			callback := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
-			bot.Send(callback)
+			if _, err := bot.Send(callback); err != nil {
+				log.Printf("Failed to answer callback query for user %d in chat %d: %v", userID, chatID, err)
+			}
 		}
 	}
 }
