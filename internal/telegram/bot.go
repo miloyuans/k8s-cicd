@@ -302,5 +302,5 @@ func classifyService(service string, keywords map[string][]string) string {
 			}
 		}
 	}
-	return "other" // Default to "other" if no category matches
+	return "other"
 }

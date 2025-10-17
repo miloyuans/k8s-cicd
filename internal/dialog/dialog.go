@@ -16,7 +16,6 @@ import (
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
-	"k8s-cicd/internal/telegram"
 	"k8s-cicd/internal/types"
 )
 
@@ -448,9 +447,14 @@ func sendMessage(cfg *config.Config, chatID int64, text interface{}) (tgbotapi.M
 			return tgbotapi.Message{}, fmt.Errorf("no service or default chat found for chat %d", chatID)
 		}
 	}
-	bot, err := telegram.GetBot(service)
+	token, ok := cfg.TelegramBots[service]
+	if !ok {
+		log.Printf("No bot configured for service %s", service)
+		return tgbotapi.Message{}, fmt.Errorf("no bot configured for service %s", service)
+	}
+	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		log.Printf("Failed to get bot for service %s: %v", service, err)
+		log.Printf("Failed to create bot for service %s: %v", service, err)
 		return tgbotapi.Message{}, err
 	}
 
@@ -496,9 +500,14 @@ func deleteMessages(s *DialogState, cfg *config.Config) {
 			return
 		}
 	}
-	bot, err := telegram.GetBot(service)
+	token, ok := cfg.TelegramBots[service]
+	if !ok {
+		log.Printf("No bot configured for service %s", service)
+		return
+	}
+	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		log.Printf("Failed to get bot for service %s: %v", service, err)
+		log.Printf("Failed to create bot for service %s: %v", service, err)
 		return
 	}
 
@@ -513,9 +522,15 @@ func deleteMessages(s *DialogState, cfg *config.Config) {
 }
 
 func SendConfirmation(category string, chatID int64, message string, callbackData string) error {
-	bot, err := telegram.GetBot(category)
+	token, ok := cfg.TelegramBots[category]
+	if !ok {
+		log.Printf("No bot configured for category %s", category)
+		return fmt.Errorf("no bot configured for category %s", category)
+	}
+	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		return fmt.Errorf("no bot for category %s: %v", category, err)
+		log.Printf("Failed to create bot for category %s: %v", category, err)
+		return err
 	}
 
 	buttons := [][]tgbotapi.InlineKeyboardButton{
