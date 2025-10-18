@@ -141,6 +141,98 @@ func reportServicesToGateway(cfg *config.Config) {
 	}
 }
 
+// 新增函数：reportEnvironmentsToGateway
+func reportEnvironmentsToGateway(cfg *config.Config) {
+    data, err := json.Marshal(cfg.Environments)
+    if err != nil {
+        log.Printf("Failed to marshal environments: %v", err)
+        return
+    }
+    attempt := 1
+    for {
+        req, err := http.NewRequest("POST", cfg.GatewayURL+"/environments", bytes.NewBuffer(data))
+        if err != nil {
+            log.Printf("Failed to create environments request (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+        req.Header.Set("Content-Type", "application/json")
+
+        client := &http.Client{Timeout: 10 * time.Second}
+        resp, err := client.Do(req)
+        if err != nil {
+            log.Printf("Failed to send environments to gateway (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+        defer resp.Body.Close()
+
+        if resp.StatusCode != http.StatusOK {
+            log.Printf("Gateway environments failed with status %d (attempt %d)", resp.StatusCode, attempt)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+
+        log.Printf("Successfully reported environments to gateway")
+        return
+    }
+}
+
+// 新增函数：verifyDataFromGateway
+func verifyDataFromGateway(cfg *config.Config) bool {
+    attempt := 1
+    for {
+        resp, err := http.Get(cfg.GatewayURL + "/verify-data")
+        if err != nil {
+            log.Printf("Failed to verify data from gateway (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            if attempt > 5 {
+                return false
+            }
+            continue
+        }
+        defer resp.Body.Close()
+
+        if resp.StatusCode != http.StatusOK {
+            log.Printf("Gateway verify-data failed with status %d (attempt %d)", resp.StatusCode, attempt)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            if attempt > 5 {
+                return false
+            }
+            continue
+        }
+
+        var status map[string]bool
+        if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+            log.Printf("Failed to decode verify-data response (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            if attempt > 5 {
+                return false
+            }
+            continue
+        }
+
+        if status["environments"] && status["services"] {
+            log.Printf("Verified data persistence on gateway")
+            return true
+        }
+
+        log.Printf("Data not fully persisted on gateway, retrying...")
+        time.Sleep(getBackoff(attempt))
+        attempt++
+        if attempt > 5 {
+            return false
+        }
+    }
+}
+
+
 func getBackoff(attempt int) time.Duration {
 	backoff := time.Duration(1<<uint(attempt-1)) * time.Second
 	if backoff > 60*time.Second {
@@ -215,12 +307,42 @@ func retryPendingTasks() {
 }
 
 func pollGateway() {
-	ticker := time.NewTicker(time.Duration(cfg.PollInterval) * time.Second)
-	defer ticker.Stop()
+    ticker := time.NewTicker(time.Duration(cfg.PollInterval) * time.Second)
+    defer ticker.Stop()
 
-	for range ticker.C {
-		retryPendingTasks()
-	}
+    for range ticker.C {
+        for env, namespace := range cfg.Environments {
+            ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+            defer cancel()
+
+            tasks, respMap, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
+            if err != nil {
+                log.Printf("Failed to fetch tasks for env %s: %v", env, err)
+                continue
+            }
+
+            // 新增：检查是否为"restarted"状态
+            if status, ok := respMap["status"].(string); ok && status == "restarted" {
+                log.Printf("Gateway reported restarted for env %s, triggering full report", env)
+                reportToGateway(cfg)                 // 部署信息
+                reportServicesToGateway(cfg)         // 服务列表
+                reportEnvironmentsToGateway(cfg)     // 环境列表
+                if !verifyDataFromGateway(cfg) {
+                    log.Printf("Verification failed, will retry next poll")
+                }
+            }
+
+            for _, task := range tasks {
+                taskKey := queue.ComputeTaskKey(task)
+                if taskQueue.Exists(taskKey) {
+                    log.Printf("Task %s already exists, skipping", taskKey)
+                    continue
+                }
+                taskQueue.Enqueue(queue.Task{DeployRequest: task})
+                log.Printf("Enqueued task %s for env %s", taskKey, env)
+            }
+        }
+    }
 }
 
 func worker() {

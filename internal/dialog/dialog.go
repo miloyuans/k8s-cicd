@@ -85,7 +85,14 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 	}
 	if len(services) == 0 {
 		log.Printf("No services available for %s for user %d", s.Service, userID)
-		sendMessage(cfg, chatID, "无可用服务 / No services available.")
+		sendMessage(cfg, chatID, "服务列表为空，正在等待k8s-cicd上报数据。请稍后重试 / Service list empty, waiting for k8s-cicd report. Please retry later.")
+		time.Sleep(10 * time.Second) // 延迟重试
+		// 递归重试，最多3次
+		if len(s.Messages) < 3 { // 使用Messages长度作为重试计数器代理
+			sendServiceSelection(userID, chatID, cfg, s)
+		} else {
+			sendMessage(cfg, chatID, "重试失败，请联系管理员 / Retry failed, contact admin.")
+		}
 		return
 	}
 
@@ -311,61 +318,85 @@ func getEnvironmentsFromDeployFile(cfg *config.Config) []string {
 }
 
 func sendEnvSelection(userID, chatID int64, cfg *config.Config, s *DialogState) {
-	envs := getEnvironmentsFromDeployFile(cfg)
-	if len(envs) == 0 {
-		log.Printf("No environments available for user %d in chat %d", userID, chatID)
-		sendMessage(cfg, chatID, "无可用环境 / No environments available.")
-		return
-	}
+    // 尝试从deploy文件或cfg.Environments获取环境列表
+    envs := getEnvironmentsFromDeployFile(cfg)
+    if len(envs) == 0 {
+        // Fallback到cfg.Environments
+        for env := range cfg.Environments {
+            envs = append(envs, env)
+        }
+        sort.Strings(envs) // 确保顺序一致
+    }
 
-	var buttons [][]tgbotapi.InlineKeyboardButton
-	var row []tgbotapi.InlineKeyboardButton
-	cols := 2
-	if len(envs) < cols {
-		cols = len(envs)
-	}
-	for i, env := range envs {
-		displayText := env
-		if contains(s.SelectedEnvs, env) {
-			displayText = fmt.Sprintf("<b>✅ %s</b>", env)
-		}
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, env))
-		if len(row) == cols || i == len(envs)-1 {
-			buttons = append(buttons, row)
-			row = []tgbotapi.InlineKeyboardButton{}
-		}
-	}
-	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_env"),
-		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
-	})
+    // 如果环境列表仍为空，提示并重试
+    if len(envs) == 0 {
+        log.Printf("No environments available for user %d in chat %d", userID, chatID)
+        sendMessage(cfg, chatID, "无可用环境，正在等待k8s-cicd上报数据。请稍后重试 / No environments available, waiting for k8s-cicd report. Please retry later.")
+        
+        // 检查重试次数（使用s.Messages长度作为代理，限制3次）
+        if len(s.Messages) < 3 {
+            time.Sleep(10 * time.Second) // 延迟10秒重试
+            sendEnvSelection(userID, chatID, cfg, s) // 递归重试
+        } else {
+            sendMessage(cfg, chatID, "重试失败，请联系管理员 / Retry failed, contact admin.")
+        }
+        return
+    }
 
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msgText := fmt.Sprintf("请选择环境（可多选） / Please select environments (multiple selection allowed):\n当前选中 / Currently selected: %s", strings.Join(s.SelectedEnvs, ", "))
-	msg := tgbotapi.NewMessage(chatID, msgText)
-	msg.ReplyMarkup = keyboard
-	msg.ParseMode = "HTML"
-	if len(s.Messages) > 0 {
-		edit := tgbotapi.EditMessageTextConfig{
-			BaseEdit: tgbotapi.BaseEdit{
-				ChatID:    chatID,
-				MessageID: s.Messages[len(s.Messages)-1],
-			},
-			Text:      msgText,
-			ParseMode: "HTML",
-		}
-		edit.ReplyMarkup = &keyboard
-		if _, err := sendMessage(cfg, chatID, edit); err != nil {
-			log.Printf("Failed to edit message: %v", err)
-			if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
-				s.Messages = append(s.Messages, sentMsg.MessageID)
-			}
-		}
-	} else {
-		if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
-			s.Messages = append(s.Messages, sentMsg.MessageID)
-		}
-	}
+    // 生成按钮，保留选中标记
+    var buttons [][]tgbotapi.InlineKeyboardButton
+    var row []tgbotapi.InlineKeyboardButton
+    cols := 2
+    if len(envs) < cols {
+        cols = len(envs)
+    }
+    for i, env := range envs {
+        displayText := env
+        if contains(s.SelectedEnvs, env) {
+            displayText = fmt.Sprintf("<b>✅ %s</b>", env)
+        }
+        row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, env))
+        if len(row) == cols || i == len(envs)-1 {
+            buttons = append(buttons, row)
+            row = []tgbotapi.InlineKeyboardButton{}
+        }
+    }
+    buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
+        tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_env"),
+        tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
+    })
+
+    // 创建消息
+    keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+    msgText := fmt.Sprintf("请选择环境（可多选） / Please select environments (multiple selection allowed):\n当前选中 / Currently selected: %s", strings.Join(s.SelectedEnvs, ", "))
+    msg := tgbotapi.NewMessage(chatID, msgText)
+    msg.ReplyMarkup = keyboard
+    msg.ParseMode = "HTML"
+
+    // 优先编辑上一条消息
+    if len(s.Messages) > 0 {
+        edit := tgbotapi.EditMessageTextConfig{
+            BaseEdit: tgbotapi.BaseEdit{
+                ChatID:    chatID,
+                MessageID: s.Messages[len(s.Messages)-1],
+            },
+            Text:      msgText,
+            ParseMode: "HTML",
+        }
+        edit.ReplyMarkup = &keyboard
+        if _, err := sendMessage(cfg, chatID, edit); err != nil {
+            log.Printf("Failed to edit message: %v", err)
+            // 编辑失败，发送新消息
+            if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
+                s.Messages = append(s.Messages, sentMsg.MessageID)
+            }
+        }
+    } else {
+        // 无上一条消息，直接发送新消息
+        if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
+            s.Messages = append(s.Messages, sentMsg.MessageID)
+        }
+    }
 }
 
 func sendConfirmation(userID, chatID int64, cfg *config.Config, s *DialogState) {

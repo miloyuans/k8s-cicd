@@ -24,6 +24,7 @@ import (
 
 var (
 	taskQueue *queue.Queue
+	isRestarted bool = true // 默认启动时为true
 )
 
 func main() {
@@ -34,6 +35,8 @@ func main() {
 	}
 
 	initServicesDir(cfg)
+	initServicesDir(cfg)
+    checkIfFilesEmpty(cfg) // 新增检查
 
 	storage.InitAllDailyFiles(cfg, nil)
 	go storage.DailyMaintenance(cfg, nil)
@@ -48,10 +51,43 @@ func main() {
 	http.HandleFunc("/complete", handleComplete(cfg))
 	http.HandleFunc("/services", handleServices(cfg))
 	http.HandleFunc("/submit-task", handleSubmitTask(cfg))
+	http.HandleFunc("/verify-data", handleVerifyData(cfg))
+	http.HandleFunc("/environments", handleEnvironments(cfg))
 	log.Printf("Gateway server starting on %s", cfg.GatewayListenAddr)
 	log.Fatal(http.ListenAndServe(cfg.GatewayListenAddr, nil))
 }
 
+// 新增函数：检查文件是否为空
+func checkIfFilesEmpty(cfg *config.Config) {
+    envFile := filepath.Join(cfg.StorageDir, "environments.json")
+    if fileEmpty(envFile) {
+        isRestarted = true
+        log.Printf("environments.json is empty or missing, setting isRestarted=true")
+    }
+    for category := range cfg.TelegramBots {
+        svcFile := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
+        if fileEmpty(svcFile) {
+            isRestarted = true
+            log.Printf("%s is empty or missing, setting isRestarted=true", svcFile)
+        }
+    }
+    otherFile := filepath.Join(cfg.ServicesDir, "other.svc.list")
+    if fileEmpty(otherFile) {
+        isRestarted = true
+        log.Printf("other.svc.list is empty or missing, setting isRestarted=true")
+    }
+}
+
+func fileEmpty(path string) bool {
+    if _, err := os.Stat(path); os.IsNotExist(err) {
+        return true
+    }
+    data, err := os.ReadFile(path)
+    if err != nil || len(data) == 0 || string(data) == "[]" || string(data) == "{}" {
+        return true
+    }
+    return false
+}
 func initServicesDir(cfg *config.Config) {
 	if _, err := os.Stat(cfg.ServicesDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(cfg.ServicesDir, 0755); err != nil {
@@ -89,6 +125,20 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 			}
 			lowerEnv := strings.ToLower(env)
 			tasks := taskQueue.GetPendingTasks(lowerEnv)
+            if isRestarted || fileEmpty(filepath.Join(cfg.StorageDir, "environments.json")) || checkSvcFilesEmpty(cfg) {
+                // 返回特殊响应
+                resp := map[string]interface{}{
+                    "status": "restarted",
+                    "tasks":  []types.DeployRequest{},
+                }
+                w.Header().Set("Content-Type", "application/json")
+                if err := json.NewEncoder(w).Encode(resp); err != nil {
+                    // ... 错误处理
+                }
+                isRestarted = false // 重置标志
+                log.Printf("Detected restart or empty files, returned 'restarted' status")
+                return
+            }
 			log.Printf("Serving %d pending tasks for env %s", len(tasks), lowerEnv)
 
 			w.Header().Set("Content-Type", "application/json")
@@ -110,6 +160,60 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	}
+}
+
+// 新增检查svc文件是否为空的辅助函数
+func checkSvcFilesEmpty(cfg *config.Config) bool {
+    for category := range cfg.TelegramBots {
+        svcFile := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
+        if fileEmpty(svcFile) {
+            return true
+        }
+    }
+    return fileEmpty(filepath.Join(cfg.ServicesDir, "other.svc.list"))
+}
+
+// 新增handleEnvironments
+func handleEnvironments(cfg *config.Config) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+            return
+        }
+        var envs map[string]string
+        if err := json.NewDecoder(r.Body).Decode(&envs); err != nil {
+            http.Error(w, "Invalid JSON", http.StatusBadRequest)
+            return
+        }
+        filePath := filepath.Join(cfg.StorageDir, "environments.json")
+        data, err := json.Marshal(envs)
+        if err != nil {
+            http.Error(w, "Failed to marshal environments", http.StatusInternalServerError)
+            return
+        }
+        if err := os.WriteFile(filePath, data, 0644); err != nil {
+            http.Error(w, "Failed to persist environments", http.StatusInternalServerError)
+            return
+        }
+        log.Printf("Received and persisted %d environments", len(envs))
+        w.WriteHeader(http.StatusOK)
+    }
+}
+
+// 新增handleVerifyData
+func handleVerifyData(cfg *config.Config) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodGet {
+            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+            return
+        }
+        status := map[string]bool{
+            "environments": !fileEmpty(filepath.Join(cfg.StorageDir, "environments.json")),
+            "services":     !checkSvcFilesEmpty(cfg),
+        }
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(status)
+    }
 }
 
 func handleReport(cfg *config.Config) http.HandlerFunc {
@@ -361,19 +465,19 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 }
 
 func validateEnvironment(env string, cfg *config.Config) bool {
-	fileName := filepath.Join(cfg.StorageDir, "environments.json")
-	if data, err := os.ReadFile(fileName); err == nil {
-		var envs []string
-		if err := json.Unmarshal(data, &envs); err == nil {
-			for _, e := range envs {
-				if strings.ToLower(e) == strings.ToLower(env) {
-					return true
-				}
-			}
-		}
-	}
-	_, exists := cfg.Environments[strings.ToLower(env)]
-	return exists
+    fileName := filepath.Join(cfg.StorageDir, "environments.json")
+    if data, err := os.ReadFile(fileName); err == nil && len(data) > 0 {
+        var envs map[string]string
+        if err := json.Unmarshal(data, &envs); err == nil {
+            if _, exists := envs[strings.ToLower(env)]; exists {
+                return true
+            }
+        }
+    } else {
+        log.Printf("environments.json empty or error, falling back to config.Environments")
+    }
+    _, exists := cfg.Environments[strings.ToLower(env)]
+    return exists
 }
 
 func classifyService(service string, keywords map[string][]string) string {
