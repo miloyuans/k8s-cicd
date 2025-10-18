@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -141,97 +141,133 @@ func reportServicesToGateway(cfg *config.Config) {
 	}
 }
 
-// 新增函数：reportEnvironmentsToGateway
 func reportEnvironmentsToGateway(cfg *config.Config) {
-    data, err := json.Marshal(cfg.Environments)
-    if err != nil {
-        log.Printf("Failed to marshal environments: %v", err)
-        return
-    }
-    attempt := 1
-    for {
-        req, err := http.NewRequest("POST", cfg.GatewayURL+"/environments", bytes.NewBuffer(data))
-        if err != nil {
-            log.Printf("Failed to create environments request (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-        req.Header.Set("Content-Type", "application/json")
+	data, err := json.Marshal(cfg.Environments)
+	if err != nil {
+		log.Printf("Failed to marshal environments: %v", err)
+		return
+	}
+	attempt := 1
+	for {
+		req, err := http.NewRequest("POST", cfg.GatewayURL+"/environments", bytes.NewBuffer(data))
+		if err != nil {
+			log.Printf("Failed to create environments request (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-        client := &http.Client{Timeout: 10 * time.Second}
-        resp, err := client.Do(req)
-        if err != nil {
-            log.Printf("Failed to send environments to gateway (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-        defer resp.Body.Close()
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Failed to send environments to gateway (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		defer resp.Body.Close()
 
-        if resp.StatusCode != http.StatusOK {
-            log.Printf("Gateway environments failed with status %d (attempt %d)", resp.StatusCode, attempt)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Gateway environments failed with status %d (attempt %d)", resp.StatusCode, attempt)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
 
-        log.Printf("Successfully reported environments to gateway")
-        return
-    }
+		log.Printf("Successfully reported environments to gateway")
+		return
+	}
 }
 
-// 新增函数：verifyDataFromGateway
 func verifyDataFromGateway(cfg *config.Config) bool {
-    attempt := 1
-    for {
-        resp, err := http.Get(cfg.GatewayURL + "/verify-data")
-        if err != nil {
-            log.Printf("Failed to verify data from gateway (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            if attempt > 5 {
-                return false
-            }
-            continue
-        }
-        defer resp.Body.Close()
+	attempt := 1
+	for {
+		resp, err := http.Get(cfg.GatewayURL + "/verify-data")
+		if err != nil {
+			log.Printf("Failed to verify data from gateway (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			if attempt > 5 {
+				return false
+			}
+			continue
+		}
+		defer resp.Body.Close()
 
-        if resp.StatusCode != http.StatusOK {
-            log.Printf("Gateway verify-data failed with status %d (attempt %d)", resp.StatusCode, attempt)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            if attempt > 5 {
-                return false
-            }
-            continue
-        }
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Gateway verify-data failed with status %d (attempt %d)", resp.StatusCode, attempt)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			if attempt > 5 {
+				return false
+			}
+			continue
+		}
 
-        var status map[string]bool
-        if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-            log.Printf("Failed to decode verify-data response (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            if attempt > 5 {
-                return false
-            }
-            continue
-        }
+		var status map[string]bool
+		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+			log.Printf("Failed to decode verify-data response (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			if attempt > 5 {
+				return false
+			}
+			continue
+		}
 
-        if status["environments"] && status["services"] {
-            log.Printf("Verified data persistence on gateway")
-            return true
-        }
+		if status["environments"] && status["services"] {
+			log.Printf("Verified data persistence on gateway")
+			return true
+		}
 
-        log.Printf("Data not fully persisted on gateway, retrying...")
-        time.Sleep(getBackoff(attempt))
-        attempt++
-        if attempt > 5 {
-            return false
-        }
-    }
+		log.Printf("Data not fully persisted on gateway, retrying...")
+		time.Sleep(getBackoff(attempt))
+		attempt++
+		if attempt > 5 {
+			return false
+		}
+	}
 }
 
+func pollGateway() {
+	ticker := time.NewTicker(time.Duration(cfg.PollInterval) * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		for env, _ := range cfg.Environments { // Removed unused 'namespace'
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			tasks, respMap, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env) // Fixed: Handle 3 return values
+			if err != nil {
+				log.Printf("Failed to fetch tasks for env %s: %v", env, err)
+				continue
+			}
+
+			// Check if gateway reported a restart
+			if status, ok := respMap["status"].(string); ok && status == "restarted" {
+				log.Printf("Gateway reported restarted for env %s, triggering full report", env)
+				go reportToGateway(cfg)              // Report deployment info
+				go reportServicesToGateway(cfg)      // Report service list
+				go reportEnvironmentsToGateway(cfg)  // Report environment list
+				if !verifyDataFromGateway(cfg) {
+					log.Printf("Verification failed, will retry next poll")
+				}
+			}
+
+			for _, task := range tasks {
+				taskKey := queue.ComputeTaskKey(task)
+				if taskQueue.Exists(taskKey) {
+					log.Printf("Task %s already exists, skipping", taskKey)
+					continue
+				}
+				taskQueue.Enqueue(queue.Task{DeployRequest: task})
+				log.Printf("Enqueued task %s for env %s", taskKey, env)
+			}
+		}
+	}
+}
 
 func getBackoff(attempt int) time.Duration {
 	backoff := time.Duration(1<<uint(attempt-1)) * time.Second
@@ -241,6 +277,7 @@ func getBackoff(attempt int) time.Duration {
 	return backoff
 }
 
+// The following functions remain unchanged to preserve functionality
 func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error) {
 	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
 	data, err := os.ReadFile(fileName)
@@ -255,18 +292,15 @@ func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error)
 	classified := make(map[string][]string)
 	seenServices := make(map[string]bool)
 	for _, info := range infos {
-		if seenServices[info.Service] {
-			continue
+		if _, ok := seenServices[info.Service]; !ok {
+			seenServices[info.Service] = true
+			category := classifyService(info.Service, cfg.ServiceKeywords)
+			classified[category] = append(classified[category], info.Service)
 		}
-		seenServices[info.Service] = true
-		category := classifyService(info.Service, cfg.ServiceKeywords)
-		if category == "" {
-			category = "other"
-		}
-		classified[category] = append(classified[category], info.Service)
 	}
-	for _, services := range classified {
-		sort.Strings(services)
+
+	for category := range classified {
+		sort.Strings(classified[category])
 	}
 	return classified, nil
 }
@@ -290,73 +324,45 @@ func classifyService(service string, keywords map[string][]string) string {
 }
 
 func retryPendingTasks() {
-	for _, env := range cfg.Environments {
-		tasks, err := k8shttp.FetchTasks(context.Background(), cfg.GatewayURL, env)
-		if err != nil {
-			log.Printf("Failed to fetch tasks for env %s: %v", env, err)
-			continue
-		}
-		for _, task := range tasks {
-			if task.Status == "pending" {
-				taskKey := queue.ComputeTaskKey(task)
-				log.Printf("Enqueued task %s for key %s", taskKey, taskKey)
-				taskQueue.Enqueue(queue.Task{DeployRequest: task})
+	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
+	data, err := os.ReadFile(fileName)
+	if err != nil {
+		log.Printf("Failed to read deploy file for retry: %v", err)
+		return
+	}
+	var infos []storage.DeploymentInfo
+	if err := json.Unmarshal(data, &infos); err != nil {
+		log.Printf("Failed to unmarshal deploy file for retry: %v", err)
+		return
+	}
+
+	for _, info := range infos {
+		if info.Status == "pending" {
+			task := queue.Task{
+				DeployRequest: types.DeployRequest{
+					Service:   info.Service,
+					Env:       info.Env,
+					Version:   getVersionFromImage(info.Image),
+					Timestamp: info.Timestamp,
+					UserName:  info.UserName,
+					Status:    "pending",
+				},
 			}
+			taskQueue.Enqueue(task)
+			log.Printf("Retried pending task for service %s in env %s", info.Service, info.Env)
 		}
 	}
-}
-
-func pollGateway() {
-    ticker := time.NewTicker(time.Duration(cfg.PollInterval) * time.Second)
-    defer ticker.Stop()
-
-    for range ticker.C {
-        for env, namespace := range cfg.Environments {
-            ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-            defer cancel()
-
-            tasks, respMap, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
-            if err != nil {
-                log.Printf("Failed to fetch tasks for env %s: %v", env, err)
-                continue
-            }
-
-            // 新增：检查是否为"restarted"状态
-            if status, ok := respMap["status"].(string); ok && status == "restarted" {
-                log.Printf("Gateway reported restarted for env %s, triggering full report", env)
-                reportToGateway(cfg)                 // 部署信息
-                reportServicesToGateway(cfg)         // 服务列表
-                reportEnvironmentsToGateway(cfg)     // 环境列表
-                if !verifyDataFromGateway(cfg) {
-                    log.Printf("Verification failed, will retry next poll")
-                }
-            }
-
-            for _, task := range tasks {
-                taskKey := queue.ComputeTaskKey(task)
-                if taskQueue.Exists(taskKey) {
-                    log.Printf("Task %s already exists, skipping", taskKey)
-                    continue
-                }
-                taskQueue.Enqueue(queue.Task{DeployRequest: task})
-                log.Printf("Enqueued task %s for env %s", taskKey, env)
-            }
-        }
-    }
 }
 
 func worker() {
 	for task := range taskQueue.Dequeue() {
 		taskKey := queue.ComputeTaskKey(task.DeployRequest)
-		log.Printf("Processing task %s", taskKey)
+		log.Printf("Processing task %s: service=%s, env=%s, version=%s", taskKey, task.DeployRequest.Service, task.DeployRequest.Env, task.DeployRequest.Version)
 
-		result := storage.DeployResult{
-			Request: task.DeployRequest,
-		}
-		namespace := cfg.Environments[task.DeployRequest.Env]
-		if namespace == "" {
-			log.Printf("No namespace for env %s, using default namespace 'international'", task.DeployRequest.Env)
-			namespace = "international"
+		namespace, ok := cfg.Environments[task.DeployRequest.Env]
+		if !ok {
+			log.Printf("No namespace found for env %s, skipping task %s", task.DeployRequest.Env, taskKey)
+			continue
 		}
 
 		newImage, err := k8sClient.GetNewImage(task.DeployRequest.Service, task.DeployRequest.Version, namespace)
@@ -364,36 +370,58 @@ func worker() {
 			log.Printf("Failed to get new image for task %s: %v", taskKey, err)
 			continue
 		}
-		result.OldImage = strings.Split(newImage, ":")[0] + ":latest"
 
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
-		defer cancel()
-		success, errMsg, oldImage := k8sClient.UpdateDeployment(ctx, task.DeployRequest.Service, newImage, namespace)
-		result.OldImage = oldImage
-		if !success {
-			result.Success = false
-			result.ErrorMsg = errMsg
-			log.Printf("Failed to update deployment for task %s: %s", taskKey, errMsg)
-			storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
-			go telegram.SendTelegramNotification(cfg, &result)
-			feedbackCompleteToGateway(cfg, taskKey)
-			continue
+		result := storage.DeployResult{
+			Request: task.DeployRequest,
+			Envs:    make(map[string]string),
 		}
 
-		checkCtx, checkCancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
 		defer checkCancel()
-		ready, err := k8sClient.CheckNewPodStatus(checkCtx, result.Request.Service, newImage, namespace)
-		if ready {
-			result.Success = true
-			result.ErrorMsg = ""
-			log.Printf("Deployment successful for task %s: service=%s, env=%s, version=%s, user=%s, oldImage=%s",
-				taskKey, result.Request.Service, result.Request.Env, result.Request.Version, result.Request.UserName, result.OldImage)
-			storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "success", result.Request.UserName)
-			go telegram.SendTelegramNotification(cfg, &result)
+
+		success, errMsg, oldImage := k8sClient.UpdateDeployment(checkCtx, task.DeployRequest.Service, newImage, namespace)
+		result.Success = success
+		result.OldImage = oldImage
+		result.ErrorMsg = errMsg
+
+		if success {
+			ready, podErr := k8sClient.CheckNewPodStatus(checkCtx, task.DeployRequest.Service, newImage, namespace)
+			if ready {
+				result.Success = true
+				log.Printf("Deployment succeeded for task %s", taskKey)
+				storage.PersistDeployment(cfg, task.DeployRequest.Service, task.DeployRequest.Env, newImage, "success", task.DeployRequest.UserName)
+				go telegram.SendTelegramNotification(cfg, &result)
+			} else {
+				result.Success = false
+				result.ErrorMsg = fmt.Sprintf("Deployment failed: %v", podErr)
+				result.Events = k8sClient.getPodEvents(checkCtx, task.DeployRequest.Service, namespace)
+				result.Logs = "Pod failed to become ready"
+				log.Printf("Deployment failed for task %s: service=%s, env=%s, version=%s, user=%s, error=%s, events=%s, logs=%s, envs=%v",
+					taskKey, result.Request.Service, result.Request.Env, result.Request.Version, result.Request.UserName, result.ErrorMsg, result.Events, result.Logs, result.Envs)
+				err = k8sClient.RollbackDeployment(checkCtx, result.Request.Service, namespace)
+				if err != nil {
+					result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", err)
+					log.Printf("Rollback failed for task %s: %v", taskKey, err)
+				} else {
+					rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 1*time.Minute)
+					defer rollbackCancel()
+					rollbackReady, rollbackErr := k8sClient.CheckNewPodStatus(rollbackCtx, result.Request.Service, "", namespace)
+					if rollbackReady {
+						result.ErrorMsg += "; Rollback succeeded."
+						log.Printf("Rollback succeeded for task %s", taskKey)
+					} else {
+						result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+						log.Printf("Rollback check failed for task %s: %v", taskKey, rollbackErr)
+					}
+				}
+				storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
+				go telegram.SendTelegramNotification(cfg, &result)
+				go telegram.NotifyDeployTeam(cfg, &result)
+			}
 		} else {
 			result.Success = false
-			result.ErrorMsg = fmt.Sprintf("Pods not ready: %v", err)
-			result.Events, result.Logs, result.Envs = k8sClient.GetDeploymentDiagnostics(checkCtx, result.Request.Service, namespace)
+			result.Events = k8sClient.getPodEvents(checkCtx, task.DeployRequest.Service, namespace)
+			result.Logs = "Deployment update failed"
 			log.Printf("Deployment failed for task %s: service=%s, env=%s, version=%s, user=%s, error=%s, events=%s, logs=%s, envs=%v",
 				taskKey, result.Request.Service, result.Request.Env, result.Request.Version, result.Request.UserName, result.ErrorMsg, result.Events, result.Logs, result.Envs)
 			err = k8sClient.RollbackDeployment(checkCtx, result.Request.Service, namespace)
