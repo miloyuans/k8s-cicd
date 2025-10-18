@@ -6,13 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"k8s-cicd/internal/config"
@@ -24,11 +22,9 @@ import (
 )
 
 var (
-	cfg           *config.Config
-	k8sClient     *k8s.Client
-	taskQueue     *queue.Queue
-	taskNotify    = make(chan struct{}, 1)
-	taskNotifyMu  sync.Mutex
+	cfg       *config.Config
+	k8sClient *k8s.Client
+	taskQueue *queue.Queue
 )
 
 func main() {
@@ -61,30 +57,7 @@ func main() {
 	updateAndReportServices()
 	go periodicUpdateServices()
 
-	// Start HTTP server for task fetch notifications
-	go func() {
-		http.HandleFunc("/fetch-tasks", handleFetchTasks)
-		log.Printf("k8s-cicd server starting on %s", cfg.K8sCICDListenAddr)
-		log.Fatal(http.ListenAndServe(cfg.K8sCICDListenAddr, nil))
-	}()
-
 	select {}
-}
-
-func handleFetchTasks(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		log.Printf("Method not allowed for /fetch-tasks: %s", r.Method)
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	taskNotifyMu.Lock()
-	select {
-	case taskNotify <- struct{}{}:
-	default:
-	}
-	taskNotifyMu.Unlock()
-	log.Printf("Received fetch-tasks notification")
-	w.WriteHeader(http.StatusOK)
 }
 
 func initServicesDir(cfg *config.Config) {
@@ -244,14 +217,8 @@ func pollGateway() {
 	ticker := time.NewTicker(time.Duration(cfg.PollInterval) * time.Second)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			retryPendingTasks()
-		case <-taskNotify:
-			log.Printf("Received task notification, fetching tasks immediately")
-			retryPendingTasks()
-		}
+	for range ticker.C {
+		retryPendingTasks()
 	}
 }
 
@@ -419,7 +386,7 @@ func reportToGateway(cfg *config.Config) {
 		if err != nil {
 			log.Printf("Failed to send report to gateway (attempt %d): %v", attempt, err)
 			time.Sleep(getBackoff(attempt))
-			approach++
+			attempt++
 			continue
 		}
 		defer resp.Body.Close()
