@@ -286,7 +286,7 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
 	return false, fmt.Errorf("new pods not ready after %d attempts: %s", maxAttempts, errMsg.String())
 }
 
-func (c *Client) getPodEvents(ctx context.Context, podName, namespace string) string {
+func (c *Client) GetPodEvents(ctx context.Context, podName, namespace string) string {
 	eventsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "events"}
 	events, err := c.client.Resource(eventsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=Pod", podName),

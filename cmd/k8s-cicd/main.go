@@ -20,6 +20,7 @@ import (
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
+	"k8s-cicd/internal/types" // Ensure correct import for types
 )
 
 var (
@@ -235,11 +236,11 @@ func pollGateway() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		for env, _ := range cfg.Environments { // Removed unused 'namespace'
+		for env, _ := range cfg.Environments { // namespace unused, kept for potential future use
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			tasks, respMap, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env) // Fixed: Handle 3 return values
+			tasks, respMap, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
 			if err != nil {
 				log.Printf("Failed to fetch tasks for env %s: %v", env, err)
 				continue
@@ -277,7 +278,6 @@ func getBackoff(attempt int) time.Duration {
 	return backoff
 }
 
-// The following functions remain unchanged to preserve functionality
 func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error) {
 	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
 	data, err := os.ReadFile(fileName)
@@ -394,7 +394,7 @@ func worker() {
 			} else {
 				result.Success = false
 				result.ErrorMsg = fmt.Sprintf("Deployment failed: %v", podErr)
-				result.Events = k8sClient.getPodEvents(checkCtx, task.DeployRequest.Service, namespace)
+				result.Events = k8sClient.GetPodEvents(checkCtx, task.DeployRequest.Service, namespace) // Fixed: Use exported GetPodEvents
 				result.Logs = "Pod failed to become ready"
 				log.Printf("Deployment failed for task %s: service=%s, env=%s, version=%s, user=%s, error=%s, events=%s, logs=%s, envs=%v",
 					taskKey, result.Request.Service, result.Request.Env, result.Request.Version, result.Request.UserName, result.ErrorMsg, result.Events, result.Logs, result.Envs)
@@ -420,7 +420,7 @@ func worker() {
 			}
 		} else {
 			result.Success = false
-			result.Events = k8sClient.getPodEvents(checkCtx, task.DeployRequest.Service, namespace)
+			result.Events = k8sClient.GetPodEvents(checkCtx, task.DeployRequest.Service, namespace) // Fixed: Use exported GetPodEvents
 			result.Logs = "Deployment update failed"
 			log.Printf("Deployment failed for task %s: service=%s, env=%s, version=%s, user=%s, error=%s, events=%s, logs=%s, envs=%v",
 				taskKey, result.Request.Service, result.Request.Env, result.Request.Version, result.Request.UserName, result.ErrorMsg, result.Events, result.Logs, result.Envs)
