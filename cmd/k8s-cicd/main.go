@@ -1,26 +1,30 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"path/filepath"
-	"regexp"
-	"sort"
-	"strings"
-	"time"
+    "bytes"
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "path/filepath"
+    "regexp"
+    "sort"
+    "strings"
+    "time"
 
-	"k8s-cicd/internal/config"
-	k8shttp "k8s-cicd/internal/http"
-	"k8s-cicd/internal/k8s"
-	"k8s-cicd/internal/queue"
-	"k8s-cicd/internal/storage"
-	"k8s-cicd/internal/telegram"
-	"k8s-cicd/internal/types" // Ensure correct import for types
+    "k8s.io/apimachinery/pkg/runtime/schema"
+    "k8s.io/apimachinery/pkg/apis/meta/v1"
+    "k8s.io/apimachinery/pkg/unstructured"
+
+    "k8s-cicd/internal/config"
+    k8shttp "k8s-cicd/internal/http"
+    "k8s-cicd/internal/k8s"
+    "k8s-cicd/internal/queue"
+    "k8s-cicd/internal/storage"
+    "k8s-cicd/internal/telegram"
+    "k8s-cicd/internal/types"
 )
 
 var (
@@ -406,13 +410,13 @@ func worker() {
                 for _, pod := range pods {
                     phase := pod.Status.Phase
                     podGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-                    podObj, err := k8sClient.Client().Resource(podGVR).Namespace(namespace).Get(checkCtx, pod.Name, metav1.GetOptions{})
-                    if err != nil {
-                        newPodsReady = false
-                        errMsg.WriteString(fmt.Sprintf("Pod %s: Failed to get status: %v\n", pod.Name, err))
-                        continue
-                    }
-                    conditions, _, _ := unstructured.NestedSlice(podObj.Object, "status", "conditions")
+					podObj, err := k8sClient.Client().Resource(podGVR).Namespace(namespace).Get(checkCtx, pod.Name, v1.GetOptions{})
+					if err != nil {
+						newPodsReady = false
+						errMsg.WriteString(fmt.Sprintf("Pod %s: Failed to get status: %v\n", pod.Name, err))
+						continue
+					}
+					conditions, _, _ := unstructured.NestedSlice(podObj.Object, "status", "conditions")
                     ready := false
                     for _, cond := range conditions {
                         c, ok := cond.(map[string]interface{})
