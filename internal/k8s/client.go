@@ -18,8 +18,8 @@ import (
 )
 
 type Client struct {
-    client dynamic.Interface
-    restClient *rest.RESTClient // Added for log retrieval
+    client     dynamic.Interface
+    restClient *rest.RESTClient // For log retrieval
 }
 
 type PodInfo struct {
@@ -123,6 +123,7 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
     const maxAttempts = 10
     const interval = 5 * time.Second
 
+    var errMsg strings.Builder // Moved to function scope
     gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
     for attempt := 1; attempt <= maxAttempts; attempt++ {
         pods, err := c.client.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
@@ -133,7 +134,6 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
         }
 
         newPodsReady := true
-        var errMsg strings.Builder // Declared here to fix undefined error
         for _, pod := range pods.Items {
             containers, _, _ := unstructured.NestedSlice(pod.Object, "spec", "containers")
             if len(containers) == 0 {
@@ -270,18 +270,13 @@ func (c *Client) RollbackDeployment(ctx context.Context, service, namespace stri
 }
 
 func (c *Client) GetPodLogs(ctx context.Context, podName, namespace string) string {
-    req, err := c.restClient.Get().
+    logs, err := c.restClient.Get().
         Namespace(namespace).
         Resource("pods").
         Name(podName).
         SubResource("log").
         Param("tailLines", "50").
-        RequestURI()
-    if err != nil {
-        log.Printf("Failed to construct log request for pod %s in namespace %s: %v", podName, namespace, err)
-        return fmt.Sprintf("Failed to get logs for pod %s: %v", podName, err)
-    }
-    logs, err := c.restClient.Get().RequestURI(req).DoRaw(ctx)
+        DoRaw(ctx)
     if err != nil {
         log.Printf("Failed to get logs for pod %s in namespace %s: %v", podName, namespace, err)
         return fmt.Sprintf("Failed to get logs for pod %s: %v", podName, err)
