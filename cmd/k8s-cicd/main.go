@@ -14,9 +14,9 @@ import (
     "strings"
     "time"
 
+    corev1 "k8s.io/api/core/v1"
     "k8s.io/apimachinery/pkg/runtime/schema"
     "k8s.io/apimachinery/pkg/apis/meta/v1"
-    "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
     "k8s-cicd/internal/config"
     k8shttp "k8s-cicd/internal/http"
@@ -44,8 +44,8 @@ func main() {
 
     initServicesDir(cfg)
 
-    storage.InitAllDailyFiles(cfg, k8sClient.Client())
-    storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
+    storage.InitAllDailyFiles(cfg, k8sClient.DynamicClient())
+    storage.UpdateAllDeploymentVersions(cfg, k8sClient.DynamicClient())
     go reportToGateway(cfg)
 
     taskQueue = queue.NewQueue(cfg, 100)
@@ -57,7 +57,7 @@ func main() {
         go worker()
     }
 
-    go storage.DailyMaintenance(cfg, k8sClient.Client())
+    go storage.DailyMaintenance(cfg, k8sClient.DynamicClient())
     go pollGateway()
 
     updateAndReportServices()
@@ -87,7 +87,7 @@ func initServicesDir(cfg *config.Config) {
 
 func updateAndReportServices() {
     log.Println("Immediate updating services")
-    storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
+    storage.UpdateAllDeploymentVersions(cfg, k8sClient.DynamicClient())
     go reportServicesToGateway(cfg)
 }
 
@@ -409,18 +409,15 @@ func worker() {
 
                 for _, pod := range pods {
                     phase := pod.Status.Phase
-                    podGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
                     podObj, err := k8sClient.Client().CoreV1().Pods(namespace).Get(checkCtx, pod.Name, v1.GetOptions{})
                     if err != nil {
                         newPodsReady = false
                         errMsg.WriteString(fmt.Sprintf("Pod %s: Failed to get status: %v\n", pod.Name, err))
                         continue
                     }
-                    conditions, _, _ := unstructured.NestedSlice(podObj.Object, "status", "conditions")
                     ready := false
-                    for _, cond := range conditions {
-                        c, ok := cond.(map[string]interface{})
-                        if ok && c["type"] == "Ready" && c["status"] == "True" {
+                    for _, cond := range podObj.Status.Conditions {
+                        if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
                             ready = true
                             break
                         }

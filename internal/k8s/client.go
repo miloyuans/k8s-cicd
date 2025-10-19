@@ -13,14 +13,16 @@ import (
     corev1 "k8s.io/api/core/v1"
     appsv1 "k8s.io/api/apps/v1"
     metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+    "k8s.io/client-go/dynamic"
     "k8s.io/client-go/kubernetes"
     "k8s.io/client-go/rest"
     "k8s.io/client-go/tools/clientcmd"
 )
 
 type Client struct {
-    clientset  *kubernetes.Clientset
-    restClient *rest.RESTClient // For log retrieval
+    clientset     *kubernetes.Clientset
+    dynamicClient dynamic.Interface
+    restClient    *rest.RESTClient // For log retrieval
 }
 
 type PodInfo struct {
@@ -44,7 +46,6 @@ func NewClient(kubeconfig string) *Client {
         }
         k8sCfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
         if err != nil {
-            // If kubeconfig file doesn't exist or is invalid, log and exit
             fmt.Fprintf(os.Stderr, "Failed to load kubeconfig from %s: %v\n", kubeconfig, err)
             os.Exit(1)
         }
@@ -60,6 +61,13 @@ func NewClient(kubeconfig string) *Client {
         os.Exit(1)
     }
 
+    // Create dynamic client
+    dynamicClient, err := dynamic.NewForConfig(k8sCfg)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Failed to create dynamic client: %v\n", err)
+        os.Exit(1)
+    }
+
     // Create REST client for logs
     restClient, err := rest.RESTClientFor(k8sCfg)
     if err != nil {
@@ -68,13 +76,18 @@ func NewClient(kubeconfig string) *Client {
     }
 
     return &Client{
-        clientset:  clientset,
-        restClient: restClient,
+        clientset:     clientset,
+        dynamicClient: dynamicClient,
+        restClient:    restClient,
     }
 }
 
 func (c *Client) Client() *kubernetes.Clientset {
     return c.clientset
+}
+
+func (c *Client) DynamicClient() dynamic.Interface {
+    return c.dynamicClient
 }
 
 func (c *Client) GetNewImage(service, version, namespace string) (string, error) {
