@@ -35,7 +35,7 @@ func NewClient(kubeconfig string) *Client {
 	client, err := dynamic.NewForConfig(k8sCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create k8s client: %v\n", err)
-		os.Exit(1)
+			os.Exit(1)
 	}
 	return &Client{client: client}
 }
@@ -252,7 +252,7 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
 				newPodsReady = false
 				errMsg.WriteString(fmt.Sprintf("Pod %s phase: %s (not Running)\n", pod.GetName(), phase))
 				if phase == "Pending" || strings.Contains(phase, "Error") || strings.Contains(phase, "Crash") {
-					errMsg.WriteString(c.getPodEvents(ctx, pod.GetName(), namespace))
+					errMsg.WriteString(c.GetPodEvents(ctx, pod.GetName(), namespace)) // Fixed: Use GetPodEvents
 				}
 				continue
 			}
