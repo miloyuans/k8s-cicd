@@ -146,129 +146,144 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 }
 
 func ProcessDialog(userID, chatID int64, input string, cfg *config.Config) {
-	state, loaded := dialogs.Load(userID)
-	if !loaded {
-		log.Printf("No active dialog for user %d in chat %d", userID, chatID)
+	s, ok := dialogs.Load(userID)
+	if !ok {
+		log.Printf("No dialog found for user %d in chat %d", userID, chatID)
+		sendMessage(cfg, chatID, "No active dialog. Please start with a trigger keyword.")
 		return
 	}
-	s := state.(*DialogState)
+	state := s.(*DialogState)
 
-	switch s.Stage {
+	// Handle dialog stages
+	switch state.Stage {
 	case "service":
+		// Handle service selection
 		if input == "next_service" {
-			if s.Selected == "" {
-				sendMessage(cfg, chatID, "请先选择一个服务。\nPlease select a service first.")
+			if state.Selected == "" {
+				sendMessage(cfg, chatID, "Please select a service first.")
 				return
 			}
-			s.Stage = "env"
-			dialogs.Store(userID, s)
-			sendEnvSelection(userID, chatID, cfg, s)
+			state.Stage = "env"
+			state.SelectedEnvs = nil // Reset environment selection
+			sendEnvSelection(userID, chatID, cfg, state)
 		} else if input == "cancel" {
 			CancelDialog(userID, chatID, cfg)
 		} else {
-			s.Selected = input
-			dialogs.Store(userID, s)
-			serviceLists, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
-			if err != nil {
-				log.Printf("Failed to load service lists: %v", err)
-				sendMessage(cfg, chatID, "无法加载服务列表 / Failed to load service list.")
+			// Update selected service
+			services, err := config.LoadServiceLists(cfg.ServicesDir, cfg.TelegramBots)
+			if err != nil || !contains(services[state.Service], input) {
+				sendMessage(cfg, chatID, "Invalid service selection.")
 				return
 			}
-			services, exists := serviceLists[s.Service]
-			if !exists {
-				log.Printf("No service list found for %s", s.Service)
-				sendMessage(cfg, chatID, "未找到服务列表 / No service list found.")
-				return
-			}
-			var buttons [][]tgbotapi.InlineKeyboardButton
-			var row []tgbotapi.InlineKeyboardButton
-			cols := 2
-			if len(services) < cols {
-				cols = len(services)
-			}
-			for i, svc := range services {
-				displayText := svc
-				if svc == s.Selected {
-					displayText = fmt.Sprintf("<b>✅ %s</b>", svc)
-				}
-				row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, svc))
-				if len(row) == cols || i == len(services)-1 {
-					buttons = append(buttons, row)
-					row = []tgbotapi.InlineKeyboardButton{}
-				}
-			}
-			buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-				tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_service"),
-				tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
-			})
-			keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-			msgText := fmt.Sprintf("请选择服务 / Please select a service:\n当前选中 / Currently selected: %s", s.Selected)
-			edit := tgbotapi.EditMessageTextConfig{
-				BaseEdit: tgbotapi.BaseEdit{
-					ChatID:    chatID,
-					MessageID: s.Messages[len(s.Messages)-1],
-				},
-				Text:      msgText,
-				ParseMode: "HTML",
-			}
-			edit.ReplyMarkup = &keyboard
-			if _, err := sendMessage(cfg, chatID, edit); err != nil {
-				log.Printf("Failed to edit message: %v", err)
-			}
+			state.Selected = input
+			sendServiceSelection(userID, chatID, cfg, state)
 		}
 	case "env":
+		// Handle environment selection
 		if input == "next_env" {
-			if len(s.SelectedEnvs) == 0 {
-				sendMessage(cfg, chatID, "请至少选择一个环境。\nPlease select at least one environment.")
+			if len(state.SelectedEnvs) == 0 {
+				sendMessage(cfg, chatID, "Please select at least one environment.")
 				return
 			}
-			s.Stage = "version"
-			dialogs.Store(userID, s)
-			sendVersionPrompt(userID, chatID, cfg, s)
+			state.Stage = "version"
+			sendMessage(cfg, chatID, "请输入版本号 / Please enter the version number:")
 		} else if input == "cancel" {
 			CancelDialog(userID, chatID, cfg)
-		} else if validateEnvironment(input, cfg) {
-			if contains(s.SelectedEnvs, input) {
-				s.SelectedEnvs = remove(s.SelectedEnvs, input)
-			} else {
-				s.SelectedEnvs = append(s.SelectedEnvs, input)
-			}
-			dialogs.Store(userID, s)
-			sendEnvSelection(userID, chatID, cfg, s)
 		} else {
-			sendMessage(cfg, chatID, fmt.Sprintf("无效环境 %s / Invalid environment %s. Please select a valid environment.", input, input))
+			// Update selected environments
+			envs := getEnvironmentsFromDeployFile(cfg)
+			if len(envs) == 0 {
+				for env := range cfg.Environments {
+					envs = append(envs, env)
+				}
+			}
+			if !contains(envs, input) {
+				sendMessage(cfg, chatID, "Invalid environment selection.")
+				return
+			}
+			if !contains(state.SelectedEnvs, input) {
+				state.SelectedEnvs = append(state.SelectedEnvs, input)
+			} else {
+				state.SelectedEnvs = remove(state.SelectedEnvs, input)
+			}
+			sendEnvSelection(userID, chatID, cfg, state)
 		}
 	case "version":
-		s.Version = input
-		s.Stage = "confirm"
-		dialogs.Store(userID, s)
-		sendConfirmation(userID, chatID, cfg, s)
+		// Handle version input
+		if input == "cancel" {
+			CancelDialog(userID, chatID, cfg)
+			return
+		}
+		if !isValidVersion(input) {
+			sendMessage(cfg, chatID, "Invalid version format. Please enter a valid version.")
+			return
+		}
+		state.Version = input
+		state.Stage = "confirm"
+		msgText := fmt.Sprintf("请确认部署 / Please confirm deployment:\n服务 / Service: %s\n环境 / Environments: %s\n版本 / Version: %s\n用户 / User: %s",
+			state.Selected, strings.Join(state.SelectedEnvs, ", "), state.Version, state.UserName)
+		buttons := [][]tgbotapi.InlineKeyboardButton{
+			{
+				tgbotapi.NewInlineKeyboardButtonData("确认 / Confirm", "confirm"),
+				tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
+			},
+		}
+		keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+		msg := tgbotapi.NewMessage(chatID, msgText)
+		msg.ReplyMarkup = keyboard
+		msg.ParseMode = "HTML"
+		if sentMsg, err := sendMessage(cfg, chatID, msg); err == nil {
+			state.Messages = append(state.Messages, sentMsg.MessageID)
+		}
 	case "confirm":
+		// Handle confirmation
 		if input == "confirm" {
-			submitTasks(userID, chatID, cfg, s)
-			s.Stage = "continue"
-			dialogs.Store(userID, s)
-			sendContinuePrompt(userID, chatID, cfg, s)
+			// Directly enqueue tasks for Telegram submission (no external confirmation)
+			for _, env := range state.SelectedEnvs {
+				task := types.DeployRequest{
+					Service:   state.Selected,
+					Env:       env,
+					Version:   state.Version,
+					Timestamp: time.Now(),
+					UserName:  state.UserName,
+					Status:    "pending", // Set to pending directly
+				}
+				taskKey := queue.ComputeTaskKey(task)
+				taskQueue.Enqueue(queue.Task{DeployRequest: task})
+				log.Printf("Enqueued task %s for Telegram submission (service=%s, env=%s, version=%s)", taskKey, task.Service, task.Env, task.Version)
+			}
+			sendMessage(cfg, chatID, "Deployment tasks submitted successfully!")
+			CancelDialog(userID, chatID, cfg) // End dialog
 		} else if input == "cancel" {
 			CancelDialog(userID, chatID, cfg)
-		}
-	case "continue":
-		if input == "yes" {
-			select {
-			case s.timeoutCancel <- true:
-			default:
+		} else if strings.HasPrefix(input, "confirm_api:") {
+			// Handle API confirmation (from /submit-task)
+			id := strings.TrimPrefix(input, "confirm_api:")
+			if tasks, ok := PendingConfirmations.Load(id); ok {
+				taskList := tasks.([]types.DeployRequest)
+				for _, task := range taskList {
+					task.Status = "pending"
+					taskKey := queue.ComputeTaskKey(task)
+					taskQueue.Enqueue(queue.Task{DeployRequest: task})
+					log.Printf("Enqueued task %s for API confirmation (service=%s, env=%s, version=%s)", taskKey, task.Service, task.Env, task.Version)
+				}
+				PendingConfirmations.Delete(id)
+				sendMessage(cfg, chatID, "API deployment confirmed and tasks enqueued!")
+			} else {
+				sendMessage(cfg, chatID, "Invalid or expired confirmation ID.")
 			}
-			s.Stage = "service"
-			s.Selected = ""
-			s.SelectedEnvs = []string{}
-			s.Version = ""
-			s.Messages = []int{}
-			dialogs.Store(userID, s)
-			sendServiceSelection(userID, chatID, cfg, s)
-		} else if input == "no" {
-			CancelDialog(userID, chatID, cfg)
+		} else if strings.HasPrefix(input, "cancel_api:") {
+			id := strings.TrimPrefix(input, "cancel_api:")
+			PendingConfirmations.Delete(id)
+			sendMessage(cfg, chatID, "API deployment cancelled.")
 		}
 	}
+	dialogs.Store(userID, state)
+}
+
+// Helper function to validate version format (customize as needed)
+func isValidVersion(version string) bool {
+	return len(version) > 0 // Add specific validation if needed
 }
 
 func validateEnvironment(env string, cfg *config.Config) bool {

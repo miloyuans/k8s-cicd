@@ -1,4 +1,3 @@
-// http/client.go
 package http
 
 import (
@@ -43,28 +42,50 @@ func FetchTasks(ctx context.Context, gatewayURL, env string) ([]types.DeployRequ
 			continue
 		}
 
+		// Try to decode as map first (for "restarted" case)
 		var respMap map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&respMap); err != nil {
-			log.Printf("Failed to decode tasks response for env %s (attempt %d/%d): %v", env, attempt, maxRetries, err)
-			return nil, nil, fmt.Errorf("failed to decode tasks response: %v", err)
+		decoder := json.NewDecoder(resp.Body)
+		err = decoder.Decode(&respMap)
+		if err == nil && respMap["tasks"] != nil {
+			tasksRaw, ok := respMap["tasks"].([]interface{})
+			if !ok {
+				return nil, respMap, fmt.Errorf("invalid tasks format in response")
+			}
+			data, err := json.Marshal(tasksRaw)
+			if err != nil {
+				return nil, respMap, fmt.Errorf("failed to marshal tasks raw: %v", err)
+			}
+			var tasks []types.DeployRequest
+			if err := json.Unmarshal(data, &tasks); err != nil {
+				return nil, respMap, fmt.Errorf("failed to unmarshal tasks: %v", err)
+			}
+			return tasks, respMap, nil
 		}
 
-		tasksRaw, ok := respMap["tasks"].([]interface{})
-		if !ok {
-			return nil, respMap, fmt.Errorf("invalid tasks format in response")
-		}
-
-		data, err := json.Marshal(tasksRaw)
+		// Fallback to decoding as array (normal case)
 		if err != nil {
-			return nil, respMap, fmt.Errorf("failed to marshal tasks raw: %v", err)
-		}
+			// Reset the response body to allow re-reading
+			resp.Body.Close()
+			resp, err = client.Do(req) // Redo the request
+			if err != nil {
+				log.Printf("Failed to retry request for env %s (attempt %d/%d): %v", env, attempt, maxRetries, err)
+				if attempt == maxRetries {
+					return nil, nil, fmt.Errorf("failed to retry request after %d attempts: %v", maxRetries, err)
+				}
+				continue
+			}
+			defer resp.Body.Close()
 
-		var tasks []types.DeployRequest
-		if err := json.Unmarshal(data, &tasks); err != nil {
-			return nil, respMap, fmt.Errorf("failed to unmarshal tasks: %v", err)
+			var tasks []types.DeployRequest
+			if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+				log.Printf("Failed to decode tasks response for env %s (attempt %d/%d): %v", env, attempt, maxRetries, err)
+				if attempt == maxRetries {
+					return nil, nil, fmt.Errorf("failed to decode tasks response: %v", err)
+				}
+				continue
+			}
+			return tasks, map[string]interface{}{}, nil // Empty map for non-restarted case
 		}
-
-		return tasks, respMap, nil
 	}
 	return nil, nil, fmt.Errorf("failed to fetch tasks after %d attempts", maxRetries)
 }
