@@ -20,6 +20,13 @@ type Client struct {
 	client dynamic.Interface
 }
 
+type PodInfo struct {
+    Name   string
+    Status struct {
+        Phase string
+    }
+}
+
 func NewClient(kubeconfig string) *Client {
 	if kubeconfig == "" {
 		kubeconfig = clientcmd.RecommendedHomeFile
@@ -42,6 +49,100 @@ func NewClient(kubeconfig string) *Client {
 
 func (c *Client) Client() dynamic.Interface {
 	return c.client
+}
+
+func (c *Client) GetPodsForDeployment(ctx context.Context, service, namespace string) []PodInfo {
+    gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+    rsList, err := c.client.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
+        LabelSelector: fmt.Sprintf("app=%s", service),
+    })
+    if err != nil {
+        log.Printf("Failed to list replicasets for service %s: %v", service, err)
+        return nil
+    }
+    var latestRS *unstructured.Unstructured
+    var latestRevision int64
+    for _, rs := range rsList.Items {
+        revisionStr, found, _ := unstructured.NestedString(rs.Object, "metadata", "annotations", "deployment.kubernetes.io/revision")
+        if !found {
+            continue
+        }
+        revision, err := strconv.ParseInt(revisionStr, 10, 64)
+        if err != nil {
+            continue
+        }
+        if revision > latestRevision {
+            latestRevision = revision
+            latestRS = &rs
+        }
+    }
+    if latestRS == nil {
+        log.Printf("No replicasets found for service %s", service)
+        return nil
+    }
+    podGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+    podList, err := c.client.Resource(podGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
+        LabelSelector: fmt.Sprintf("app=%s", service),
+    })
+    if err != nil {
+        log.Printf("Failed to list pods for service %s: %v", service, err)
+        return nil
+    }
+    var pods []PodInfo
+    for _, pod := range podList.Items {
+        ownerRefs, _, _ := unstructured.NestedSlice(pod.Object, "metadata", "ownerReferences")
+        for _, owner := range ownerRefs {
+            ownerMap, ok := owner.(map[string]interface{})
+            if ok && ownerMap["kind"] == "ReplicaSet" && ownerMap["name"] == latestRS.GetName() {
+                phase, found, _ := unstructured.NestedString(pod.Object, "status", "phase")
+                if !found {
+                    phase = "Unknown"
+                }
+                pods = append(pods, PodInfo{
+                    Name: pod.GetName(),
+                    Status: struct{ Phase string }{Phase: phase},
+                })
+            }
+        }
+    }
+    return pods
+}
+
+func (c *Client) GetLatestStableRevision(ctx context.Context, service, namespace string) (int64, error) {
+    gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+    rsList, err := c.client.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
+        LabelSelector: fmt.Sprintf("app=%s", service),
+    })
+    if err != nil {
+        return 0, fmt.Errorf("failed to list replicasets: %v", err)
+    }
+    var latestStable int64
+    for _, rs := range rsList.Items {
+        revisionStr, found, _ := unstructured.NestedString(rs.Object, "metadata", "annotations", "deployment.kubernetes.io/revision")
+        if !found {
+            continue
+        }
+        revision, err := strconv.ParseInt(revisionStr, 10, 64)
+        if err != nil {
+            continue
+        }
+        conditions, _, _ := unstructured.NestedSlice(rs.Object, "status", "conditions")
+        isStable := false
+        for _, cond := range conditions {
+            c, ok := cond.(map[string]interface{})
+            if ok && c["type"] == "Available" && c["status"] == "True" {
+                isStable = true
+                break
+            }
+        }
+        if isStable && revision > latestStable {
+            latestStable = revision
+        }
+    }
+    if latestStable == 0 {
+        return 0, fmt.Errorf("no stable revision found")
+    }
+    return latestStable, nil
 }
 
 func (c *Client) GetNewImage(service, version, namespace string) (string, error) {
@@ -310,31 +411,40 @@ func (c *Client) GetPodEvents(ctx context.Context, podName, namespace string) st
 }
 
 func (c *Client) RollbackDeployment(ctx context.Context, service, namespace string) error {
-	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-	dep, err := c.client.Resource(gvr).Namespace(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get deployment: %v", err)
-	}
-	currentRevision, found, err := unstructured.NestedInt64(dep.Object, "status", "observedGeneration")
-	if err != nil || !found {
-		return fmt.Errorf("failed to get current revision: %v", err)
-	}
+    stableRev, err := c.GetLatestStableRevision(ctx, service, namespace)
+    if err != nil || stableRev == 0 {
+        return fmt.Errorf("no stable revision found: %v", err)
+    }
+    gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+    dep, err := c.client.Resource(gvr).Namespace(namespace).Get(ctx, service, metav1.GetOptions{})
+    if err != nil {
+        return fmt.Errorf("failed to get deployment: %v", err)
+    }
+    rollback := &unstructured.Unstructured{
+        Object: map[string]interface{}{
+            "apiVersion": "apps/v1",
+            "kind":       "DeploymentRollback",
+            "name":       service,
+            "rollbackTo": map[string]interface{}{
+                "revision": stableRev,
+            },
+        },
+    }
+    _, err = c.client.Resource(gvr).Namespace(namespace).Create(ctx, rollback, metav1.CreateOptions{})
+    if err != nil {
+        return fmt.Errorf("rollback failed: %v", err)
+    }
+    return nil
+}
 
-	rollback := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "apps/v1",
-			"kind":       "DeploymentRollback",
-			"name":       service,
-			"rollbackTo": map[string]interface{}{
-				"revision": currentRevision - 1, // Roll back to the last stable revision
-			},
-		},
-	}
-	_, err = c.client.Resource(gvr).Namespace(namespace).Create(ctx, rollback, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("rollback failed: %v", err)
-	}
-	return nil
+func (c *Client) GetPodLogs(ctx context.Context, podName, namespace string) string {
+    gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+    req := c.client.Resource(gvr).Namespace(namespace).Name(podName).SubResource("log").Param("tailLines", "50")
+    logs, err := req.DoRaw(ctx)
+    if err != nil {
+        return fmt.Sprintf("Failed to get logs for pod %s: %v", podName, err)
+    }
+    return string(logs)
 }
 
 func (c *Client) RestartDeployment(ctx context.Context, service, namespace string) error {

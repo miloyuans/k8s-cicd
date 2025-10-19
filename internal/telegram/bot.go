@@ -158,74 +158,67 @@ func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) {
 }
 
 func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) {
-	category := classifyService(result.Request.Service, cfg.ServiceKeywords)
-	chatID, ok := cfg.TelegramChats[category]
-	if !ok {
-		log.Printf("No chat configured for category %s, trying default chat", category)
-		if defaultChatID, ok := cfg.TelegramChats["other"]; ok {
-			chatID = defaultChatID
-			category = "other"
-		} else {
-			log.Printf("No default chat configured, skipping notification for service %s", result.Request.Service)
-			return
-		}
-	}
-	token, ok := cfg.TelegramBots[category]
-	if !ok {
-		log.Printf("No bot configured for category %s, skipping notification for service %s", category, result.Request.Service)
-		return
-	}
-	bot, err := tgbotapi.NewBotAPI(token)
-	if err != nil {
-		log.Printf("Failed to create bot for category %s: %v", category, err)
-		return
-	}
+    category := classifyService(result.Request.Service, cfg.ServiceKeywords)
+    chatID, ok := cfg.TelegramChats[category]
+    if !ok {
+        log.Printf("No chat configured for category %s, trying default chat", category)
+        if defaultChatID, ok := cfg.TelegramChats["other"]; ok {
+            chatID = defaultChatID
+            category = "other"
+        } else {
+            log.Printf("No default chat configured for category %s", category)
+            return
+        }
+    }
+    bot, err := GetBot(category)
+    if err != nil {
+        log.Printf("Failed to get bot for category %s: %v", category, err)
+        return
+    }
 
-	var md strings.Builder
-	if result.Success {
-		md.WriteString(fmt.Sprintf("<b>✅ 部署成功 / Deployment Succeeded</b>\n\n"))
-		md.WriteString(fmt.Sprintf("服务 / Service: <b>%s</b>\n", result.Request.Service))
-		md.WriteString(fmt.Sprintf("环境 / Environment: <b>%s</b>\n", result.Request.Env))
-		md.WriteString(fmt.Sprintf("版本 / Version: <b>%s</b>\n", result.Request.Version))
-		md.WriteString(fmt.Sprintf("旧版本 / Old Version: <b>%s</b>\n", getVersionFromImage(result.OldImage)))
-		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: <b>%s</b>\n", result.Request.UserName))
-		md.WriteString("\n<b>✅ 部署成功完成！\n✅ Deployment completed successfully!</b>\n")
-		md.WriteString(fmt.Sprintf("\n<b>部署时间 / Deployed at</b>: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
-	} else {
-		md.WriteString(fmt.Sprintf("<b>❌ 部署失败 / Deployment Failed</b>\n\n"))
-		md.WriteString(fmt.Sprintf("服务 / Service: <b>%s</b>\n", result.Request.Service))
-		md.WriteString(fmt.Sprintf("环境 / Environment: <b>%s</b>\n", result.Request.Env))
-		md.WriteString(fmt.Sprintf("尝试版本 / Attempted Version: <b>%s</b>\n", result.Request.Version))
-		md.WriteString(fmt.Sprintf("回滚版本 / Rollback Version: <b>%s</b>\n", getVersionFromImage(result.OldImage)))
-		md.WriteString(fmt.Sprintf("错误 / Error: <b>%s</b>\n", result.ErrorMsg))
-		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: <b>%s</b>\n", result.Request.UserName))
-		md.WriteString("\n<b>🔍 诊断信息 / Diagnostics</b>\n\n")
-		md.WriteString(fmt.Sprintf("事件 / Events:\n%s\n", result.Events))
-		md.WriteString("环境变量 / Environment Variables:\n")
-		for k, v := range result.Envs {
-			md.WriteString(fmt.Sprintf("- %s: <b>%s</b>\n", k, v))
-		}
-		md.WriteString(fmt.Sprintf("\n日志 / Logs: <b>%s</b>\n", result.Logs))
-		md.WriteString(fmt.Sprintf("\n<b>失败时间 / Failed at</b>: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
-	}
+    var md strings.Builder
+    if result.Success {
+        md.WriteString(fmt.Sprintf("<b>✅ 部署成功 / Deployment Succeeded</b>\n\n"))
+        md.WriteString(fmt.Sprintf("服务 / Service: <b>%s</b>\n", result.Request.Service))
+        md.WriteString(fmt.Sprintf("环境 / Environment: <b>%s</b>\n", result.Request.Env))
+        md.WriteString(fmt.Sprintf("版本 / Version: <b>%s</b>\n", result.Request.Version))
+        md.WriteString(fmt.Sprintf("提交用户 / Submitted by: <b>%s</b>\n", result.Request.UserName))
+        md.WriteString(fmt.Sprintf("\n<b>部署时间 / Deployed at</b>: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
+    } else {
+        md.WriteString(fmt.Sprintf("<b>❌ 部署失败 / Deployment Failed</b>\n\n"))
+        md.WriteString(fmt.Sprintf("服务 / Service: <b>%s</b>\n", result.Request.Service))
+        md.WriteString(fmt.Sprintf("环境 / Environment: <b>%s</b>\n", result.Request.Env))
+        md.WriteString(fmt.Sprintf("失败版本 / Failed Version: <b>%s</b>\n", result.Request.Version))
+        md.WriteString(fmt.Sprintf("回滚版本 / Rollback Version: <b>%s</b>\n", getVersionFromImage(result.OldImage)))
+        md.WriteString(fmt.Sprintf("错误 / Error: <b>%s</b>\n", result.ErrorMsg))
+        md.WriteString(fmt.Sprintf("提交用户 / Submitted by: <b>%s</b>\n", result.Request.UserName))
+        md.WriteString("\n<b>🔍 诊断信息 / Diagnostics</b>\n\n")
+        md.WriteString(fmt.Sprintf("事件 / Events:\n%s\n", result.Events))
+        md.WriteString("环境变量 / Environment Variables:\n")
+        for k, v := range result.Envs {
+            md.WriteString(fmt.Sprintf("- %s: <b>%s</b>\n", k, v))
+        }
+        md.WriteString(fmt.Sprintf("\n日志 / Logs: <b>%s</b>\n", result.Logs))
+        md.WriteString(fmt.Sprintf("\n<b>失败时间 / Failed at</b>: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
+    }
 
-	msg := tgbotapi.NewMessage(chatID, md.String())
-	msg.ParseMode = "HTML"
+    msg := tgbotapi.NewMessage(chatID, md.String())
+    msg.ParseMode = "HTML"
 
-	const maxRetries = 3
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		_, err := bot.Send(msg)
-		if err != nil {
-			log.Printf("Failed to send notification to chat %d for service %s (attempt %d/%d): %v", chatID, result.Request.Service, attempt, maxRetries, err)
-			if attempt == maxRetries {
-				return
-			}
-			time.Sleep(time.Duration(attempt) * time.Second)
-			continue
-		}
-		log.Printf("Successfully sent notification for service %s in env %s with success %t", result.Request.Service, result.Request.Env, result.Success)
-		return
-	}
+    const maxRetries = 3
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        _, err := bot.Send(msg)
+        if err != nil {
+            log.Printf("Failed to send notification to chat %d for service %s (attempt %d/%d): %v", chatID, result.Request.Service, attempt, maxRetries, err)
+            if attempt == maxRetries {
+                return
+            }
+            time.Sleep(time.Duration(attempt) * time.Second)
+            continue
+        }
+        log.Printf("Successfully sent notification for service %s in env %s with success %t", result.Request.Service, result.Request.Env, result.Success)
+        return
+    }
 }
 
 func NotifyDeployTeam(cfg *config.Config, result *storage.DeployResult) {
