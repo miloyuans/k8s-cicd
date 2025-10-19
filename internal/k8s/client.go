@@ -5,20 +5,20 @@ import (
     "fmt"
     "log"
     "os"
-    "strconv"
+    "path/filepath"
     "strings"
     "time"
 
+    corev1 "k8s.io/api/core/v1"
+    appsv1 "k8s.io/api/apps/v1"
     metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-    "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-    "k8s.io/apimachinery/pkg/runtime/schema"
-    "k8s.io/client-go/dynamic"
+    "k8s.io/client-go/kubernetes"
     "k8s.io/client-go/rest"
     "k8s.io/client-go/tools/clientcmd"
 )
 
 type Client struct {
-    client     dynamic.Interface
+    clientset  *kubernetes.Clientset
     restClient *rest.RESTClient // For log retrieval
 }
 
@@ -30,55 +30,63 @@ type PodInfo struct {
 }
 
 func NewClient(kubeconfig string) *Client {
-    if kubeconfig == "" {
-        kubeconfig = clientcmd.RecommendedHomeFile
-    }
-    k8sCfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+    var k8sCfg *rest.Config
+    var err error
+
+    // Try in-cluster configuration first
+    k8sCfg, err = rest.InClusterConfig()
     if err != nil {
-        k8sCfg, err = rest.InClusterConfig()
+        // Fallback to kubeconfig file
+        if kubeconfig == "" {
+            // Default to .kubeconfig in the same directory as the code
+            kubeconfig = filepath.Join(filepath.Dir(os.Args[0]), ".kubeconfig")
+        }
+        k8sCfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
         if err != nil {
-            fmt.Fprintf(os.Stderr, "Failed to get kube config: %v\n", err)
+            // If kubeconfig file doesn't exist or is invalid, log and exit
+            fmt.Fprintf(os.Stderr, "Failed to load kubeconfig from %s: %v\n", kubeconfig, err)
             os.Exit(1)
         }
+        log.Printf("Using kubeconfig from %s", kubeconfig)
+    } else {
+        log.Println("Using in-cluster service account configuration")
     }
-    client, err := dynamic.NewForConfig(k8sCfg)
+
+    // Create Kubernetes clientset
+    clientset, err := kubernetes.NewForConfig(k8sCfg)
     if err != nil {
-        fmt.Fprintf(os.Stderr, "Failed to create k8s client: %v\n", err)
+        fmt.Fprintf(os.Stderr, "Failed to create Kubernetes clientset: %v\n", err)
         os.Exit(1)
     }
+
+    // Create REST client for logs
     restClient, err := rest.RESTClientFor(k8sCfg)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Failed to create REST client: %v\n", err)
         os.Exit(1)
     }
+
     return &Client{
-        client:     client,
+        clientset:  clientset,
         restClient: restClient,
     }
 }
 
-func (c *Client) Client() dynamic.Interface {
-    return c.client
+func (c *Client) Client() *kubernetes.Clientset {
+    return c.clientset
 }
 
 func (c *Client) GetNewImage(service, version, namespace string) (string, error) {
-    gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-    dep, err := c.client.Resource(gvr).Namespace(namespace).Get(context.Background(), service, metav1.GetOptions{})
+    dep, err := c.clientset.AppsV1().Deployments(namespace).Get(context.Background(), service, metav1.GetOptions{})
     if err != nil {
         return "", fmt.Errorf("failed to get deployment: %v", err)
     }
 
-    containers, _, _ := unstructured.NestedSlice(dep.Object, "spec", "template", "spec", "containers")
-    if len(containers) == 0 {
+    if len(dep.Spec.Template.Spec.Containers) == 0 {
         return "", fmt.Errorf("no containers found in deployment")
     }
 
-    container := containers[0].(map[string]interface{})
-    currentImage, found, err := unstructured.NestedString(container, "image")
-    if err != nil || !found {
-        return "", fmt.Errorf("no image found in deployment: %v", err)
-    }
-
+    currentImage := dep.Spec.Template.Spec.Containers[0].Image
     parts := strings.Split(currentImage, ":")
     if len(parts) != 2 {
         return "", fmt.Errorf("invalid image format: %s", currentImage)
@@ -90,28 +98,19 @@ func (c *Client) GetNewImage(service, version, namespace string) (string, error)
 }
 
 func (c *Client) UpdateDeployment(ctx context.Context, service, newImage, namespace string) (bool, string, string) {
-    gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-
-    dep, err := c.client.Resource(gvr).Namespace(namespace).Get(ctx, service, metav1.GetOptions{})
+    dep, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
     if err != nil {
         return false, fmt.Sprintf("Failed to get deployment: %v", err), ""
     }
 
-    containers, _, _ := unstructured.NestedSlice(dep.Object, "spec", "template", "spec", "containers")
-    if len(containers) == 0 {
+    if len(dep.Spec.Template.Spec.Containers) == 0 {
         return false, "No containers found", ""
     }
 
-    container := containers[0].(map[string]interface{})
-    oldImage, found, err := unstructured.NestedString(container, "image")
-    if err != nil || !found {
-        return false, fmt.Sprintf("No image found in container: %v", err), ""
-    }
+    oldImage := dep.Spec.Template.Spec.Containers[0].Image
+    dep.Spec.Template.Spec.Containers[0].Image = newImage
 
-    unstructured.SetNestedField(container, newImage, "image")
-    unstructured.SetNestedSlice(dep.Object, containers, "spec", "template", "spec", "containers")
-
-    _, err = c.client.Resource(gvr).Namespace(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+    _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
     if err != nil {
         return false, fmt.Sprintf("Failed to update deployment: %v", err), oldImage
     }
@@ -123,10 +122,9 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
     const maxAttempts = 10
     const interval = 5 * time.Second
 
-    var errMsg strings.Builder // Moved to function scope
-    gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+    var errMsg strings.Builder
     for attempt := 1; attempt <= maxAttempts; attempt++ {
-        pods, err := c.client.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
+        pods, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
             LabelSelector: fmt.Sprintf("app=%s", service),
         })
         if err != nil {
@@ -135,33 +133,23 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
 
         newPodsReady := true
         for _, pod := range pods.Items {
-            containers, _, _ := unstructured.NestedSlice(pod.Object, "spec", "containers")
-            if len(containers) == 0 {
+            if len(pod.Spec.Containers) == 0 || pod.Spec.Containers[0].Image != newImage {
                 continue
             }
-            image, found, _ := unstructured.NestedString(containers[0].(map[string]interface{}), "image")
-            if !found || image != newImage {
-                continue
-            }
-            conditions, _, _ := unstructured.NestedSlice(pod.Object, "status", "conditions")
             ready := false
-            for _, cond := range conditions {
-                c, ok := cond.(map[string]interface{})
-                if ok && c["type"] == "Ready" && c["status"] == "True" {
+            for _, cond := range pod.Status.Conditions {
+                if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
                     ready = true
                     break
                 }
             }
-            phase, _, _ := unstructured.NestedString(pod.Object, "status", "phase")
-            if phase == "" {
-                phase = "Unknown"
-            }
-            if phase == "Failed" || phase == "CrashLoopBackOff" || phase == "Evicted" {
+            phase := pod.Status.Phase
+            if phase == corev1.PodFailed || phase == "CrashLoopBackOff" || phase == "Evicted" {
                 newPodsReady = false
-                errMsg.WriteString(fmt.Sprintf("Pod %s in error state: %s\n", pod.GetName(), phase))
-            } else if phase != "Running" || !ready {
+                errMsg.WriteString(fmt.Sprintf("Pod %s in error state: %s\n", pod.Name, phase))
+            } else if phase != corev1.PodRunning || !ready {
                 newPodsReady = false
-                errMsg.WriteString(fmt.Sprintf("Pod %s not ready (phase: %s, ready: %v)\n", pod.GetName(), phase, ready))
+                errMsg.WriteString(fmt.Sprintf("Pod %s not ready (phase: %s, ready: %v)\n", pod.Name, phase, ready))
             }
         }
 
@@ -179,33 +167,29 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
     return false, fmt.Errorf("new pods not ready after %d attempts: %s", maxAttempts, errMsg.String())
 }
 
-func (c *Client) GetPodEvents(ctx context.Context, podName, namespace string) string {
-    eventsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "events"}
-    events, err := c.client.Resource(eventsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
-        FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=Pod", podName),
+func (c *Client) GetPodEvents(ctx context.Context, service, namespace string) string {
+    events, err := c.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+        FieldSelector: fmt.Sprintf("involvedObject.kind=Pod,reason!=Scheduled"),
     })
     if err != nil {
-        log.Printf("Failed to get pod events for %s in namespace %s: %v", podName, namespace, err)
+        log.Printf("Failed to get pod events for service %s in namespace %s: %v", service, namespace, err)
         return fmt.Sprintf("Failed to get pod events: %v", err)
     }
 
     var eventsStr strings.Builder
     for _, ev := range events.Items {
-        message, found, err := unstructured.NestedString(ev.Object, "message")
-        if err != nil || !found {
-            continue
+        if strings.Contains(ev.InvolvedObject.Name, service) {
+            eventsStr.WriteString(fmt.Sprintf("• %s\n", ev.Message))
         }
-        eventsStr.WriteString(fmt.Sprintf("• %s\n", message))
     }
     if eventsStr.Len() == 0 {
-        return "No events found"
+        return "No relevant events found"
     }
     return eventsStr.String()
 }
 
 func (c *Client) GetLatestStableRevision(ctx context.Context, service, namespace string) (int64, error) {
-    gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
-    rsList, err := c.client.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
+    rsList, err := c.clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
         LabelSelector: fmt.Sprintf("app=%s", service),
     })
     if err != nil {
@@ -214,24 +198,16 @@ func (c *Client) GetLatestStableRevision(ctx context.Context, service, namespace
     }
     var latestStable int64
     for _, rs := range rsList.Items {
-        revisionStr, found, _ := unstructured.NestedString(rs.Object, "metadata", "annotations", "deployment.kubernetes.io/revision")
-        if !found {
+        revisionStr, ok := rs.Annotations["deployment.kubernetes.io/revision"]
+        if !ok {
             continue
         }
         revision, err := strconv.ParseInt(revisionStr, 10, 64)
         if err != nil {
-            log.Printf("Failed to parse revision for replicaset %s: %v", rs.GetName(), err)
+            log.Printf("Failed to parse revision for replicaset %s: %v", rs.Name, err)
             continue
         }
-        conditions, _, _ := unstructured.NestedSlice(rs.Object, "status", "conditions")
-        isStable := false
-        for _, cond := range conditions {
-            c, ok := cond.(map[string]interface{})
-            if ok && c["type"] == "Available" && c["status"] == "True" {
-                isStable = true
-                break
-            }
-        }
+        isStable := rs.Status.Replicas == rs.Status.ReadyReplicas && rs.Status.ReadyReplicas > 0
         if isStable && revision > latestStable {
             latestStable = revision
         }
@@ -249,18 +225,17 @@ func (c *Client) RollbackDeployment(ctx context.Context, service, namespace stri
         log.Printf("No stable revision found for service %s: %v", service, err)
         return fmt.Errorf("no stable revision found: %v", err)
     }
-    gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-    rollback := &unstructured.Unstructured{
-        Object: map[string]interface{}{
-            "apiVersion": "apps/v1",
-            "kind":       "DeploymentRollback",
-            "name":       service,
-            "rollbackTo": map[string]interface{}{
-                "revision": stableRev,
-            },
-        },
+
+    dep, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
+    if err != nil {
+        return fmt.Errorf("failed to get deployment for rollback: %v", err)
     }
-    _, err = c.client.Resource(gvr).Namespace(namespace).Create(ctx, rollback, metav1.CreateOptions{})
+
+    dep.Spec.Template.Annotations = map[string]string{
+        "deployment.kubernetes.io/revision": fmt.Sprintf("%d", stableRev),
+    }
+
+    _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
     if err != nil {
         log.Printf("Rollback failed for service %s to revision %d: %v", service, stableRev, err)
         return fmt.Errorf("rollback failed: %v", err)
@@ -285,24 +260,23 @@ func (c *Client) GetPodLogs(ctx context.Context, podName, namespace string) stri
 }
 
 func (c *Client) GetPodsForDeployment(ctx context.Context, service, namespace string) []PodInfo {
-    gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
-    rsList, err := c.client.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
+    rsList, err := c.clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
         LabelSelector: fmt.Sprintf("app=%s", service),
     })
     if err != nil {
         log.Printf("Failed to list replicasets for service %s: %v", service, err)
         return nil
     }
-    var latestRS *unstructured.Unstructured
+    var latestRS *appsv1.ReplicaSet
     var latestRevision int64
     for _, rs := range rsList.Items {
-        revisionStr, found, _ := unstructured.NestedString(rs.Object, "metadata", "annotations", "deployment.kubernetes.io/revision")
-        if !found {
+        revisionStr, ok := rs.Annotations["deployment.kubernetes.io/revision"]
+        if !ok {
             continue
         }
         revision, err := strconv.ParseInt(revisionStr, 10, 64)
         if err != nil {
-            log.Printf("Failed to parse revision for replicaset %s: %v", rs.GetName(), err)
+            log.Printf("Failed to parse revision for replicaset %s: %v", rs.Name, err)
             continue
         }
         if revision > latestRevision {
@@ -314,8 +288,7 @@ func (c *Client) GetPodsForDeployment(ctx context.Context, service, namespace st
         log.Printf("No replicasets found for service %s", service)
         return nil
     }
-    podGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-    podList, err := c.client.Resource(podGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
+    podList, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
         LabelSelector: fmt.Sprintf("app=%s", service),
     })
     if err != nil {
@@ -324,16 +297,14 @@ func (c *Client) GetPodsForDeployment(ctx context.Context, service, namespace st
     }
     var pods []PodInfo
     for _, pod := range podList.Items {
-        ownerRefs, _, _ := unstructured.NestedSlice(pod.Object, "metadata", "ownerReferences")
-        for _, owner := range ownerRefs {
-            ownerMap, ok := owner.(map[string]interface{})
-            if ok && ownerMap["kind"] == "ReplicaSet" && ownerMap["name"] == latestRS.GetName() {
-                phase, found, _ := unstructured.NestedString(pod.Object, "status", "phase")
-                if !found {
+        for _, owner := range pod.OwnerReferences {
+            if owner.Kind == "ReplicaSet" && owner.Name == latestRS.Name {
+                phase := string(pod.Status.Phase)
+                if phase == "" {
                     phase = "Unknown"
                 }
                 pods = append(pods, PodInfo{
-                    Name: pod.GetName(),
+                    Name: pod.Name,
                     Status: struct{ Phase string }{Phase: phase},
                 })
             }
@@ -343,20 +314,17 @@ func (c *Client) GetPodsForDeployment(ctx context.Context, service, namespace st
 }
 
 func (c *Client) RestartDeployment(ctx context.Context, service, namespace string) error {
-    gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-    dep, err := c.client.Resource(gvr).Namespace(namespace).Get(ctx, service, metav1.GetOptions{})
+    dep, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
     if err != nil {
         return fmt.Errorf("failed to get deployment for restart: %v", err)
     }
 
-    annotations, _, _ := unstructured.NestedMap(dep.Object, "spec", "template", "metadata", "annotations")
-    if annotations == nil {
-        annotations = make(map[string]interface{})
+    if dep.Spec.Template.Annotations == nil {
+        dep.Spec.Template.Annotations = make(map[string]string)
     }
-    annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
-    unstructured.SetNestedMap(dep.Object, annotations, "spec", "template", "metadata", "annotations")
+    dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
 
-    _, err = c.client.Resource(gvr).Namespace(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+    _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
     if err != nil {
         return fmt.Errorf("failed to restart deployment: %v", err)
     }
