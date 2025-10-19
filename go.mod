@@ -1,18 +1,19 @@
 module k8s-cicd
 
-go 1.23
+go 1.24
 
 require (
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/apimachinery v0.28.0
-	k8s.io/client-go v0.28.0
+	k8s.io/apimachinery v0.34.1
+	k8s.io/client-go v0.34.1
+	k8s.io/client-go/dynamic v0.34.1
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.9.0 // indirect
-	github.com/go-logr/logr v1.2.4 // indirect
+	github.com/go-logr/logr v1.4.1 // indirect
 	github.com/go-openapi/jsonpointer v0.19.6 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.22.3 // indirect
@@ -34,16 +35,14 @@ require (
 	google.golang.org/protobuf v1.31.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	k8s.io/api v0.28.0 // indirect
-	k8s.io/klog/v2 v2.100.1 // indirect
-	k8s.io/apimachinery v0.28.0 // or compatible version
-    k8s.io/client-go v0.28.0
-	k8s.io/kube-openapi v0.0.0-20230717233707-2695361300d9 // indirect
-	k8s.io/utils v0.0.0-20230406110748-d93618cff8a2 // indirect
+	k8s.io/api v0.34.1 // indirect
+	k8s.io/klog/v2 v2.130.1 // indirect
+	k8s.io/kube-openapi v0.0.0-20240903135602-7e7d81b9e9ad // indirect
+	k8s.io/utils v0.0.0-20240902221715-702e37be2c7b // indirect
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
-	sigs.k8s.io/structured-merge-diff/v4 v4.2.3 // indirect
-	sigs.k8s.io/yaml v1.3.0 // indirect
-	github.com/google/uuid v1.6.0 // or latest version
+	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
+	sigs.k8s.io/yaml v1.4.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 )
 
 replace github.com/googleapis/gnostic => github.com/google/gnostic v0.7.0
