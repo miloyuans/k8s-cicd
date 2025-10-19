@@ -16,7 +16,7 @@ import (
 
     "k8s.io/apimachinery/pkg/runtime/schema"
     "k8s.io/apimachinery/pkg/apis/meta/v1"
-    "k8s.io/apimachinery/pkg/unstructured"
+    "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
     "k8s-cicd/internal/config"
     k8shttp "k8s-cicd/internal/http"
@@ -28,334 +28,334 @@ import (
 )
 
 var (
-	cfg       *config.Config
-	k8sClient *k8s.Client
-	taskQueue *queue.Queue
+    cfg       *config.Config
+    k8sClient *k8s.Client
+    taskQueue *queue.Queue
 )
 
 func main() {
-	cfg = config.LoadConfig("config.yaml")
-	cfg.StorageDir = "cicd_storage"
-	k8sClient = k8s.NewClient(cfg.KubeConfigPath)
+    cfg = config.LoadConfig("config.yaml")
+    cfg.StorageDir = "cicd_storage"
+    k8sClient = k8s.NewClient(cfg.KubeConfigPath)
 
-	if err := storage.EnsureStorageDir(cfg.StorageDir); err != nil {
-		log.Fatalf("Failed to create storage dir: %v", err)
-	}
+    if err := storage.EnsureStorageDir(cfg.StorageDir); err != nil {
+        log.Fatalf("Failed to create storage dir: %v", err)
+    }
 
-	initServicesDir(cfg)
+    initServicesDir(cfg)
 
-	storage.InitAllDailyFiles(cfg, k8sClient.Client())
-	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
-	go reportToGateway(cfg)
+    storage.InitAllDailyFiles(cfg, k8sClient.Client())
+    storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
+    go reportToGateway(cfg)
 
-	taskQueue = queue.NewQueue(cfg, 100)
+    taskQueue = queue.NewQueue(cfg, 100)
 
-	log.Println("Performing initial task poll")
-	retryPendingTasks()
+    log.Println("Performing initial task poll")
+    retryPendingTasks()
 
-	for i := 0; i < cfg.MaxConcurrency; i++ {
-		go worker()
-	}
+    for i := 0; i < cfg.MaxConcurrency; i++ {
+        go worker()
+    }
 
-	go storage.DailyMaintenance(cfg, k8sClient.Client())
-	go pollGateway()
+    go storage.DailyMaintenance(cfg, k8sClient.Client())
+    go pollGateway()
 
-	updateAndReportServices()
-	go periodicUpdateServices()
+    updateAndReportServices()
+    go periodicUpdateServices()
 
-	select {}
+    select {}
 }
 
 func initServicesDir(cfg *config.Config) {
-	if _, err := os.Stat(cfg.ServicesDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(cfg.ServicesDir, 0755); err != nil {
-			log.Fatalf("Failed to create services dir: %v", err)
-		}
-		for category := range cfg.TelegramBots {
-			filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
-			if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
-				log.Printf("Failed to init service file %s: %v", filePath, err)
-			}
-		}
-		filePath := filepath.Join(cfg.ServicesDir, "other.svc.list")
-		if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
-			log.Printf("Failed to init service file %s: %v", filePath, err)
-		}
-		log.Println("Initialized services directory and files")
-	}
+    if _, err := os.Stat(cfg.ServicesDir); os.IsNotExist(err) {
+        if err := os.MkdirAll(cfg.ServicesDir, 0755); err != nil {
+            log.Fatalf("Failed to create services dir: %v", err)
+        }
+        for category := range cfg.TelegramBots {
+            filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
+            if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+                log.Printf("Failed to init service file %s: %v", filePath, err)
+            }
+        }
+        filePath := filepath.Join(cfg.ServicesDir, "other.svc.list")
+        if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+            log.Printf("Failed to init service file %s: %v", filePath, err)
+        }
+        log.Println("Initialized services directory and files")
+    }
 }
 
 func updateAndReportServices() {
-	log.Println("Immediate updating services")
-	storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
-	go reportServicesToGateway(cfg)
+    log.Println("Immediate updating services")
+    storage.UpdateAllDeploymentVersions(cfg, k8sClient.Client())
+    go reportServicesToGateway(cfg)
 }
 
 func periodicUpdateServices() {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
+    ticker := time.NewTicker(10 * time.Minute)
+    defer ticker.Stop()
 
-	for range ticker.C {
-		updateAndReportServices()
-	}
+    for range ticker.C {
+        updateAndReportServices()
+    }
 }
 
 func reportServicesToGateway(cfg *config.Config) {
-	services, err := collectAndClassifyServices(cfg)
-	if err != nil {
-		log.Printf("Failed to collect services: %v", err)
-		return
-	}
+    services, err := collectAndClassifyServices(cfg)
+    if err != nil {
+        log.Printf("Failed to collect services: %v", err)
+        return
+    }
 
-	data, err := json.Marshal(services)
-	if err != nil {
-		log.Printf("Failed to marshal services: %v", err)
-		return
-	}
+    data, err := json.Marshal(services)
+    if err != nil {
+        log.Printf("Failed to marshal services: %v", err)
+        return
+    }
 
-	attempt := 1
-	for {
-		req, err := http.NewRequest("POST", cfg.GatewayURL+"/services", bytes.NewBuffer(data))
-		if err != nil {
-			log.Printf("Failed to create services request (attempt %d): %v", attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
+    attempt := 1
+    for {
+        req, err := http.NewRequest("POST", cfg.GatewayURL+"/services", bytes.NewBuffer(data))
+        if err != nil {
+            log.Printf("Failed to create services request (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+        req.Header.Set("Content-Type", "application/json")
 
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("Failed to send services to gateway (attempt %d): %v", attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
-		defer resp.Body.Close()
+        client := &http.Client{Timeout: 10 * time.Second}
+        resp, err := client.Do(req)
+        if err != nil {
+            log.Printf("Failed to send services to gateway (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+        defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("Gateway services failed with status %d (attempt %d)", resp.StatusCode, attempt)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
+        if resp.StatusCode != http.StatusOK {
+            log.Printf("Gateway services failed with status %d (attempt %d)", resp.StatusCode, attempt)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
 
-		log.Printf("Successfully reported services to gateway")
-		return
-	}
+        log.Printf("Successfully reported services to gateway")
+        return
+    }
 }
 
 func reportEnvironmentsToGateway(cfg *config.Config) {
-	data, err := json.Marshal(cfg.Environments)
-	if err != nil {
-		log.Printf("Failed to marshal environments: %v", err)
-		return
-	}
-	attempt := 1
-	for {
-		req, err := http.NewRequest("POST", cfg.GatewayURL+"/environments", bytes.NewBuffer(data))
-		if err != nil {
-			log.Printf("Failed to create environments request (attempt %d): %v", attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
+    data, err := json.Marshal(cfg.Environments)
+    if err != nil {
+        log.Printf("Failed to marshal environments: %v", err)
+        return
+    }
+    attempt := 1
+    for {
+        req, err := http.NewRequest("POST", cfg.GatewayURL+"/environments", bytes.NewBuffer(data))
+        if err != nil {
+            log.Printf("Failed to create environments request (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+        req.Header.Set("Content-Type", "application/json")
 
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("Failed to send environments to gateway (attempt %d): %v", attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
-		defer resp.Body.Close()
+        client := &http.Client{Timeout: 10 * time.Second}
+        resp, err := client.Do(req)
+        if err != nil {
+            log.Printf("Failed to send environments to gateway (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+        defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("Gateway environments failed with status %d (attempt %d)", resp.StatusCode, attempt)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
+        if resp.StatusCode != http.StatusOK {
+            log.Printf("Gateway environments failed with status %d (attempt %d)", resp.StatusCode, attempt)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
 
-		log.Printf("Successfully reported environments to gateway")
-		return
-	}
+        log.Printf("Successfully reported environments to gateway")
+        return
+    }
 }
 
 func verifyDataFromGateway(cfg *config.Config) bool {
-	attempt := 1
-	for {
-		resp, err := http.Get(cfg.GatewayURL + "/verify-data")
-		if err != nil {
-			log.Printf("Failed to verify data from gateway (attempt %d): %v", attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			if attempt > 5 {
-				return false
-			}
-			continue
-		}
-		defer resp.Body.Close()
+    attempt := 1
+    for {
+        resp, err := http.Get(cfg.GatewayURL + "/verify-data")
+        if err != nil {
+            log.Printf("Failed to verify data from gateway (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            if attempt > 5 {
+                return false
+            }
+            continue
+        }
+        defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("Gateway verify-data failed with status %d (attempt %d)", resp.StatusCode, attempt)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			if attempt > 5 {
-				return false
-			}
-			continue
-		}
+        if resp.StatusCode != http.StatusOK {
+            log.Printf("Gateway verify-data failed with status %d (attempt %d)", resp.StatusCode, attempt)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            if attempt > 5 {
+                return false
+            }
+            continue
+        }
 
-		var status map[string]bool
-		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-			log.Printf("Failed to decode verify-data response (attempt %d): %v", attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			if attempt > 5 {
-				return false
-			}
-			continue
-		}
+        var status map[string]bool
+        if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+            log.Printf("Failed to decode verify-data response (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            if attempt > 5 {
+                return false
+            }
+            continue
+        }
 
-		if status["environments"] && status["services"] {
-			log.Printf("Verified data persistence on gateway")
-			return true
-		}
+        if status["environments"] && status["services"] {
+            log.Printf("Verified data persistence on gateway")
+            return true
+        }
 
-		log.Printf("Data not fully persisted on gateway, retrying...")
-		time.Sleep(getBackoff(attempt))
-		attempt++
-		if attempt > 5 {
-			return false
-		}
-	}
+        log.Printf("Data not fully persisted on gateway, retrying...")
+        time.Sleep(getBackoff(attempt))
+        attempt++
+        if attempt > 5 {
+            return false
+        }
+    }
 }
 
 func pollGateway() {
-	ticker := time.NewTicker(time.Duration(cfg.PollInterval) * time.Second)
-	defer ticker.Stop()
+    ticker := time.NewTicker(time.Duration(cfg.PollInterval) * time.Second)
+    defer ticker.Stop()
 
-	for range ticker.C {
-		for env, _ := range cfg.Environments { // namespace unused, kept for potential future use
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+    for range ticker.C {
+        for env, _ := range cfg.Environments { // namespace unused, kept for potential future use
+            ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+            defer cancel()
 
-			tasks, respMap, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
-			if err != nil {
-				log.Printf("Failed to fetch tasks for env %s: %v", env, err)
-				continue
-			}
+            tasks, respMap, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
+            if err != nil {
+                log.Printf("Failed to fetch tasks for env %s: %v", env, err)
+                continue
+            }
 
-			// Check if gateway reported a restart
-			if status, ok := respMap["status"].(string); ok && status == "restarted" {
-				log.Printf("Gateway reported restarted for env %s, triggering full report", env)
-				go reportToGateway(cfg)              // Report deployment info
-				go reportServicesToGateway(cfg)      // Report service list
-				go reportEnvironmentsToGateway(cfg)  // Report environment list
-				if !verifyDataFromGateway(cfg) {
-					log.Printf("Verification failed, will retry next poll")
-				}
-			}
+            // Check if gateway reported a restart
+            if status, ok := respMap["status"].(string); ok && status == "restarted" {
+                log.Printf("Gateway reported restarted for env %s, triggering full report", env)
+                go reportToGateway(cfg)              // Report deployment info
+                go reportServicesToGateway(cfg)      // Report service list
+                go reportEnvironmentsToGateway(cfg)  // Report environment list
+                if !verifyDataFromGateway(cfg) {
+                    log.Printf("Verification failed, will retry next poll")
+                }
+            }
 
-			for _, task := range tasks {
-				taskKey := queue.ComputeTaskKey(task)
-				if taskQueue.Exists(taskKey) {
-					log.Printf("Task %s already exists, skipping", taskKey)
-					continue
-				}
-				taskQueue.Enqueue(queue.Task{DeployRequest: task})
-				log.Printf("Enqueued task %s for env %s", taskKey, env)
-			}
-		}
-	}
+            for _, task := range tasks {
+                taskKey := queue.ComputeTaskKey(task)
+                if taskQueue.Exists(taskKey) {
+                    log.Printf("Task %s already exists, skipping", taskKey)
+                    continue
+                }
+                taskQueue.Enqueue(queue.Task{DeployRequest: task})
+                log.Printf("Enqueued task %s for env %s", taskKey, env)
+            }
+        }
+    }
 }
 
 func getBackoff(attempt int) time.Duration {
-	backoff := time.Duration(1<<uint(attempt-1)) * time.Second
-	if backoff > 60*time.Second {
-		return 60 * time.Second
-	}
-	return backoff
+    backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+    if backoff > 60*time.Second {
+        return 60 * time.Second
+    }
+    return backoff
 }
 
 func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error) {
-	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
-	data, err := os.ReadFile(fileName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read deploy file: %v", err)
-	}
-	var infos []storage.DeploymentInfo
-	if err := json.Unmarshal(data, &infos); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal deploy file: %v", err)
-	}
+    fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
+    data, err := os.ReadFile(fileName)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read deploy file: %v", err)
+    }
+    var infos []storage.DeploymentInfo
+    if err := json.Unmarshal(data, &infos); err != nil {
+        return nil, fmt.Errorf("failed to unmarshal deploy file: %v", err)
+    }
 
-	classified := make(map[string][]string)
-	seenServices := make(map[string]bool)
-	for _, info := range infos {
-		if _, ok := seenServices[info.Service]; !ok {
-			seenServices[info.Service] = true
-			category := classifyService(info.Service, cfg.ServiceKeywords)
-			classified[category] = append(classified[category], info.Service)
-		}
-	}
+    classified := make(map[string][]string)
+    seenServices := make(map[string]bool)
+    for _, info := range infos {
+        if _, ok := seenServices[info.Service]; !ok {
+            seenServices[info.Service] = true
+            category := classifyService(info.Service, cfg.ServiceKeywords)
+            classified[category] = append(classified[category], info.Service)
+        }
+    }
 
-	for category := range classified {
-		sort.Strings(classified[category])
-	}
-	return classified, nil
+    for category := range classified {
+        sort.Strings(classified[category])
+    }
+    return classified, nil
 }
 
 func classifyService(service string, keywords map[string][]string) string {
-	lowerService := strings.ToLower(service)
-	for category, patterns := range keywords {
-		for _, pattern := range patterns {
-			lowerPattern := strings.ToLower(pattern)
-			if strings.HasPrefix(lowerPattern, "^") || strings.HasSuffix(lowerPattern, "$") || strings.Contains(lowerPattern, ".*") {
-				re, err := regexp.Compile(lowerPattern)
-				if err == nil && re.MatchString(lowerService) {
-					return category
-				}
-			} else if strings.Contains(lowerService, lowerPattern) {
-				return category
-			}
-		}
-	}
-	return "other"
+    lowerService := strings.ToLower(service)
+    for category, patterns := range keywords {
+        for _, pattern := range patterns {
+            lowerPattern := strings.ToLower(pattern)
+            if strings.HasPrefix(lowerPattern, "^") || strings.HasSuffix(lowerPattern, "$") || strings.Contains(lowerPattern, ".*") {
+                re, err := regexp.Compile(lowerPattern)
+                if err == nil && re.MatchString(lowerService) {
+                    return category
+                }
+            } else if strings.Contains(lowerService, lowerPattern) {
+                return category
+            }
+        }
+    }
+    return "other"
 }
 
 func retryPendingTasks() {
-	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
-	data, err := os.ReadFile(fileName)
-	if err != nil {
-		log.Printf("Failed to read deploy file for retry: %v", err)
-		return
-	}
-	var infos []storage.DeploymentInfo
-	if err := json.Unmarshal(data, &infos); err != nil {
-		log.Printf("Failed to unmarshal deploy file for retry: %v", err)
-		return
-	}
+    fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
+    data, err := os.ReadFile(fileName)
+    if err != nil {
+        log.Printf("Failed to read deploy file for retry: %v", err)
+        return
+    }
+    var infos []storage.DeploymentInfo
+    if err := json.Unmarshal(data, &infos); err != nil {
+        log.Printf("Failed to unmarshal deploy file for retry: %v", err)
+        return
+    }
 
-	for _, info := range infos {
-		if info.Status == "pending" {
-			task := queue.Task{
-				DeployRequest: types.DeployRequest{
-					Service:   info.Service,
-					Env:       info.Env,
-					Version:   getVersionFromImage(info.Image),
-					Timestamp: info.Timestamp,
-					UserName:  info.UserName,
-					Status:    "pending",
-				},
-			}
-			taskQueue.Enqueue(task)
-			log.Printf("Retried pending task for service %s in env %s", info.Service, info.Env)
-		}
-	}
+    for _, info := range infos {
+        if info.Status == "pending" {
+            task := queue.Task{
+                DeployRequest: types.DeployRequest{
+                    Service:   info.Service,
+                    Env:       info.Env,
+                    Version:   getVersionFromImage(info.Image),
+                    Timestamp: info.Timestamp,
+                    UserName:  info.UserName,
+                    Status:    "pending",
+                },
+            }
+            taskQueue.Enqueue(task)
+            log.Printf("Retried pending task for service %s in env %s", info.Service, info.Env)
+        }
+    }
 }
 
 func worker() {
@@ -410,13 +410,13 @@ func worker() {
                 for _, pod := range pods {
                     phase := pod.Status.Phase
                     podGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-					podObj, err := k8sClient.Client().Resource(podGVR).Namespace(namespace).Get(checkCtx, pod.Name, v1.GetOptions{})
-					if err != nil {
-						newPodsReady = false
-						errMsg.WriteString(fmt.Sprintf("Pod %s: Failed to get status: %v\n", pod.Name, err))
-						continue
-					}
-					conditions, _, _ := unstructured.NestedSlice(podObj.Object, "status", "conditions")
+                    podObj, err := k8sClient.Client().CoreV1().Pods(namespace).Get(checkCtx, pod.Name, v1.GetOptions{})
+                    if err != nil {
+                        newPodsReady = false
+                        errMsg.WriteString(fmt.Sprintf("Pod %s: Failed to get status: %v\n", pod.Name, err))
+                        continue
+                    }
+                    conditions, _, _ := unstructured.NestedSlice(podObj.Object, "status", "conditions")
                     ready := false
                     for _, cond := range conditions {
                         c, ok := cond.(map[string]interface{})
@@ -498,107 +498,107 @@ func worker() {
 }
 
 func getVersionFromImage(image string) string {
-	parts := strings.Split(image, ":")
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return "unknown"
+    parts := strings.Split(image, ":")
+    if len(parts) == 2 {
+        return parts[1]
+    }
+    return "unknown"
 }
 
 func feedbackCompleteToGateway(cfg *config.Config, taskKey string) {
-	data, err := json.Marshal(map[string]string{"task_key": taskKey})
-	if err != nil {
-		log.Printf("Failed to marshal complete data for task %s: %v", taskKey, err)
-		return
-	}
+    data, err := json.Marshal(map[string]string{"task_key": taskKey})
+    if err != nil {
+        log.Printf("Failed to marshal complete data for task %s: %v", taskKey, err)
+        return
+    }
 
-	attempt := 1
-	for {
-		req, err := http.NewRequest("POST", cfg.GatewayURL+"/complete", bytes.NewBuffer(data))
-		if err != nil {
-			log.Printf("Failed to create complete request for task %s (attempt %d): %v", taskKey, attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
+    attempt := 1
+    for {
+        req, err := http.NewRequest("POST", cfg.GatewayURL+"/complete", bytes.NewBuffer(data))
+        if err != nil {
+            log.Printf("Failed to create complete request for task %s (attempt %d): %v", taskKey, attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+        req.Header.Set("Content-Type", "application/json")
 
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("Failed to send complete to gateway for task %s (attempt %d): %v", taskKey, attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
-		defer resp.Body.Close()
+        client := &http.Client{Timeout: 10 * time.Second}
+        resp, err := client.Do(req)
+        if err != nil {
+            log.Printf("Failed to send complete to gateway for task %s (attempt %d): %v", taskKey, attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+        defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("Gateway complete failed with status %d for task %s (attempt %d)", resp.StatusCode, taskKey, attempt)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
+        if resp.StatusCode != http.StatusOK {
+            log.Printf("Gateway complete failed with status %d for task %s (attempt %d)", resp.StatusCode, taskKey, attempt)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
 
-		log.Printf("Feedback complete for task %s", taskKey)
-		return
-	}
+        log.Printf("Feedback complete for task %s", taskKey)
+        return
+    }
 }
 
 func reportToGateway(cfg *config.Config) {
-	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
-	attempt := 1
-	for {
-		data, err := os.ReadFile(fileName)
-		if err != nil {
-			log.Printf("Failed to read deploy file for report (attempt %d): %v", attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
-		var infos []storage.DeploymentInfo
-		if err := json.Unmarshal(data, &infos); err != nil {
-			log.Printf("Failed to unmarshal deploy file for report (attempt %d): %v", attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
+    fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
+    attempt := 1
+    for {
+        data, err := os.ReadFile(fileName)
+        if err != nil {
+            log.Printf("Failed to read deploy file for report (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+        var infos []storage.DeploymentInfo
+        if err := json.Unmarshal(data, &infos); err != nil {
+            log.Printf("Failed to unmarshal deploy file for report (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
 
-		reportData, err := json.Marshal(infos)
-		if err != nil {
-			log.Printf("Failed to marshal report (attempt %d): %v", attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
+        reportData, err := json.Marshal(infos)
+        if err != nil {
+            log.Printf("Failed to marshal report (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
 
-		req, err := http.NewRequest("POST", cfg.GatewayURL+"/report", bytes.NewBuffer(reportData))
-		if err != nil {
-			log.Printf("Failed to create report request (attempt %d): %v", attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
+        req, err := http.NewRequest("POST", cfg.GatewayURL+"/report", bytes.NewBuffer(reportData))
+        if err != nil {
+            log.Printf("Failed to create report request (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+        req.Header.Set("Content-Type", "application/json")
 
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("Failed to send report to gateway (attempt %d): %v", attempt, err)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
-		defer resp.Body.Close()
+        client := &http.Client{Timeout: 10 * time.Second}
+        resp, err := client.Do(req)
+        if err != nil {
+            log.Printf("Failed to send report to gateway (attempt %d): %v", attempt, err)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
+        defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("Gateway report failed with status %d (attempt %d)", resp.StatusCode, attempt)
-			time.Sleep(getBackoff(attempt))
-			attempt++
-			continue
-		}
+        if resp.StatusCode != http.StatusOK {
+            log.Printf("Gateway report failed with status %d (attempt %d)", resp.StatusCode, attempt)
+            time.Sleep(getBackoff(attempt))
+            attempt++
+            continue
+        }
 
-		log.Printf("Successfully reported to gateway")
-		return
-	}
+        log.Printf("Successfully reported to gateway")
+        return
+    }
 }

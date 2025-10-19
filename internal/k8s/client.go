@@ -231,9 +231,10 @@ func (c *Client) RollbackDeployment(ctx context.Context, service, namespace stri
         return fmt.Errorf("failed to get deployment for rollback: %v", err)
     }
 
-    dep.Spec.Template.Annotations = map[string]string{
-        "deployment.kubernetes.io/revision": fmt.Sprintf("%d", stableRev),
+    if dep.Spec.Template.Annotations == nil {
+        dep.Spec.Template.Annotations = make(map[string]string)
     }
+    dep.Spec.Template.Annotations["deployment.kubernetes.io/revision"] = fmt.Sprintf("%d", stableRev)
 
     _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
     if err != nil {
