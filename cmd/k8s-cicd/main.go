@@ -239,7 +239,7 @@ func pollGateway() {
     defer ticker.Stop()
 
     for range ticker.C {
-        for env, _ := range cfg.Environments { // namespace unused, kept for potential future use
+        for env, _ := range cfg.Environments {
             ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
             defer cancel()
 
@@ -249,12 +249,11 @@ func pollGateway() {
                 continue
             }
 
-            // Check if gateway reported a restart
             if status, ok := respMap["status"].(string); ok && status == "restarted" {
                 log.Printf("Gateway reported restarted for env %s, triggering full report", env)
-                go reportToGateway(cfg)              // Report deployment info
-                go reportServicesToGateway(cfg)      // Report service list
-                go reportEnvironmentsToGateway(cfg)  // Report environment list
+                go reportToGateway(cfg)
+                go reportServicesToGateway(cfg)
+                go reportEnvironmentsToGateway(cfg)
                 if !verifyDataFromGateway(cfg) {
                     log.Printf("Verification failed, will retry next poll")
                 }
@@ -380,8 +379,14 @@ func worker() {
             result.ErrorMsg = fmt.Sprintf("Failed to get new image: %v", err)
             log.Printf("Failed to get new image for task %s: %v", taskKey, err)
             storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
-            go telegram.SendTelegramNotification(cfg, &result)
-            go telegram.NotifyDeployTeam(cfg, &result)
+            go func() {
+                if err := telegram.SendTelegramNotification(cfg, &result); err != nil {
+                    log.Printf("Failed to send Telegram notification for task %s: %v", taskKey, err)
+                }
+                if err := telegram.NotifyDeployTeam(cfg, &result); err != nil {
+                    log.Printf("Failed to send deploy team notification for task %s: %v", taskKey, err)
+                }
+            }()
             feedbackCompleteToGateway(cfg, taskKey)
             continue
         }
@@ -391,18 +396,25 @@ func worker() {
 
         success, errMsg, oldImage := k8sClient.UpdateDeployment(updateCtx, task.DeployRequest.Service, newImage, namespace)
         if success {
-            checkCtx, checkCancel := context.WithTimeout(context.Background(), 1*time.Minute)
+            checkCtx, checkCancel := context.WithTimeout(context.Background(), 2*time.Minute) // Extended timeout
             defer checkCancel()
 
-            // Enhanced pod status checking
-            maxAttempts := 10
-            interval := 5 * time.Second
-            newPodsReady := false
-            var checkErr error
+            maxAttempts := 3
             for attempt := 1; attempt <= maxAttempts; attempt++ {
                 pods := k8sClient.GetPodsForDeployment(checkCtx, task.DeployRequest.Service, namespace)
-                newPodsReady = true
-                var errMsg strings.Builder
+                if pods == nil {
+                    log.Printf("Failed to get pods for task %s (attempt %d/%d): retrying", taskKey, attempt, maxAttempts)
+                    if attempt < maxAttempts {
+                        time.Sleep(5 * time.Second)
+                        continue
+                    }
+                    result.Success = false
+                    result.ErrorMsg = "Failed to get pods after retries"
+                    break
+                }
+
+                newPodsReady := true
+                var errMsgBuilder strings.Builder
                 var logsBuf strings.Builder
                 result.Events = k8sClient.GetPodEvents(checkCtx, task.DeployRequest.Service, namespace)
 
@@ -411,7 +423,7 @@ func worker() {
                     podObj, err := k8sClient.Client().CoreV1().Pods(namespace).Get(checkCtx, pod.Name, v1.GetOptions{})
                     if err != nil {
                         newPodsReady = false
-                        errMsg.WriteString(fmt.Sprintf("Pod %s: Failed to get status: %v\n", pod.Name, err))
+                        errMsgBuilder.WriteString(fmt.Sprintf("Pod %s: Failed to get status: %v\n", pod.Name, err))
                         continue
                     }
                     ready := false
@@ -430,19 +442,18 @@ func worker() {
                     }
                 }
                 result.Logs = logsBuf.String()
-                if !newPodsReady {
-                    checkErr = fmt.Errorf("new pods not ready: %s", errMsg.String())
-                }
                 if newPodsReady {
                     break
                 }
                 if attempt < maxAttempts {
                     select {
                     case <-checkCtx.Done():
-                        checkErr = fmt.Errorf("context cancelled: %v", checkCtx.Err())
+                        result.ErrorMsg = fmt.Sprintf("Context cancelled: %v", checkCtx.Err())
                         break
-                    case <-time.After(interval):
+                    case <-time.After(5 * time.Second):
                     }
+                } else {
+                    result.ErrorMsg = fmt.Sprintf("Pods not ready after %d attempts: %s", maxAttempts, errMsgBuilder.String())
                 }
             }
 
@@ -452,31 +463,53 @@ func worker() {
                 storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "success", result.Request.UserName)
                 log.Printf("Deployment succeeded for task %s: service=%s, env=%s, version=%s, user=%s",
                     taskKey, result.Request.Service, result.Request.Env, result.Request.Version, result.Request.UserName)
-                go telegram.SendTelegramNotification(cfg, &result)
+                go func() {
+                    if err := telegram.SendTelegramNotification(cfg, &result); err != nil {
+                        log.Printf("Failed to send Telegram notification for task %s: %v", taskKey, err)
+                    }
+                }()
                 feedbackCompleteToGateway(cfg, taskKey)
             } else {
                 result.Success = false
-                result.ErrorMsg = fmt.Sprintf("Pod check failed: %v", checkErr)
+                if result.ErrorMsg == "" {
+                    result.ErrorMsg = "Pod check failed after retries"
+                }
                 result.OldImage = oldImage
 
-                // Perform rollback
                 rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 1*time.Minute)
                 defer rollbackCancel()
-                rollbackErr := k8sClient.RollbackDeployment(rollbackCtx, task.DeployRequest.Service, namespace)
+                maxRollbackAttempts := 3
+                var rollbackErr error
+                for attempt := 1; attempt <= maxRollbackAttempts; attempt++ {
+                    rollbackErr = k8sClient.RollbackDeployment(rollbackCtx, task.DeployRequest.Service, namespace)
+                    if rollbackErr == nil {
+                        break
+                    }
+                    log.Printf("Rollback failed for task %s (attempt %d/%d): %v", taskKey, attempt, maxRollbackAttempts, rollbackErr)
+                    if attempt < maxRollbackAttempts {
+                        time.Sleep(5 * time.Second)
+                    }
+                }
                 if rollbackErr != nil {
-                    result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+                    result.ErrorMsg += fmt.Sprintf("; Rollback failed after %d attempts: %v", maxRollbackAttempts, rollbackErr)
                 } else {
                     rollbackReady, rollbackErr := k8sClient.CheckNewPodStatus(rollbackCtx, task.DeployRequest.Service, oldImage, namespace)
                     if rollbackReady {
                         result.ErrorMsg += fmt.Sprintf("; Rollback succeeded to version: %s", getVersionFromImage(oldImage))
                     } else {
-                        result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+                        result.ErrorMsg += fmt.Sprintf("; Rollback verification failed: %v", rollbackErr)
                     }
                 }
 
                 storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
-                go telegram.SendTelegramNotification(cfg, &result)
-                go telegram.NotifyDeployTeam(cfg, &result)
+                go func() {
+                    if err := telegram.SendTelegramNotification(cfg, &result); err != nil {
+                        log.Printf("Failed to send Telegram notification for task %s: %v", taskKey, err)
+                    }
+                    if err := telegram.NotifyDeployTeam(cfg, &result); err != nil {
+                        log.Printf("Failed to send deploy team notification for task %s: %v", taskKey, err)
+                    }
+                }()
                 feedbackCompleteToGateway(cfg, taskKey)
             }
         } else {
@@ -486,8 +519,14 @@ func worker() {
             result.Events = k8sClient.GetPodEvents(updateCtx, task.DeployRequest.Service, namespace)
             result.Logs = "Deployment update failed"
             storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
-            go telegram.SendTelegramNotification(cfg, &result)
-            go telegram.NotifyDeployTeam(cfg, &result)
+            go func() {
+                if err := telegram.SendTelegramNotification(cfg, &result); err != nil {
+                    log.Printf("Failed to send Telegram notification for task %s: %v", taskKey, err)
+                }
+                if err := telegram.NotifyDeployTeam(cfg, &result); err != nil {
+                    log.Printf("Failed to send deploy team notification for task %s: %v", taskKey, err)
+                }
+            }()
             feedbackCompleteToGateway(cfg, taskKey)
         }
     }

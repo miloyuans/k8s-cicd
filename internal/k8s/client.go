@@ -75,7 +75,6 @@ func NewClient(kubeconfig string) *Client {
     restClientCfg := *k8sCfg
     restClientCfg.APIPath = "/api"
     restClientCfg.GroupVersion = &corev1.SchemeGroupVersion
-    // Initialize a scheme and add core/v1 resources
     restScheme := runtime.NewScheme()
     if err := corev1.AddToScheme(restScheme); err != nil {
         fmt.Fprintf(os.Stderr, "Failed to add core/v1 to scheme: %v\n", err)
@@ -115,7 +114,6 @@ func (c *Client) GetDeployment(ctx context.Context, service, namespace string) (
         return nil, fmt.Errorf("failed to get deployment: %v", err)
     }
     c.cache.Store(cacheKey, dep)
-    // Set a timer to delete the cache entry after 1 minute
     go func() {
         time.Sleep(1 * time.Minute)
         c.cache.Delete(cacheKey)
@@ -145,9 +143,21 @@ func (c *Client) GetNewImage(service, version, namespace string) (string, error)
 }
 
 func (c *Client) UpdateDeployment(ctx context.Context, service, newImage, namespace string) (bool, string, string) {
-    dep, err := c.GetDeployment(ctx, service, namespace)
+    const maxRetries = 3
+    var dep *appsv1.Deployment
+    var err error
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        dep, err = c.GetDeployment(ctx, service, namespace)
+        if err == nil {
+            break
+        }
+        log.Printf("Failed to get deployment for service %s (attempt %d/%d): %v", service, attempt, maxRetries, err)
+        if attempt < maxRetries {
+            time.Sleep(2 * time.Second)
+        }
+    }
     if err != nil {
-        return false, fmt.Sprintf("Failed to get deployment: %v", err), ""
+        return false, fmt.Sprintf("Failed to get deployment after %d attempts: %v", maxRetries, err), ""
     }
 
     if len(dep.Spec.Template.Spec.Containers) == 0 {
@@ -161,9 +171,18 @@ func (c *Client) UpdateDeployment(ctx context.Context, service, newImage, namesp
     }
     dep.Annotations["cicd/previous-image"] = oldImage
 
-    _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+        if err == nil {
+            break
+        }
+        log.Printf("Failed to update deployment for service %s (attempt %d/%d): %v", service, attempt, maxRetries, err)
+        if attempt < maxRetries {
+            time.Sleep(2 * time.Second)
+        }
+    }
     if err != nil {
-        return false, fmt.Sprintf("Failed to update deployment: %v", err), oldImage
+        return false, fmt.Sprintf("Failed to update deployment after %d attempts: %v", maxRetries, err), oldImage
     }
 
     return true, "", oldImage
@@ -178,7 +197,7 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
     }
     defer watcher.Stop()
 
-    timeout := time.After(1 * time.Minute)
+    timeout := time.After(2 * time.Minute)
     for {
         select {
         case event, ok := <-watcher.ResultChan():
@@ -211,33 +230,51 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
 }
 
 func (c *Client) GetPodEvents(ctx context.Context, service, namespace string) string {
-    events, err := c.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
-        FieldSelector: fmt.Sprintf("involvedObject.kind=Pod,reason!=Scheduled"),
-    })
-    if err != nil {
-        log.Printf("Failed to get pod events for service %s in namespace %s: %v", service, namespace, err)
-        return fmt.Sprintf("Failed to get pod events: %v", err)
-    }
-
+    const maxRetries = 3
     var eventsStr strings.Builder
-    for _, ev := range events.Items {
-        if strings.Contains(ev.InvolvedObject.Name, service) {
-            eventsStr.WriteString(fmt.Sprintf("• %s\n", ev.Message))
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        events, err := c.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+            FieldSelector: fmt.Sprintf("involvedObject.kind=Pod,reason!=Scheduled"),
+        })
+        if err != nil {
+            log.Printf("Failed to get pod events for service %s in namespace %s (attempt %d/%d): %v", service, namespace, attempt, maxRetries, err)
+            if attempt == maxRetries {
+                return fmt.Sprintf("Failed to get pod events after %d attempts: %v", maxRetries, err)
+            }
+            time.Sleep(2 * time.Second)
+            continue
         }
+        for _, ev := range events.Items {
+            if strings.Contains(ev.InvolvedObject.Name, service) {
+                eventsStr.WriteString(fmt.Sprintf("• %s\n", ev.Message))
+            }
+        }
+        if eventsStr.Len() == 0 {
+            return "No relevant events found"
+        }
+        return eventsStr.String()
     }
-    if eventsStr.Len() == 0 {
-        return "No relevant events found"
-    }
-    return eventsStr.String()
+    return "No relevant events found"
 }
 
 func (c *Client) GetLatestStableRevision(ctx context.Context, service, namespace string) (int64, error) {
-    rsList, err := c.clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
-        LabelSelector: fmt.Sprintf("app=%s", service),
-    })
+    const maxRetries = 3
+    var rsList *appsv1.ReplicaSetList
+    var err error
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        rsList, err = c.clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
+            LabelSelector: fmt.Sprintf("app=%s", service),
+        })
+        if err == nil {
+            break
+        }
+        log.Printf("Failed to list replicasets for service %s (attempt %d/%d): %v", service, attempt, maxRetries, err)
+        if attempt < maxRetries {
+            time.Sleep(2 * time.Second)
+        }
+    }
     if err != nil {
-        log.Printf("Failed to list replicasets for service %s: %v", service, err)
-        return 0, fmt.Errorf("failed to list replicasets: %v", err)
+        return 0, fmt.Errorf("failed to list replicasets after %d attempts: %v", maxRetries, err)
     }
     var latestStable int64
     for _, rs := range rsList.Items {
@@ -263,9 +300,21 @@ func (c *Client) GetLatestStableRevision(ctx context.Context, service, namespace
 }
 
 func (c *Client) RollbackDeployment(ctx context.Context, service, namespace string) error {
-    dep, err := c.GetDeployment(ctx, service, namespace)
+    const maxRetries = 3
+    var dep *appsv1.Deployment
+    var err error
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        dep, err = c.GetDeployment(ctx, service, namespace)
+        if err == nil {
+            break
+        }
+        log.Printf("Failed to get deployment for rollback for service %s (attempt %d/%d): %v", service, attempt, maxRetries, err)
+        if attempt < maxRetries {
+            time.Sleep(2 * time.Second)
+        }
+    }
     if err != nil {
-        return fmt.Errorf("failed to get deployment for rollback: %v", err)
+        return fmt.Errorf("failed to get deployment for rollback after %d attempts: %v", maxRetries, err)
     }
 
     stableRev, err := c.GetLatestStableRevision(ctx, service, namespace)
@@ -283,88 +332,128 @@ func (c *Client) RollbackDeployment(ctx context.Context, service, namespace stri
         dep.Spec.Template.Annotations["deployment.kubernetes.io/revision"] = fmt.Sprintf("%d", stableRev)
     }
 
-    _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+        if err == nil {
+            break
+        }
+        log.Printf("Rollback failed for service %s to revision %d (attempt %d/%d): %v", service, stableRev, attempt, maxRetries, err)
+        if attempt < maxRetries {
+            time.Sleep(2 * time.Second)
+        }
+    }
     if err != nil {
-        log.Printf("Rollback failed for service %s to revision %d: %v", service, stableRev, err)
-        return fmt.Errorf("rollback failed: %v", err)
+        return fmt.Errorf("rollback failed after %d attempts: %v", maxRetries, err)
     }
     log.Printf("Successfully initiated rollback for service %s to revision %d", service, stableRev)
     return nil
 }
 
 func (c *Client) GetPodLogs(ctx context.Context, podName, namespace string) string {
-    logs, err := c.restClient.Get().
-        Namespace(namespace).
-        Resource("pods").
-        Name(podName).
-        SubResource("log").
-        Param("tailLines", "50").
-        DoRaw(ctx)
-    if err != nil {
-        log.Printf("Failed to get logs for pod %s in namespace %s: %v", podName, namespace, err)
-        return fmt.Sprintf("Failed to get logs for pod %s: %v", podName, err)
+    const maxRetries = 3
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        logs, err := c.restClient.Get().
+            Namespace(namespace).
+            Resource("pods").
+            Name(podName).
+            SubResource("log").
+            Param("tailLines", "50").
+            DoRaw(ctx)
+        if err != nil {
+            log.Printf("Failed to get logs for pod %s in namespace %s (attempt %d/%d): %v", podName, namespace, attempt, maxRetries, err)
+            if attempt == maxRetries {
+                return fmt.Sprintf("Failed to get logs for pod %s after %d attempts: %v", podName, maxRetries, err)
+            }
+            time.Sleep(2 * time.Second)
+            continue
+        }
+        return string(logs)
     }
-    return string(logs)
+    return "Failed to get logs after retries"
 }
 
 func (c *Client) GetPodsForDeployment(ctx context.Context, service, namespace string) []PodInfo {
-    rsList, err := c.clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
-        LabelSelector: fmt.Sprintf("app=%s", service),
-    })
-    if err != nil {
-        log.Printf("Failed to list replicasets for service %s: %v", service, err)
-        return nil
-    }
-    var latestRS *appsv1.ReplicaSet
-    var latestRevision int64
-    for _, rs := range rsList.Items {
-        revisionStr, ok := rs.Annotations["deployment.kubernetes.io/revision"]
-        if !ok {
-            continue
-        }
-        revision, err := strconv.ParseInt(revisionStr, 10, 64)
+    const maxRetries = 3
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        rsList, err := c.clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
+            LabelSelector: fmt.Sprintf("app=%s", service),
+        })
         if err != nil {
-            log.Printf("Failed to parse revision for replicaset %s: %v", rs.Name, err)
+            log.Printf("Failed to list replicasets for service %s (attempt %d/%d): %v", service, attempt, maxRetries, err)
+            if attempt == maxRetries {
+                return nil
+            }
+            time.Sleep(2 * time.Second)
             continue
         }
-        if revision > latestRevision {
-            latestRevision = revision
-            latestRS = &rs
-        }
-    }
-    if latestRS == nil {
-        log.Printf("No replicasets found for service %s", service)
-        return nil
-    }
-    podList, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-        LabelSelector: fmt.Sprintf("app=%s", service),
-    })
-    if err != nil {
-        log.Printf("Failed to list pods for service %s: %v", service, err)
-        return nil
-    }
-    var pods []PodInfo
-    for _, pod := range podList.Items {
-        for _, owner := range pod.OwnerReferences {
-            if owner.Kind == "ReplicaSet" && owner.Name == latestRS.Name {
-                phase := string(pod.Status.Phase)
-                if phase == "" {
-                    phase = "Unknown"
-                }
-                pods = append(pods, PodInfo{
-                    Name: pod.Name,
-                    Status: struct{ Phase string }{Phase: phase},
-                })
+        var latestRS *appsv1.ReplicaSet
+        var latestRevision int64
+        for _, rs := range rsList.Items {
+            revisionStr, ok := rs.Annotations["deployment.kubernetes.io/revision"]
+            if !ok {
+                continue
+            }
+            revision, err := strconv.ParseInt(revisionStr, 10, 64)
+            if err != nil {
+                log.Printf("Failed to parse revision for replicaset %s: %v", rs.Name, err)
+                continue
+            }
+            if revision > latestRevision {
+                latestRevision = revision
+                latestRS = &rs
             }
         }
+        if latestRS == nil {
+            log.Printf("No replicasets found for service %s", service)
+            return nil
+        }
+        podList, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+            LabelSelector: fmt.Sprintf("app=%s", service),
+        })
+        if err != nil {
+            log.Printf("Failed to list pods for service %s (attempt %d/%d): %v", service, attempt, maxRetries, err)
+            if attempt == maxRetries {
+                return nil
+            }
+            time.Sleep(2 * time.Second)
+            continue
+        }
+        var pods []PodInfo
+        for _, pod := range podList.Items {
+            for _, owner := range pod.OwnerReferences {
+                if owner.Kind == "ReplicaSet" && owner.Name == latestRS.Name {
+                    phase := string(pod.Status.Phase)
+                    if phase == "" {
+                        phase = "Unknown"
+                    }
+                    pods = append(pods, PodInfo{
+                        Name:   pod.Name,
+                        Status: struct{ Phase string }{Phase: phase},
+                    })
+                }
+            }
+        }
+        return pods
     }
-    return pods
+    return nil
 }
 
 func (c *Client) RestartDeployment(ctx context.Context, service, namespace string) error {
-    dep, err := c.GetDeployment(ctx, service, namespace)
+    const maxRetries = 3
+    var dep *appsv1.Deployment
+    var err error
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        dep, err = c.GetDeployment(ctx, service, namespace)
+        if err == nil {
+            break
+        }
+        log.Printf("Failed to get deployment for restart for service %s (attempt %d/%d): %v", service, attempt, maxRetries, err)
+        if attempt < maxRetries {
+            time.Sleep(2 * time.Second)
+        }
+    }
     if err != nil {
-        return fmt.Errorf("failed to get deployment for restart: %v", err)
+        return fmt.Errorf("failed to get deployment for restart after %d attempts: %v", maxRetries, err)
     }
 
     if dep.Spec.Template.Annotations == nil {
@@ -372,9 +461,18 @@ func (c *Client) RestartDeployment(ctx context.Context, service, namespace strin
     }
     dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
 
-    _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+        if err == nil {
+            break
+        }
+        log.Printf("Failed to restart deployment for service %s (attempt %d/%d): %v", service, attempt, maxRetries, err)
+        if attempt < maxRetries {
+            time.Sleep(2 * time.Second)
+        }
+    }
     if err != nil {
-        return fmt.Errorf("failed to restart deployment: %v", err)
+        return fmt.Errorf("failed to restart deployment after %d attempts: %v", maxRetries, err)
     }
     return nil
 }
