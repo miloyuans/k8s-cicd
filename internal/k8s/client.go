@@ -12,7 +12,6 @@ import (
     metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
     "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
     "k8s.io/apimachinery/pkg/runtime/schema"
-    "k8s.io/apimachinery/pkg/watch"
     "k8s.io/client-go/dynamic"
     "k8s.io/client-go/rest"
     "k8s.io/client-go/tools/clientcmd"
@@ -20,6 +19,7 @@ import (
 
 type Client struct {
     client dynamic.Interface
+    restClient *rest.RESTClient // Added for log retrieval
 }
 
 type PodInfo struct {
@@ -46,7 +46,15 @@ func NewClient(kubeconfig string) *Client {
         fmt.Fprintf(os.Stderr, "Failed to create k8s client: %v\n", err)
         os.Exit(1)
     }
-    return &Client{client: client}
+    restClient, err := rest.RESTClientFor(k8sCfg)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Failed to create REST client: %v\n", err)
+        os.Exit(1)
+    }
+    return &Client{
+        client:     client,
+        restClient: restClient,
+    }
 }
 
 func (c *Client) Client() dynamic.Interface {
@@ -125,7 +133,7 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
         }
 
         newPodsReady := true
-        var errMsg strings.Builder
+        var errMsg strings.Builder // Declared here to fix undefined error
         for _, pod := range pods.Items {
             containers, _, _ := unstructured.NestedSlice(pod.Object, "spec", "containers")
             if len(containers) == 0 {
@@ -262,9 +270,18 @@ func (c *Client) RollbackDeployment(ctx context.Context, service, namespace stri
 }
 
 func (c *Client) GetPodLogs(ctx context.Context, podName, namespace string) string {
-    gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-    req := c.client.Resource(gvr).Namespace(namespace).SubResource("log").Param("tailLines", "50")
-    logs, err := req.DoRaw(ctx)
+    req, err := c.restClient.Get().
+        Namespace(namespace).
+        Resource("pods").
+        Name(podName).
+        SubResource("log").
+        Param("tailLines", "50").
+        RequestURI()
+    if err != nil {
+        log.Printf("Failed to construct log request for pod %s in namespace %s: %v", podName, namespace, err)
+        return fmt.Sprintf("Failed to get logs for pod %s: %v", podName, err)
+    }
+    logs, err := c.restClient.Get().RequestURI(req).DoRaw(ctx)
     if err != nil {
         log.Printf("Failed to get logs for pod %s in namespace %s: %v", podName, namespace, err)
         return fmt.Sprintf("Failed to get logs for pod %s: %v", podName, err)
