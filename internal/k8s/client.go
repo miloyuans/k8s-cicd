@@ -8,6 +8,7 @@ import (
     "path/filepath"
     "strconv"
     "strings"
+    "sync"
     "time"
 
     corev1 "k8s.io/api/core/v1"
@@ -22,7 +23,8 @@ import (
 type Client struct {
     clientset     *kubernetes.Clientset
     dynamicClient dynamic.Interface
-    restClient    *rest.RESTClient // For log retrieval
+    restClient    *rest.RESTClient
+    cache         sync.Map // Cache for deployment metadata
 }
 
 type PodInfo struct {
@@ -41,7 +43,6 @@ func NewClient(kubeconfig string) *Client {
     if err != nil {
         // Fallback to kubeconfig file
         if kubeconfig == "" {
-            // Default to .kubeconfig in the same directory as the code
             kubeconfig = filepath.Join(filepath.Dir(os.Args[0]), ".kubeconfig")
         }
         k8sCfg, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
@@ -68,8 +69,11 @@ func NewClient(kubeconfig string) *Client {
         os.Exit(1)
     }
 
-    // Create REST client for logs
-    restClient, err := rest.RESTClientFor(k8sCfg)
+    // Create REST client for core/v1 API group
+    restClientCfg := *k8sCfg
+    restClientCfg.APIPath = "/api"
+    restClientCfg.GroupVersion = &corev1.SchemeGroupVersion
+    restClient, err := rest.RESTClientFor(&restClientCfg)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Failed to create REST client: %v\n", err)
         os.Exit(1)
@@ -90,10 +94,30 @@ func (c *Client) DynamicClient() dynamic.Interface {
     return c.dynamicClient
 }
 
-func (c *Client) GetNewImage(service, version, namespace string) (string, error) {
-    dep, err := c.clientset.AppsV1().Deployments(namespace).Get(context.Background(), service, metav1.GetOptions{})
+func (c *Client) GetDeployment(ctx context.Context, service, namespace string) (*appsv1.Deployment, error) {
+    cacheKey := fmt.Sprintf("deployment:%s:%s", namespace, service)
+    if cached, found := c.cache.Load(cacheKey); found {
+        if dep, ok := cached.(*appsv1.Deployment); ok {
+            return dep, nil
+        }
+    }
+    dep, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
     if err != nil {
-        return "", fmt.Errorf("failed to get deployment: %v", err)
+        return nil, fmt.Errorf("failed to get deployment: %v", err)
+    }
+    c.cache.Store(cacheKey, dep)
+    // Set a timer to delete the cache entry after 1 minute
+    go func() {
+        time.Sleep(1 * time.Minute)
+        c.cache.Delete(cacheKey)
+    }()
+    return dep, nil
+}
+
+func (c *Client) GetNewImage(service, version, namespace string) (string, error) {
+    dep, err := c.GetDeployment(context.Background(), service, namespace)
+    if err != nil {
+        return "", err
     }
 
     if len(dep.Spec.Template.Spec.Containers) == 0 {
@@ -112,7 +136,7 @@ func (c *Client) GetNewImage(service, version, namespace string) (string, error)
 }
 
 func (c *Client) UpdateDeployment(ctx context.Context, service, newImage, namespace string) (bool, string, string) {
-    dep, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
+    dep, err := c.GetDeployment(ctx, service, namespace)
     if err != nil {
         return false, fmt.Sprintf("Failed to get deployment: %v", err), ""
     }
@@ -123,6 +147,10 @@ func (c *Client) UpdateDeployment(ctx context.Context, service, newImage, namesp
 
     oldImage := dep.Spec.Template.Spec.Containers[0].Image
     dep.Spec.Template.Spec.Containers[0].Image = newImage
+    if dep.Annotations == nil {
+        dep.Annotations = make(map[string]string)
+    }
+    dep.Annotations["cicd/previous-image"] = oldImage
 
     _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
     if err != nil {
@@ -133,21 +161,23 @@ func (c *Client) UpdateDeployment(ctx context.Context, service, newImage, namesp
 }
 
 func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, namespace string) (bool, error) {
-    const maxAttempts = 10
-    const interval = 5 * time.Second
+    watcher, err := c.clientset.CoreV1().Pods(namespace).Watch(ctx, metav1.ListOptions{
+        LabelSelector: fmt.Sprintf("app=%s", service),
+    })
+    if err != nil {
+        return false, fmt.Errorf("failed to watch pods: %v", err)
+    }
+    defer watcher.Stop()
 
-    var errMsg strings.Builder
-    for attempt := 1; attempt <= maxAttempts; attempt++ {
-        pods, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-            LabelSelector: fmt.Sprintf("app=%s", service),
-        })
-        if err != nil {
-            return false, fmt.Errorf("failed to list pods: %v", err)
-        }
-
-        newPodsReady := true
-        for _, pod := range pods.Items {
-            if len(pod.Spec.Containers) == 0 || pod.Spec.Containers[0].Image != newImage {
+    timeout := time.After(1 * time.Minute)
+    for {
+        select {
+        case event, ok := <-watcher.ResultChan():
+            if !ok {
+                return false, fmt.Errorf("watch channel closed")
+            }
+            pod, ok := event.Object.(*corev1.Pod)
+            if !ok || len(pod.Spec.Containers) == 0 || pod.Spec.Containers[0].Image != newImage {
                 continue
             }
             ready := false
@@ -157,28 +187,18 @@ func (c *Client) CheckNewPodStatus(ctx context.Context, service, newImage, names
                     break
                 }
             }
-            phase := pod.Status.Phase
-            if phase == corev1.PodFailed || phase == "CrashLoopBackOff" || phase == "Evicted" {
-                newPodsReady = false
-                errMsg.WriteString(fmt.Sprintf("Pod %s in error state: %s\n", pod.Name, phase))
-            } else if phase != corev1.PodRunning || !ready {
-                newPodsReady = false
-                errMsg.WriteString(fmt.Sprintf("Pod %s not ready (phase: %s, ready: %v)\n", pod.Name, phase, ready))
+            if pod.Status.Phase == corev1.PodRunning && ready {
+                return true, nil
             }
-        }
-
-        if newPodsReady && errMsg.Len() == 0 {
-            return true, nil
-        }
-        if attempt < maxAttempts {
-            select {
-            case <-ctx.Done():
-                return false, fmt.Errorf("context cancelled: %v", ctx.Err())
-            case <-time.After(interval):
+            if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == "CrashLoopBackOff" || pod.Status.Phase == "Evicted" {
+                return false, fmt.Errorf("pod %s in error state: %s", pod.Name, pod.Status.Phase)
             }
+        case <-timeout:
+            return false, fmt.Errorf("timeout waiting for pods to become ready")
+        case <-ctx.Done():
+            return false, fmt.Errorf("context cancelled: %v", ctx.Err())
         }
     }
-    return false, fmt.Errorf("new pods not ready after %d attempts: %s", maxAttempts, errMsg.String())
 }
 
 func (c *Client) GetPodEvents(ctx context.Context, service, namespace string) string {
@@ -234,21 +254,25 @@ func (c *Client) GetLatestStableRevision(ctx context.Context, service, namespace
 }
 
 func (c *Client) RollbackDeployment(ctx context.Context, service, namespace string) error {
-    stableRev, err := c.GetLatestStableRevision(ctx, service, namespace)
-    if err != nil || stableRev == 0 {
-        log.Printf("No stable revision found for service %s: %v", service, err)
-        return fmt.Errorf("no stable revision found: %v", err)
-    }
-
-    dep, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
+    dep, err := c.GetDeployment(ctx, service, namespace)
     if err != nil {
         return fmt.Errorf("failed to get deployment for rollback: %v", err)
     }
 
-    if dep.Spec.Template.Annotations == nil {
-        dep.Spec.Template.Annotations = make(map[string]string)
+    stableRev, err := c.GetLatestStableRevision(ctx, service, namespace)
+    if err != nil || stableRev == 0 {
+        log.Printf("No stable revision found for service %s: %v", service, err)
+        if oldImage, ok := dep.Annotations["cicd/previous-image"]; ok && oldImage != "" {
+            dep.Spec.Template.Spec.Containers[0].Image = oldImage
+        } else {
+            return fmt.Errorf("no stable revision or previous image found")
+        }
+    } else {
+        if dep.Spec.Template.Annotations == nil {
+            dep.Spec.Template.Annotations = make(map[string]string)
+        }
+        dep.Spec.Template.Annotations["deployment.kubernetes.io/revision"] = fmt.Sprintf("%d", stableRev)
     }
-    dep.Spec.Template.Annotations["deployment.kubernetes.io/revision"] = fmt.Sprintf("%d", stableRev)
 
     _, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
     if err != nil {
@@ -329,7 +353,7 @@ func (c *Client) GetPodsForDeployment(ctx context.Context, service, namespace st
 }
 
 func (c *Client) RestartDeployment(ctx context.Context, service, namespace string) error {
-    dep, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
+    dep, err := c.GetDeployment(ctx, service, namespace)
     if err != nil {
         return fmt.Errorf("failed to get deployment for restart: %v", err)
     }
