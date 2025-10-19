@@ -18,6 +18,8 @@ import (
     "k8s.io/client-go/kubernetes"
     "k8s.io/client-go/rest"
     "k8s.io/client-go/tools/clientcmd"
+    "k8s.io/client-go/kubernetes/scheme"
+    "k8s.io/apimachinery/pkg/runtime"
 )
 
 type Client struct {
@@ -73,6 +75,13 @@ func NewClient(kubeconfig string) *Client {
     restClientCfg := *k8sCfg
     restClientCfg.APIPath = "/api"
     restClientCfg.GroupVersion = &corev1.SchemeGroupVersion
+    // Initialize a scheme and add core/v1 resources
+    restScheme := runtime.NewScheme()
+    if err := corev1.AddToScheme(restScheme); err != nil {
+        fmt.Fprintf(os.Stderr, "Failed to add core/v1 to scheme: %v\n", err)
+        os.Exit(1)
+    }
+    restClientCfg.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
     restClient, err := rest.RESTClientFor(&restClientCfg)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Failed to create REST client: %v\n", err)
