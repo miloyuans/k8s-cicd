@@ -383,20 +383,72 @@ func worker() {
             continue
         }
 
-        updateCtx, updateCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Timeoutස
-
-ystem: TimeoutSeconds)*time.Second)
+        updateCtx, updateCancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
         defer updateCancel()
 
         success, errMsg, oldImage := k8sClient.UpdateDeployment(updateCtx, task.DeployRequest.Service, newImage, namespace)
         if success {
             checkCtx, checkCancel := context.WithTimeout(context.Background(), 1*time.Minute)
             defer checkCancel()
-            ready, checkErr := k8sClient.CheckNewPodStatus(checkCtx, task.DeployRequest.Service, newImage, namespace)
-            if ready {
+
+            // Enhanced pod status checking
+            maxAttempts := 10
+            interval := 5 * time.Second
+            newPodsReady := false
+            var checkErr error
+            for attempt := 1; attempt <= maxAttempts; attempt++ {
+                pods := k8sClient.GetPodsForDeployment(checkCtx, task.DeployRequest.Service, namespace)
+                newPodsReady = true
+                var errMsg strings.Builder
+                var logsBuf strings.Builder
+                result.Events = k8sClient.GetPodEvents(checkCtx, task.DeployRequest.Service, namespace)
+
+                for _, pod := range pods {
+                    phase := pod.Status.Phase
+                    podGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+                    podObj, err := k8sClient.Client().Resource(podGVR).Namespace(namespace).Get(checkCtx, pod.Name, metav1.GetOptions{})
+                    if err != nil {
+                        newPodsReady = false
+                        errMsg.WriteString(fmt.Sprintf("Pod %s: Failed to get status: %v\n", pod.Name, err))
+                        continue
+                    }
+                    conditions, _, _ := unstructured.NestedSlice(podObj.Object, "status", "conditions")
+                    ready := false
+                    for _, cond := range conditions {
+                        c, ok := cond.(map[string]interface{})
+                        if ok && c["type"] == "Ready" && c["status"] == "True" {
+                            ready = true
+                            break
+                        }
+                    }
+                    if phase == "Failed" || phase == "CrashLoopBackOff" || phase == "Evicted" {
+                        newPodsReady = false
+                        logsBuf.WriteString(fmt.Sprintf("Pod %s (%s): %s\n", pod.Name, phase, k8sClient.GetPodLogs(checkCtx, pod.Name, namespace)))
+                    } else if phase != "Running" || !ready {
+                        newPodsReady = false
+                        logsBuf.WriteString(fmt.Sprintf("Pod %s (%s, Ready=%v): %s\n", pod.Name, phase, ready, k8sClient.GetPodLogs(checkCtx, pod.Name, namespace)))
+                    }
+                }
+                result.Logs = logsBuf.String()
+                if !newPodsReady {
+                    checkErr = fmt.Errorf("new pods not ready: %s", errMsg.String())
+                }
+                if newPodsReady {
+                    break
+                }
+                if attempt < maxAttempts {
+                    select {
+                    case <-checkCtx.Done():
+                        checkErr = fmt.Errorf("context cancelled: %v", checkCtx.Err())
+                        break
+                    case <-time.After(interval):
+                    }
+                }
+            }
+
+            if newPodsReady {
                 result.Success = true
                 result.OldImage = oldImage
-                result.Events = k8sClient.GetPodEvents(checkCtx, task.DeployRequest.Service, namespace)
                 storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "success", result.Request.UserName)
                 log.Printf("Deployment succeeded for task %s: service=%s, env=%s, version=%s, user=%s",
                     taskKey, result.Request.Service, result.Request.Env, result.Request.Version, result.Request.UserName)
@@ -406,60 +458,19 @@ ystem: TimeoutSeconds)*time.Second)
                 result.Success = false
                 result.ErrorMsg = fmt.Sprintf("Pod check failed: %v", checkErr)
                 result.OldImage = oldImage
-                result.Events = k8sClient.GetPodEvents(checkCtx, task.DeployRequest.Service, namespace)
-                
-                // Enhanced pod status checking
-                pods := k8sClient.GetPodsForDeployment(checkCtx, task.DeployRequest.Service, namespace)
-                var logsBuf strings.Builder
-                newPodsReady := true
-                for _, pod := range pods {
-                    phase := pod.Status.Phase
-                    if phase == "Failed" || phase == "CrashLoopBackOff" || phase == "Evicted" {
-                        newPodsReady = false
-                        logsBuf.WriteString(fmt.Sprintf("Pod %s (%s): %s\n", pod.Name, phase, k8sClient.GetPodLogs(checkCtx, pod.Name, namespace)))
-                    } else if phase != "Running" {
-                        newPodsReady = false
-                        logsBuf.WriteString(fmt.Sprintf("Pod %s (%s): %s\n", pod.Name, phase, k8sClient.GetPodLogs(checkCtx, pod.Name, namespace)))
-                    } else {
-                        // Check Ready condition for Running pods
-                        podGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-                        podObj, err := k8sClient.Client().Resource(podGVR).Namespace(namespace).Get(checkCtx, pod.Name, metav1.GetOptions{})
-                        if err != nil {
-                            newPodsReady = false
-                            logsBuf.WriteString(fmt.Sprintf("Pod %s: Failed to get status: %v\n", pod.Name, err))
-                            continue
-                        }
-                        conditions, _, _ := unstructured.NestedSlice(podObj.Object, "status", "conditions")
-                        ready := false
-                        for _, cond := range conditions {
-                            c, ok := cond.(map[string]interface{})
-                            if ok && c["type"] == "Ready" && c["status"] == "True" {
-                                ready = true
-                                break
-                            }
-                        }
-                        if !ready {
-                            newPodsReady = false
-                            logsBuf.WriteString(fmt.Sprintf("Pod %s not ready: %s\n", pod.Name, k8sClient.GetPodLogs(checkCtx, pod.Name, namespace)))
-                        }
-                    }
-                }
-                result.Logs = logsBuf.String()
 
-                if !newPodsReady {
-                    // Perform rollback
-                    rollbackErr := k8sClient.RollbackDeployment(checkCtx, task.DeployRequest.Service, namespace)
-                    if rollbackErr != nil {
-                        result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+                // Perform rollback
+                rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 1*time.Minute)
+                defer rollbackCancel()
+                rollbackErr := k8sClient.RollbackDeployment(rollbackCtx, task.DeployRequest.Service, namespace)
+                if rollbackErr != nil {
+                    result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
+                } else {
+                    rollbackReady, rollbackErr := k8sClient.CheckNewPodStatus(rollbackCtx, task.DeployRequest.Service, oldImage, namespace)
+                    if rollbackReady {
+                        result.ErrorMsg += fmt.Sprintf("; Rollback succeeded to version: %s", getVersionFromImage(oldImage))
                     } else {
-                        rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 1*time.Minute)
-                        defer rollbackCancel()
-                        rollbackReady, rollbackErr := k8sClient.CheckNewPodStatus(rollbackCtx, task.DeployRequest.Service, oldImage, namespace)
-                        if rollbackReady {
-                            result.ErrorMsg += fmt.Sprintf("; Rollback succeeded to version: %s", getVersionFromImage(oldImage))
-                        } else {
-                            result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
-                        }
+                        result.ErrorMsg += fmt.Sprintf("; Rollback failed: %v", rollbackErr)
                     }
                 }
 
