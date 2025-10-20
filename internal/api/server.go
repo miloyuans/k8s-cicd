@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
 	"net"
@@ -21,6 +22,7 @@ type Server struct {
 	logger       *logrus.Logger
 	bot          *telegram.Bot
 	whitelistIPs []string // IP 白名单
+	config       *config.Config
 }
 
 // DeployRequest 定义部署请求结构
@@ -29,7 +31,6 @@ type DeployRequest struct {
 	Environments []string `json:"environments"`
 	Version      string   `json:"version"`
 	User         string   `json:"user"`
-	ChatID       int64    `json:"chat_id"`
 	Status       string   `json:"status"` // 任务状态：pending, success, failure, no_action
 }
 
@@ -56,13 +57,13 @@ type StatusRequest struct {
 }
 
 // NewServer 初始化 HTTP 服务
-func NewServer(redisAddr string) *Server {
+func NewServer(redisAddr string, cfg *config.Config) *Server {
 	storage, err := storage.NewRedisStorage(redisAddr)
 	if err != nil {
 		logrus.Fatalf("初始化 Redis 失败: %v", err)
 	}
 	logger := logrus.New()
-	bot, err := telegram.NewBot("your-telegram-bot-token") // 需替换为实际 Token
+	bot, err := telegram.NewBot(cfg.TelegramToken, cfg.TelegramGroupID)
 	if err != nil {
 		logrus.Fatalf("初始化 Telegram 机器人失败: %v", err)
 	}
@@ -80,6 +81,7 @@ func NewServer(redisAddr string) *Server {
 		logger:       logger,
 		bot:          bot,
 		whitelistIPs: whitelistIPs,
+		config:       cfg,
 	}
 
 	// 注册路由，使用 IP 白名单中间件
@@ -139,9 +141,9 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.ChatID == 0 {
-		s.logger.Errorf("部署请求缺少 ChatID")
-		http.Error(w, "缺少 ChatID", http.StatusBadRequest)
+	if s.config.TelegramGroupID == 0 {
+		s.logger.Errorf("未配置 Telegram 群组 ID")
+		http.Error(w, "未配置 Telegram 群组 ID", http.StatusInternalServerError)
 		return
 	}
 
@@ -150,11 +152,11 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		Service:      req.Service,
 		Environments: req.Environments,
 		Version:      req.Version,
-		ChatID:       req.ChatID,
-		UserID:       req.ChatID, // 假设 ChatID 即 UserID，实际需映射
+		ChatID:       s.config.TelegramGroupID,
+		UserID:       0, // UserID 由回调处理
 		Step:         4,
 	}
-	s.bot.SaveState(fmt.Sprintf("deploy:%d", state.ChatID), state)
+	s.bot.SaveState(fmt.Sprintf("deploy:%d:0", state.ChatID), state)
 	msg := fmt.Sprintf("请确认以下信息：\n服务: %s\n环境: %s\n版本: %s\n用户: %s",
 		req.Service, strings.Join(req.Environments, ", "), req.Version, req.User)
 	keyboard := s.bot.CreateYesNoKeyboard("deploy_confirm")

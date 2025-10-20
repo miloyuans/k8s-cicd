@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"k8s-cicd/internal/storage"
-	"net/http"
 	"strings"
 	"time"
 
@@ -17,7 +16,7 @@ type Bot struct {
 	bot        *tgbotapi.BotAPI
 	storage    *storage.RedisStorage
 	logger     *logrus.Logger
-	httpClient *http.Client
+	groupID    int64 // Telegram 群组 ID
 }
 
 // UserState 保存用户交互状态
@@ -26,30 +25,30 @@ type UserState struct {
 	Service      string   // 选择的服务
 	Environments []string // 选择的环境
 	Version      string   // 输入的版本号
-	ChatID       int64    // 用户聊天 ID
+	ChatID       int64    // 用户聊天 ID（群组 ID）
 	UserID       int64    // 用户 ID（Telegram 用户 ID）
 	Messages     []int    // 交互消息 ID 列表
 	LastMsgID    int      // 最后用户消息 ID（用于回复）
 }
 
 // NewBot 初始化 Telegram 机器人
-func NewBot(token string) (*Bot, error) {
+func NewBot(token string, groupID int64) (*Bot, error) {
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("初始化 Telegram 机器人失败: %v", err)
 	}
 
 	redisStorage, err := storage.NewRedisStorage("localhost:6379")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("初始化 Redis 失败: %v", err)
 	}
 
 	logger := logrus.New()
 	return &Bot{
-		bot:        bot,
-		storage:    redisStorage,
-		logger:     logger,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		bot:     bot,
+		storage: redisStorage,
+		logger:  logger,
+		groupID: groupID,
 	}, nil
 }
 
@@ -61,9 +60,9 @@ func (b *Bot) Start() {
 
 	updates := b.bot.GetUpdatesChan(u)
 	for update := range updates {
-		if update.Message != nil {
+		if update.Message != nil && update.Message.Chat.ID == b.groupID {
 			b.handleMessage(update.Message)
-		} else if update.CallbackQuery != nil {
+		} else if update.CallbackQuery != nil && update.CallbackQuery.Message.Chat.ID == b.groupID {
 			b.handleCallback(update.CallbackQuery)
 		}
 	}
@@ -102,50 +101,51 @@ func (b *Bot) getEnvironments() ([]string, error) {
 // handleMessage 处理用户文本输入
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
-	b.logger.Infof("收到用户 %d 的消息: %s", chatID, msg.Text)
+	userID := msg.From.ID
+	b.logger.Infof("收到用户 %d 的消息: %s", userID, msg.Text)
 
 	// 检查是否输入 "ai" 触发交互
 	if strings.ToLower(msg.Text) == "ai" {
-		b.logger.Infof("用户 %d 触发交互，输入: %s", chatID, msg.Text)
-		b.startInteraction(chatID, msg.From.ID)
+		b.logger.Infof("用户 %d 触发交互，输入: %s", userID, msg.Text)
+		b.startInteraction(chatID, userID)
 		return
 	}
 
 	// 获取用户状态，仅处理交互相关消息
-	state, err := b.getState(fmt.Sprintf("user:%d", chatID))
+	state, err := b.getState(fmt.Sprintf("user:%d:%d", chatID, userID))
 	if err != nil {
-		b.logger.Warnf("用户 %d 无交互状态，忽略消息: %s", chatID, msg.Text)
+		b.logger.Warnf("用户 %d 无交互状态，忽略消息: %s", userID, msg.Text)
 		return
 	}
 
 	switch state.Step {
 	case 3: // 输入版本号
-		b.logger.Infof("用户 %d 输入版本号: %s", chatID, msg.Text)
+		b.logger.Infof("用户 %d 输入版本号: %s", userID, msg.Text)
 		if b.isVersionUnique(state.Service, msg.Text) {
 			state.Version = msg.Text
 			state.Step = 4
 			state.LastMsgID = msg.MessageID // 记录版本输入消息 ID
-			b.SaveState(fmt.Sprintf("user:%d", chatID), state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
 			b.showConfirmation(chatID, &state)
 		} else {
-			b.logger.Warnf("用户 %d 输入的版本号 %s 在服务 %s 下已存在", chatID, msg.Text, state.Service)
+			b.logger.Warnf("用户 %d 输入的版本号 %s 在服务 %s 下已存在", userID, msg.Text, state.Service)
 			b.SendMessage(chatID, fmt.Sprintf("此服务 %s 下版本号 %s 已存在，请输入新版本号：", state.Service, msg.Text), nil)
 		}
 	default:
-		b.logger.Warnf("用户 %d 的消息 %s 非交互相关，忽略", chatID, msg.Text)
+		b.logger.Warnf("用户 %d 的消息 %s 非交互相关，忽略", userID, msg.Text)
 	}
 }
 
 // startInteraction 开始交互流程，显示服务选择弹窗
 func (b *Bot) startInteraction(chatID, userID int64) {
-	b.logger.Infof("用户 %d (UserID: %d) 开始交互流程", chatID, userID)
+	b.logger.Infof("用户 %d (ChatID: %d) 开始交互流程", userID, chatID)
 	// 初始化用户状态
 	state := UserState{
 		Step:   1,
 		ChatID: chatID,
 		UserID: userID,
 	}
-	b.SaveState(fmt.Sprintf("user:%d", chatID), state)
+	b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
 
 	// 服务选择弹窗
 	b.showServiceSelection(chatID, &state)
@@ -155,9 +155,9 @@ func (b *Bot) startInteraction(chatID, userID int64) {
 func (b *Bot) showServiceSelection(chatID int64, state *UserState) {
 	services, err := b.getServices()
 	if err != nil {
-		b.logger.Warnf("用户 %d 获取服务列表失败: %v", chatID, err)
+		b.logger.Warnf("用户 %d 获取服务列表失败: %v", state.UserID, err)
 		b.SendMessage(chatID, err.Error(), nil)
-		b.deleteState(fmt.Sprintf("user:%d", chatID))
+		b.deleteState(fmt.Sprintf("user:%d:%d", chatID, state.UserID))
 		return
 	}
 
@@ -193,10 +193,10 @@ func (b *Bot) showServiceSelection(chatID int64, state *UserState) {
 		var err error
 		sentMsg, err = b.bot.Send(editMsg)
 		if err != nil {
-			b.logger.Errorf("编辑服务选择消息失败，用户 %d: %v", chatID, err)
+			b.logger.Errorf("编辑服务选择消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
 		}
 	} else {
 		msg := tgbotapi.NewMessage(chatID, msgText)
@@ -205,22 +205,22 @@ func (b *Bot) showServiceSelection(chatID int64, state *UserState) {
 		var err error
 		sentMsg, err = b.bot.Send(msg)
 		if err != nil {
-			b.logger.Errorf("发送服务选择消息失败，用户 %d: %v", chatID, err)
+			b.logger.Errorf("发送服务选择消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
 		}
 	}
-	b.logger.Infof("用户 %d 显示服务选择弹窗，消息 ID: %d", chatID, sentMsg.MessageID)
+	b.logger.Infof("用户 %d 显示服务选择弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
 }
 
 // showEnvironmentSelection 显示环境选择弹窗
 func (b *Bot) showEnvironmentSelection(chatID int64, state *UserState) {
 	environments, err := b.getEnvironments()
 	if err != nil {
-		b.logger.Warnf("用户 %d 获取环境列表失败: %v", chatID, err)
+		b.logger.Warnf("用户 %d 获取环境列表失败: %v", state.UserID, err)
 		b.SendMessage(chatID, err.Error(), nil)
-		b.deleteState(fmt.Sprintf("user:%d", chatID))
+		b.deleteState(fmt.Sprintf("user:%d:%d", chatID, state.UserID))
 		return
 	}
 
@@ -256,10 +256,10 @@ func (b *Bot) showEnvironmentSelection(chatID int64, state *UserState) {
 		var err error
 		sentMsg, err = b.bot.Send(editMsg)
 		if err != nil {
-			b.logger.Errorf("编辑环境选择消息失败，用户 %d: %v", chatID, err)
+			b.logger.Errorf("编辑环境选择消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
 		}
 	} else {
 		msg := tgbotapi.NewMessage(chatID, msgText)
@@ -268,18 +268,18 @@ func (b *Bot) showEnvironmentSelection(chatID int64, state *UserState) {
 		var err error
 		sentMsg, err = b.bot.Send(msg)
 		if err != nil {
-			b.logger.Errorf("发送环境选择消息失败，用户 %d: %v", chatID, err)
+			b.logger.Errorf("发送环境选择消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
 		}
 	}
-	b.logger.Infof("用户 %d 显示环境选择弹窗，消息 ID: %d", chatID, sentMsg.MessageID)
+	b.logger.Infof("用户 %d 显示环境选择弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
 }
 
 // showConfirmation 显示数据确认弹窗
 func (b *Bot) showConfirmation(chatID int64, state *UserState) {
-	b.logger.Infof("用户 %d 显示确认弹窗: 服务=%s, 环境=%v, 版本=%s", chatID, state.Service, state.Environments, state.Version)
+	b.logger.Infof("用户 %d 显示确认弹窗: 服务=%s, 环境=%v, 版本=%s", state.UserID, state.Service, state.Environments, state.Version)
 	msgText := fmt.Sprintf("请确认以下信息：\n服务: %s\n环境: %s\n版本: %s", state.Service, strings.Join(state.Environments, ", "), state.Version)
 	keyboard := b.CreateYesNoKeyboard("confirm")
 	msg := tgbotapi.NewMessage(chatID, msgText)
@@ -288,16 +288,16 @@ func (b *Bot) showConfirmation(chatID int64, state *UserState) {
 	msg.ParseMode = "HTML"
 	sentMsg, err := b.bot.Send(msg)
 	if err != nil {
-		b.logger.Errorf("发送确认消息失败，用户 %d: %v", chatID, err)
+		b.logger.Errorf("发送确认消息失败，用户 %d: %v", state.UserID, err)
 	} else {
 		state.Messages = append(state.Messages, sentMsg.MessageID)
-		b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+		b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
 	}
 }
 
 // askContinue 询问是否继续发布
 func (b *Bot) askContinue(chatID int64, state *UserState) {
-	b.logger.Infof("用户 %d 显示是否继续提交弹窗", chatID)
+	b.logger.Infof("用户 %d 显示是否继续提交弹窗", state.UserID)
 	keyboard := b.CreateYesNoKeyboard("restart")
 	msgText := "是否继续提交数据？"
 	var sentMsg tgbotapi.Message
@@ -308,10 +308,10 @@ func (b *Bot) askContinue(chatID int64, state *UserState) {
 		var err error
 		sentMsg, err = b.bot.Send(editMsg)
 		if err != nil {
-			b.logger.Errorf("编辑继续提交消息失败，用户 %d: %v", chatID, err)
+			b.logger.Errorf("编辑继续提交消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
 		}
 	} else {
 		msg := tgbotapi.NewMessage(chatID, msgText)
@@ -319,10 +319,10 @@ func (b *Bot) askContinue(chatID int64, state *UserState) {
 		var err error
 		sentMsg, err = b.bot.Send(msg)
 		if err != nil {
-			b.logger.Errorf("发送继续提交消息失败，用户 %d: %v", chatID, err)
+			b.logger.Errorf("发送继续提交消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
 		}
 	}
 }
@@ -332,31 +332,32 @@ func (b *Bot) deleteMessages(chatID int64, state *UserState) {
 	for _, msgID := range state.Messages {
 		deleteMsg := tgbotapi.NewDeleteMessage(chatID, msgID)
 		if _, err := b.bot.Request(deleteMsg); err != nil {
-			b.logger.Errorf("删除消息 %d 失败，用户 %d: %v", msgID, chatID, err)
+			b.logger.Errorf("删除消息 %d 失败，用户 %d: %v", msgID, state.UserID, err)
 		} else {
-			b.logger.Infof("删除消息 %d 成功，用户 %d", msgID, chatID)
+			b.logger.Infof("删除消息 %d 成功，用户 %d", msgID, state.UserID)
 		}
 	}
 	state.Messages = nil
-	b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+	b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
 }
 
 // handleCallback 处理回调查询
 func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	chatID := query.Message.Chat.ID
+	userID := query.From.ID
 	data := query.Data
-	b.logger.Infof("用户 %d 触发回调: %s", chatID, data)
+	b.logger.Infof("用户 %d 触发回调: %s", userID, data)
 
 	// 尝试从交互状态获取
-	state, err := b.getState(fmt.Sprintf("user:%d", chatID))
+	state, err := b.getState(fmt.Sprintf("user:%d:%d", chatID, userID))
 	if err != nil {
 		// 尝试从部署状态获取
-		deployState, err := b.getState(fmt.Sprintf("deploy:%d", chatID))
+		deployState, err := b.getState(fmt.Sprintf("deploy:%d:%d", chatID, userID))
 		if err == nil {
 			b.handleDeployCallback(query, &deployState)
 			return
 		}
-		b.logger.Errorf("获取用户 %d 状态失败: %v", chatID, err)
+		b.logger.Errorf("获取用户 %d 状态失败: %v", userID, err)
 		return
 	}
 
@@ -364,75 +365,75 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	case 1: // 服务选择
 		if strings.HasPrefix(data, "service:") {
 			state.Service = strings.TrimPrefix(data, "service:")
-			b.logger.Infof("用户 %d 选择服务: %s", chatID, state.Service)
-			b.SaveState(fmt.Sprintf("user:%d", chatID), state)
+			b.logger.Infof("用户 %d 选择服务: %s", userID, state.Service)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
 			b.showServiceSelection(chatID, &state)
 		} else if data == "next_service" {
 			if state.Service == "" {
-				b.logger.Warnf("用户 %d 未选择服务", chatID)
+				b.logger.Warnf("用户 %d 未选择服务", userID)
 				b.SendMessage(chatID, "请先选择一个服务！", nil)
 			} else {
-				b.logger.Infof("用户 %d 确认服务选择，继续到环境选择", chatID)
+				b.logger.Infof("用户 %d 确认服务选择，继续到环境选择", userID)
 				state.Step = 2
-				b.SaveState(fmt.Sprintf("user:%d", chatID), state)
-				b.showEnvironmentSelection(chatID, &state)
+				b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
+				b.showServiceSelection(chatID, &state)
 			}
 		} else if data == "cancel" {
-			b.logger.Infof("用户 %d 取消服务选择，会话关闭", chatID)
+			b.logger.Infof("用户 %d 取消服务选择，会话关闭", userID)
 			b.deleteMessages(chatID, &state)
 			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d", chatID))
+			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
 		}
 	case 2: // 环境选择
 		if strings.HasPrefix(data, "env:") {
 			env := strings.TrimPrefix(data, "env:")
 			if !contains(state.Environments, env) {
 				state.Environments = append(state.Environments, env)
-				b.logger.Infof("用户 %d 选择环境: %s", chatID, env)
-				b.SaveState(fmt.Sprintf("user:%d", chatID), state)
+				b.logger.Infof("用户 %d 选择环境: %s", userID, env)
+				b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
 			}
 			b.showEnvironmentSelection(chatID, &state)
 		} else if data == "next_env" {
 			if len(state.Environments) == 0 {
-				b.logger.Warnf("用户 %d 未选择任何环境", chatID)
+				b.logger.Warnf("用户 %d 未选择任何环境", userID)
 				b.SendMessage(chatID, "请至少选择一个环境！", nil)
 			} else {
-				b.logger.Infof("用户 %d 完成环境选择: %v", chatID, state.Environments)
+				b.logger.Infof("用户 %d 完成环境选择: %v", userID, state.Environments)
 				state.Step = 3
-				b.SaveState(fmt.Sprintf("user:%d", chatID), state)
+				b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
 				b.SendMessage(chatID, "请输入版本号：", nil)
 			}
 		} else if data == "cancel" {
-			b.logger.Infof("用户 %d 取消环境选择，会话关闭", chatID)
+			b.logger.Infof("用户 %d 取消环境选择，会话关闭", userID)
 			b.deleteMessages(chatID, &state)
 			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d", chatID))
+			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
 		}
 	case 4: // 确认提交
 		if data == "confirm_yes" {
-			b.logger.Infof("用户 %d 确认提交数据: 服务=%s, 环境=%v, 版本=%s", chatID, state.Service, state.Environments, state.Version)
+			b.logger.Infof("用户 %d 确认提交数据: 服务=%s, 环境=%v, 版本=%s", userID, state.Service, state.Environments, state.Version)
 			b.persistData(state)
 			b.deleteMessages(chatID, &state)
 			b.SendMessage(chatID, "数据提交成功！", nil)
 			state.Step = 5
-			b.SaveState(fmt.Sprintf("user:%d", chatID), state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
 			b.askContinue(chatID, &state)
 		} else if data == "confirm_no" {
-			b.logger.Infof("用户 %d 取消数据提交，会话关闭", chatID)
+			b.logger.Infof("用户 %d 取消数据提交，会话关闭", userID)
 			b.deleteMessages(chatID, &state)
 			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d", chatID))
+			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
 		}
 	case 5: // 是否继续
 		if data == "restart_yes" {
-			b.logger.Infof("用户 %d 选择继续提交，重新开始交互", chatID)
+			b.logger.Infof("用户 %d 选择继续提交，重新开始交互", userID)
 			b.deleteMessages(chatID, &state)
-			b.startInteraction(chatID, state.UserID)
+			b.startInteraction(chatID, userID)
 		} else if data == "restart_no" {
-			b.logger.Infof("用户 %d 选择结束交互，会话关闭", chatID)
+			b.logger.Infof("用户 %d 选择结束交互，会话关闭", userID)
 			b.deleteMessages(chatID, &state)
 			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d", chatID))
+			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
 		}
 	}
 
@@ -442,20 +443,21 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 // handleDeployCallback 处理 /deploy 接口的确认回调
 func (b *Bot) handleDeployCallback(query *tgbotapi.CallbackQuery, state *UserState) {
 	chatID := query.Message.Chat.ID
+	userID := query.From.ID
 	data := query.Data
-	b.logger.Infof("用户 %d 触发部署回调: %s", chatID, data)
+	b.logger.Infof("用户 %d 触发部署回调: %s", userID, data)
 
 	if data == "deploy_confirm_yes" {
-		b.logger.Infof("用户 %d 确认部署数据: 服务=%s, 环境=%v, 版本=%s", chatID, state.Service, state.Environments, state.Version)
+		b.logger.Infof("用户 %d 确认部署数据: 服务=%s, 环境=%v, 版本=%s", userID, state.Service, state.Environments, state.Version)
 		b.persistData(*state)
 		b.deleteMessages(chatID, state)
 		b.SendMessage(chatID, "部署数据提交成功！", nil)
-		b.deleteState(fmt.Sprintf("deploy:%d", chatID))
+		b.deleteState(fmt.Sprintf("deploy:%d:%d", chatID, userID))
 	} else if data == "deploy_confirm_no" {
-		b.logger.Infof("用户 %d 取消部署数据提交", chatID)
+		b.logger.Infof("用户 %d 取消部署数据提交", userID)
 		b.deleteMessages(chatID, state)
 		b.SendMessage(chatID, "部署请求已取消", nil)
-		b.deleteState(fmt.Sprintf("deploy:%d", chatID))
+		b.deleteState(fmt.Sprintf("deploy:%d:%d", chatID, userID))
 	}
 
 	b.bot.Request(tgbotapi.NewCallback(query.ID, ""))
@@ -473,13 +475,13 @@ func (b *Bot) CreateYesNoKeyboard(prefix string) tgbotapi.InlineKeyboardMarkup {
 
 // SendMessage 发送 Telegram 消息
 func (b *Bot) SendMessage(chatID int64, text string, keyboard *tgbotapi.InlineKeyboardMarkup) {
-	b.logger.Infof("发送消息给用户 %d: %s", chatID, text)
+	b.logger.Infof("发送消息到群组 %d: %s", chatID, text)
 	msg := tgbotapi.NewMessage(chatID, text)
 	if keyboard != nil {
-		msg.ReplyMarkup = *keyboard
+		msg.ReplyMarkup = keyboard
 	}
 	if _, err := b.bot.Send(msg); err != nil {
-		b.logger.Errorf("发送消息给用户 %d 失败: %v", chatID, err)
+		b.logger.Errorf("发送消息到群组 %d 失败: %v", chatID, err)
 	}
 }
 
@@ -515,7 +517,7 @@ func (b *Bot) deleteState(key string) {
 func (b *Bot) persistData(state UserState) {
 	data, _ := json.Marshal(state)
 	b.storage.Push("deploy_queue", string(data))
-	b.logger.Infof("持久化用户 %d 数据到队列: 服务=%s, 环境=%v, 版本=%s", state.ChatID, state.Service, state.Environments, state.Version)
+	b.logger.Infof("持久化用户 %d 数据到队列: 服务=%s, 环境=%v, 版本=%s", state.UserID, state.Service, state.Environments, state.Version)
 }
 
 // isVersionUnique 检查版本号在同一服务下是否唯一

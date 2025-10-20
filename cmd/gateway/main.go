@@ -18,7 +18,7 @@ func main() {
 	}
 
 	// 初始化 Telegram 机器人
-	bot, err := telegram.NewBot(cfg.TelegramToken)
+	bot, err := telegram.NewBot(cfg.TelegramToken, cfg.TelegramGroupID)
 	if err != nil {
 		log.Fatalf("初始化 Telegram 机器人失败: %v", err)
 	}
@@ -27,7 +27,7 @@ func main() {
 	go bot.Start()
 
 	// 初始化 API 服务
-	apiServer := api.NewServer(cfg.RedisAddr)
+	apiServer := api.NewServer(cfg.RedisAddr, cfg)
 
 	// 启动 HTTP 服务
 	addr := fmt.Sprintf(":%d", cfg.Port)
