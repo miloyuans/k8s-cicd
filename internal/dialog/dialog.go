@@ -1,3 +1,4 @@
+// internal/dialog/dialog.go
 package dialog
 
 import (
@@ -35,10 +36,11 @@ type DialogState struct {
 }
 
 var (
-	dialogs              sync.Map
-	taskQueue            *queue.Queue
-	GlobalTaskQueue      *queue.Queue
-	PendingConfirmations sync.Map
+	dialogs                   sync.Map
+	taskQueue                 *queue.Queue
+	GlobalTaskQueue           *queue.Queue
+	PendingConfirmations      sync.Map // For API-driven confirmations
+	DialogPendingConfirmations sync.Map // For dialog-driven confirmations
 )
 
 func SetTaskQueue(q *queue.Queue) {
@@ -181,9 +183,13 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 	case "version":
 		processVersionInput(userID, chatID, text, cfg, s)
 	case "confirm":
-		processConfirmation(userID, chatID, text, cfg, s)
+		if strings.HasPrefix(text, "confirm_dialog:") || strings.HasPrefix(text, "cancel_dialog:") {
+			processConfirmation(userID, chatID, text, cfg, s)
+		}
 	case "continue":
-		processContinue(userID, chatID, text, cfg, s)
+		if text == "continue_yes" || text == "continue_no" {
+			processContinue(userID, chatID, text, cfg, s)
+		}
 	}
 }
 
@@ -345,7 +351,7 @@ func sendConfirmation(userID, chatID int64, cfg *config.Config, s *DialogState) 
 			Status:    "pending_confirmation",
 		})
 	}
-	PendingConfirmations.Store(id, tasks)
+	DialogPendingConfirmations.Store(id, tasks)
 
 	return sendMessage(cfg, chatID, msg)
 }
@@ -353,17 +359,17 @@ func sendConfirmation(userID, chatID int64, cfg *config.Config, s *DialogState) 
 func processConfirmation(userID, chatID int64, text string, cfg *config.Config, s *DialogState) {
 	if strings.HasPrefix(text, "cancel_dialog:") {
 		id := strings.TrimPrefix(text, "cancel_dialog:")
-		PendingConfirmations.Delete(id)
+		DialogPendingConfirmations.Delete(id)
 		CancelDialog(userID, chatID, cfg)
 		return
 	}
 	if strings.HasPrefix(text, "confirm_dialog:") {
 		id := strings.TrimPrefix(text, "confirm_dialog:")
-		if tasks, ok := PendingConfirmations.Load(id); ok {
+		if tasks, ok := DialogPendingConfirmations.Load(id); ok {
 			for _, t := range tasks.([]types.DeployRequest) {
 				taskQueue.Enqueue(queue.Task{DeployRequest: t})
 			}
-			PendingConfirmations.Delete(id)
+			DialogPendingConfirmations.Delete(id)
 		}
 		s.Stage = "continue"
 		sentMsg, _ := sendContinuePrompt(userID, chatID, cfg, s)
@@ -401,15 +407,10 @@ func processContinue(userID, chatID int64, text string, cfg *config.Config, s *D
 }
 
 func SendConfirmation(category string, chatID int64, message string, callbackData string, cfg *config.Config) error {
-	token, ok := cfg.TelegramBots[category]
-	if !ok {
-		log.Printf("No bot configured for category %s", category)
-		return fmt.Errorf("no bot configured for category %s", category)
-	}
-	bot, err := tgbotapi.NewBotAPI(token)
+	bot, err := GetBot(category)
 	if err != nil {
-		log.Printf("Failed to create bot for category %s: %v", category, err)
-		return err
+		log.Printf("No bot configured for category %s: %v", category, err)
+		return fmt.Errorf("no bot configured for category %s: %v", category, err)
 	}
 
 	buttons := [][]tgbotapi.InlineKeyboardButton{
@@ -460,6 +461,7 @@ func monitorDialogTimeout(userID, chatID int64, cfg *config.Config, s *DialogSta
 		}
 	case <-s.timeoutCancel:
 		log.Printf("Timeout cancelled for user %d in chat %d", userID, chatID)
+		go monitorDialogTimeout(userID, chatID, cfg, s) // Restart timeout
 	}
 }
 
@@ -481,14 +483,9 @@ func sendMessage(cfg *config.Config, chatID int64, text interface{}) (tgbotapi.M
 			return tgbotapi.Message{}, fmt.Errorf("no service or default chat found for chat %d", chatID)
 		}
 	}
-	token, ok := cfg.TelegramBots[service]
-	if !ok {
-		log.Printf("No bot configured for service %s", service)
-		return tgbotapi.Message{}, fmt.Errorf("no bot configured for service %s", service)
-	}
-	bot, err := tgbotapi.NewBotAPI(token)
+	bot, err := GetBot(service)
 	if err != nil {
-		log.Printf("Failed to create bot for service %s: %v", service, err)
+		log.Printf("Failed to get bot for service %s: %v", service, err)
 		return tgbotapi.Message{}, err
 	}
 
@@ -534,14 +531,9 @@ func deleteMessages(s *DialogState, cfg *config.Config) {
 			return
 		}
 	}
-	token, ok := cfg.TelegramBots[service]
-	if !ok {
-		log.Printf("No bot configured for service %s", service)
-		return
-	}
-	bot, err := tgbotapi.NewBotAPI(token)
+	bot, err := GetBot(service)
 	if err != nil {
-		log.Printf("Failed to create bot for service %s: %v", service, err)
+		log.Printf("Failed to get bot for service %s: %v", service, err)
 		return
 	}
 

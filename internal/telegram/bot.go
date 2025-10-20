@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"regexp"
@@ -20,6 +19,7 @@ import (
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/types"
+	"k8s-cicd/internal/utils"
 )
 
 var (
@@ -88,7 +88,7 @@ func StartBot(cfg *config.Config, q *queue.Queue) {
 			IdleConnTimeout:       30 * time.Second,
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
-			ForceAttemptHTTP2:     true, // Explicitly enable HTTP/2
+			ForceAttemptHTTP2:     true,
 		},
 	}
 
@@ -187,15 +187,12 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				dialog.PendingConfirmations.Delete(id)
 				edit := tgbotapi.NewEditMessageText(chatID, messageID, update.CallbackQuery.Message.Text+"\n\n已取消 / Cancelled")
 				bot.Send(edit)
+			} else if strings.HasPrefix(callbackData, "confirm_dialog:") || strings.HasPrefix(callbackData, "cancel_dialog:") {
+				dialog.ProcessDialog(userID, chatID, callbackData, cfg)
 			} else if dialog.IsDialogActive(userID) {
-				// 处理对话回调
-				if strings.HasPrefix(callbackData, "service:") {
-					service := strings.TrimPrefix(callbackData, "service:")
-					dialog.ProcessDialog(userID, chatID, service, cfg)
-				} else if strings.HasPrefix(callbackData, "env:") {
-					env := strings.TrimPrefix(callbackData, "env:")
-					dialog.ProcessDialog(userID, chatID, env, cfg)
-				} else {
+				// Handle dialog-specific callbacks
+				if strings.HasPrefix(callbackData, "service:") || strings.HasPrefix(callbackData, "env:") ||
+					callbackData == "env_done" || callbackData == "continue_yes" || callbackData == "continue_no" {
 					dialog.ProcessDialog(userID, chatID, callbackData, cfg)
 				}
 			}
@@ -204,41 +201,23 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 }
 
 func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) error {
-	category := ClassifyService(result.Request.Service, cfg.ServiceKeywords)
+	category := utils.ClassifyService(result.Request.Service, cfg.ServiceKeywords)
 	chatID, ok := cfg.TelegramChats[category]
 	if !ok {
 		log.Printf("No chat configured for category %s, using default 'other'", category)
 		if defaultChatID, ok := cfg.TelegramChats["other"]; ok {
 			chatID = defaultChatID
+			category = "other"
 		} else {
 			log.Printf("No default chat configured for category %s", category)
-			return fmt.Errorf("no chat configured for category %s", category)
+			return logToFile(fmt.Sprintf("No chat configured for category %s", category), result)
 		}
 	}
-	token, ok := cfg.TelegramBots[category]
-	if !ok {
-		log.Printf("No bot configured for category %s, using default 'other'", category)
-		if defaultToken, ok := cfg.TelegramBots["other"]; ok {
-			token = defaultToken
-		} else {
-			log.Printf("No default bot configured for category %s", category)
-			return fmt.Errorf("no bot configured for category %s", category)
-		}
-	}
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSHandshakeTimeout:   10 * time.Second,
-			IdleConnTimeout:       30 * time.Second,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   10,
-			ForceAttemptHTTP2:     true,
-		},
-	}
-	bot, err := tgbotapi.NewBotAPIWithClient(token, tgbotapi.APIEndpoint, httpClient)
+
+	bot, err := GetBot(category)
 	if err != nil {
-		log.Printf("Failed to create bot for category %s: %v", category, err)
-		return logToFile(fmt.Sprintf("Failed to create bot for category %s: %v", category, err), result)
+		log.Printf("Failed to get bot for category %s: %v", category, err)
+		return logToFile(fmt.Sprintf("Failed to get bot for category %s: %v", category, err), result)
 	}
 
 	var md strings.Builder
@@ -252,7 +231,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 	md.WriteString(fmt.Sprintf("版本 / Version: <b>%s</b>\n", result.Request.Version))
 	if !result.Success {
 		md.WriteString(fmt.Sprintf("错误 / Error: <b>%s</b>\n", result.ErrorMsg))
-		md.WriteString(fmt.Sprintf("旧版本 / Old Version: <b>%s</b>\n", getVersionFromImage(result.OldImage)))
+		md.WriteString(fmt.Sprintf("旧版本 / Old Version: <b>%s</b>\n", utils.GetVersionFromImage(result.OldImage)))
 		md.WriteString(fmt.Sprintf("\n事件 / Events:\n<pre>%s</pre>\n", result.Events))
 		md.WriteString(fmt.Sprintf("\n日志 / Logs:\n<pre>%s</pre>\n", result.Logs))
 	}
@@ -267,7 +246,7 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 			return nil
 		}
 		if apiErr, ok := err.(tgbotapi.APIError); ok && apiErr.ErrorCode == 429 {
-			retryAfter := 1 * time.Second
+			retryAfter := time.Duration(1+attempt*attempt) * time.Second
 			if apiErr.RetryAfter > 0 {
 				retryAfter = time.Duration(apiErr.RetryAfter) * time.Second
 			}
@@ -279,16 +258,9 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 		if attempt == maxRetries {
 			return logToFile(fmt.Sprintf("Failed to send notification after %d attempts: %v", maxRetries, err), result)
 		}
-		time.Sleep(time.Duration(attempt) * time.Second)
+		time.Sleep(time.Duration(attempt*attempt) * time.Second)
 	}
 	return fmt.Errorf("failed to send notification after %d attempts", maxRetries)
-}
-
-func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) error {
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "HTML"
-	_, err := bot.Send(msg)
-	return err
 }
 
 func NotifyDeployTeam(cfg *config.Config, result *storage.DeployResult) error {
@@ -299,27 +271,13 @@ func NotifyDeployTeam(cfg *config.Config, result *storage.DeployResult) error {
 	chatID, ok := cfg.TelegramChats[category]
 	if !ok {
 		log.Printf("No chat configured for deploy category %s", category)
-		return fmt.Errorf("no chat configured for deploy category %s", category)
+		return logToFile(fmt.Sprintf("No chat configured for deploy category %s", category), result)
 	}
-	token, ok := cfg.TelegramBots[category]
-	if !ok {
-		log.Printf("No bot configured for deploy category %s", category)
-		return fmt.Errorf("no bot configured for deploy category %s", category)
-	}
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSHandshakeTimeout:   10 * time.Second,
-			IdleConnTimeout:       30 * time.Second,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   10,
-			ForceAttemptHTTP2:     true,
-		},
-	}
-	bot, err := tgbotapi.NewBotAPIWithClient(token, tgbotapi.APIEndpoint, httpClient)
+
+	bot, err := GetBot(category)
 	if err != nil {
-		log.Printf("Failed to create bot for deploy category %s: %v", category, err)
-		return logToFile(fmt.Sprintf("Failed to create bot for deploy category %s: %v", category, err), result)
+		log.Printf("Failed to get bot for deploy category %s: %v", category, err)
+		return logToFile(fmt.Sprintf("Failed to get bot for deploy category %s: %v", category, err), result)
 	}
 
 	var md strings.Builder
@@ -345,7 +303,7 @@ func NotifyDeployTeam(cfg *config.Config, result *storage.DeployResult) error {
 			return nil
 		}
 		if apiErr, ok := err.(tgbotapi.APIError); ok && apiErr.ErrorCode == 429 {
-			retryAfter := 1 * time.Second
+			retryAfter := time.Duration(1+attempt*attempt) * time.Second
 			if apiErr.RetryAfter > 0 {
 				retryAfter = time.Duration(apiErr.RetryAfter) * time.Second
 			}
@@ -357,9 +315,16 @@ func NotifyDeployTeam(cfg *config.Config, result *storage.DeployResult) error {
 		if attempt == maxRetries {
 			return logToFile(fmt.Sprintf("Failed to send deploy notification after %d attempts: %v", maxRetries, err), result)
 		}
-		time.Sleep(time.Duration(attempt) * time.Second)
+		time.Sleep(time.Duration(attempt*attempt) * time.Second)
 	}
 	return fmt.Errorf("failed to send deploy notification after %d attempts", maxRetries)
+}
+
+func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) error {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "HTML"
+	_, err := bot.Send(msg)
+	return err
 }
 
 func logToFile(message string, result *storage.DeployResult) error {
@@ -404,34 +369,4 @@ func logToFile(message string, result *storage.DeployResult) error {
 		return err
 	}
 	return nil
-}
-
-func getVersionFromImage(image string) string {
-	parts := strings.Split(image, ":")
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return "unknown"
-}
-
-func ClassifyService(service string, keywords map[string][]string) string {
-	keywordsMu.Lock()
-	defer keywordsMu.Unlock()
-
-	lowerService := strings.ToLower(service)
-	for category, patterns := range keywords {
-		for _, pattern := range patterns {
-			lowerPattern := strings.ToLower(pattern)
-			if strings.HasPrefix(lowerPattern, "^") || strings.HasSuffix(lowerPattern, "$") || strings.Contains(lowerPattern, ".*") {
-				for _, re := range compiledKeywords[category] {
-					if re.MatchString(lowerService) {
-						return category
-					}
-				}
-			} else if strings.Contains(lowerService, lowerPattern) {
-				return category
-			}
-		}
-	}
-	return "other"
 }

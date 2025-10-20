@@ -1,3 +1,4 @@
+// cmd/gateway/main.go
 package main
 
 import (
@@ -23,7 +24,7 @@ import (
 
 var (
 	taskQueue   *queue.Queue
-	isRestarted bool = true // Default to true on startup
+	isRestarted bool = true
 )
 
 func main() {
@@ -110,7 +111,7 @@ func handleTasks(cfg *config.Config) http.HandlerFunc {
 				http.Error(w, "Missing env parameter", http.StatusBadRequest)
 				return
 			}
-			tasks := taskQueue.GetPendingTasks(env) // Case-sensitive
+			tasks := taskQueue.GetPendingTasks(env)
 			if isRestarted || storage.FileEmpty(filepath.Join(cfg.StorageDir, "environments.json")) || checkSvcFilesEmpty(cfg) {
 				resp := map[string]interface{}{
 					"status": "restarted",
@@ -298,7 +299,7 @@ func handleSubmitTask(cfg *config.Config) http.HandlerFunc {
 		for _, env := range req.Envs {
 			deployReq := types.DeployRequest{
 				Service:   req.Service,
-				Env:       env, // Case-sensitive
+				Env:       env,
 				Version:   req.Version,
 				Timestamp: time.Now(),
 				UserName:  req.Username,
