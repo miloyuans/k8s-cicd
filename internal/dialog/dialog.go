@@ -1,4 +1,3 @@
-// internal/dialog/dialog.go
 package dialog
 
 import (
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/google/uuid"
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
@@ -24,14 +24,14 @@ type DialogState struct {
 	ChatID        int64
 	Service       string
 	Stage         string // "service", "env", "version", "confirm", "continue"
-	Selected      string // Single selection for service
+	Selected      string
 	SelectedEnvs  []string
 	StartedAt     time.Time
 	UserName      string
 	Version       string
 	timeoutCancel chan bool
 	Messages      []int
-	RetryCount    int // New field for tracking service list retries
+	RetryCount    int
 }
 
 var (
@@ -62,7 +62,7 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config, userN
 		UserName:      userName,
 		timeoutCancel: make(chan bool),
 		Messages:      []int{},
-		RetryCount:    0, // Initialize retry counter
+		RetryCount:    0,
 	}
 	dialogs.Store(userID, newState)
 
@@ -116,21 +116,11 @@ func sendServiceSelection(userID, chatID int64, cfg *config.Config, s *DialogSta
 	}
 
 	log.Printf("Loaded %d services for %s: %v", len(services), s.Service, services)
-
-	// Use editServiceSelection to render the service selection
 	if len(s.Messages) > 0 {
 		lastMsgID := s.Messages[len(s.Messages)-1]
-		editServiceSelection(userID, chatID, lastMsgID, cfg, s)
-		// Return the last message ID as a tgbotapi.Message (minimal info, as editServiceSelection handles sending)
-		return tgbotapi.Message{MessageID: lastMsgID, Chat: &tgbotapi.Chat{ID: chatID}}, nil
+		return editServiceSelection(userID, chatID, lastMsgID, cfg, s)
 	}
-	// Initial send: use editServiceSelection to maintain consistency
-	sentMsg, err := editServiceSelection(userID, chatID, 0, cfg, s)
-	if err != nil {
-		log.Printf("Failed to send initial service selection for user %d in chat %d: %v", userID, chatID, err)
-		return tgbotapi.Message{}, err
-	}
-	return sentMsg, nil
+	return editServiceSelection(userID, chatID, 0, cfg, s)
 }
 
 func editServiceSelection(userID, chatID int64, msgID int, cfg *config.Config, s *DialogState) (tgbotapi.Message, error) {
@@ -159,11 +149,10 @@ func editServiceSelection(userID, chatID int64, msgID int, cfg *config.Config, s
 		msg := tgbotapi.NewMessage(chatID, msgText)
 		msg.ReplyMarkup = keyboard
 		return sendMessage(cfg, chatID, msg)
-	} else {
-		edit := tgbotapi.NewEditMessageText(chatID, msgID, msgText)
-		edit.ReplyMarkup = &keyboard
-		return sendMessage(cfg, chatID, edit)
 	}
+	edit := tgbotapi.NewEditMessageText(chatID, msgID, msgText)
+	edit.ReplyMarkup = &keyboard
+	return sendMessage(cfg, chatID, edit)
 }
 
 func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
@@ -173,12 +162,21 @@ func ProcessDialog(userID, chatID int64, text string, cfg *config.Config) {
 		return
 	}
 	s := state.(*DialogState)
-	s.timeoutCancel <- true // Reset timeout
+	select {
+	case s.timeoutCancel <- true:
+	default:
+	}
 
 	switch s.Stage {
 	case "service":
+		if strings.HasPrefix(text, "service:") {
+			text = strings.TrimPrefix(text, "service:")
+		}
 		processServiceSelection(userID, chatID, text, cfg, s)
 	case "env":
+		if strings.HasPrefix(text, "env:") {
+			text = strings.TrimPrefix(text, "env:")
+		}
 		processEnvSelection(userID, chatID, text, cfg, s)
 	case "version":
 		processVersionInput(userID, chatID, text, cfg, s)
@@ -196,7 +194,6 @@ func processServiceSelection(userID, chatID int64, text string, cfg *config.Conf
 	}
 	s.Selected = text
 	s.Stage = "env"
-	editServiceSelection(userID, chatID, s.Messages[len(s.Messages)-1], cfg, s) // Update buttons if needed
 	sentMsg, _ := sendEnvSelection(userID, chatID, cfg, s)
 	s.Messages = append(s.Messages, sentMsg.MessageID)
 }
@@ -213,20 +210,27 @@ func sendEnvSelection(userID, chatID int64, cfg *config.Config, s *DialogState) 
 	}
 	envList := make([]string, 0, len(envs))
 	for env := range envs {
-		envList = append(envList, env) // 优化：保持大小写
+		envList = append(envList, env)
 	}
 	sort.Strings(envList)
 	var rows [][]tgbotapi.InlineKeyboardButton
 	var row []tgbotapi.InlineKeyboardButton
 	for i, env := range envList {
-		button := tgbotapi.NewInlineKeyboardButtonData(env, "env:"+env)
+		label := env
+		if contains(s.SelectedEnvs, env) {
+			label = "✅ " + env
+		}
+		button := tgbotapi.NewInlineKeyboardButtonData(label, "env:"+env)
 		row = append(row, button)
 		if (i+1)%3 == 0 || i == len(envList)-1 {
 			rows = append(rows, row)
 			row = nil
 		}
 	}
-	rows = append(rows, []tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel")})
+	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("完成 / Done", "env_done"),
+		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
+	})
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
 
 	msgText := fmt.Sprintf("已选择服务: %s\nSelected service: %s\n请选择环境 / Select environments (multi-select):", s.Selected, s.Selected)
@@ -240,17 +244,22 @@ func processEnvSelection(userID, chatID int64, text string, cfg *config.Config, 
 		CancelDialog(userID, chatID, cfg)
 		return
 	}
+	if text == "env_done" {
+		if len(s.SelectedEnvs) == 0 {
+			sendMessage(cfg, chatID, "请至少选择一个环境 / Please select at least one environment.")
+			return
+		}
+		s.Stage = "version"
+		sentMsg, _ := sendVersionInput(userID, chatID, cfg, s)
+		s.Messages = append(s.Messages, sentMsg.MessageID)
+		return
+	}
 	if contains(s.SelectedEnvs, text) {
 		s.SelectedEnvs = remove(s.SelectedEnvs, text)
 	} else {
 		s.SelectedEnvs = append(s.SelectedEnvs, text)
 	}
-	if len(s.SelectedEnvs) > 0 {
-		s.Stage = "version"
-		editEnvSelection(userID, chatID, s.Messages[len(s.Messages)-1], cfg, s)
-		sentMsg, _ := sendVersionInput(userID, chatID, cfg, s)
-		s.Messages = append(s.Messages, sentMsg.MessageID)
-	} else {
+	if len(s.Messages) > 0 {
 		editEnvSelection(userID, chatID, s.Messages[len(s.Messages)-1], cfg, s)
 	}
 }
@@ -284,7 +293,10 @@ func editEnvSelection(userID, chatID int64, msgID int, cfg *config.Config, s *Di
 			row = nil
 		}
 	}
-	rows = append(rows, []tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel")})
+	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("完成 / Done", "env_done"),
+		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
+	})
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
 
 	msgText := fmt.Sprintf("已选择服务: %s\nSelected service: %s\n请选择环境 / Select environments (multi-select):", s.Selected, s.Selected)
@@ -308,39 +320,51 @@ func processVersionInput(userID, chatID int64, text string, cfg *config.Config, 
 }
 
 func sendConfirmation(userID, chatID int64, cfg *config.Config, s *DialogState) (tgbotapi.Message, error) {
+	id := uuid.New().String()[:8]
 	message := fmt.Sprintf("确认部署服务 %s 到环境 %s，版本 %s？\nConfirm deployment for service %s to envs %s, version %s?",
 		s.Selected, strings.Join(s.SelectedEnvs, ","), s.Version, s.Selected, strings.Join(s.SelectedEnvs, ","), s.Version)
 	buttons := [][]tgbotapi.InlineKeyboardButton{
 		{
-			tgbotapi.NewInlineKeyboardButtonData("确认 / Confirm", "confirm"),
-			tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
+			tgbotapi.NewInlineKeyboardButtonData("确认 / Confirm", "confirm_dialog:"+id),
+			tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel_dialog:"+id),
 		},
 	}
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
 	msg := tgbotapi.NewMessage(chatID, message)
 	msg.ReplyMarkup = keyboard
+	msg.ParseMode = "HTML"
+
+	var tasks []types.DeployRequest
+	for _, env := range s.SelectedEnvs {
+		tasks = append(tasks, types.DeployRequest{
+			Service:   s.Selected,
+			Env:       env,
+			Version:   s.Version,
+			Timestamp: time.Now(),
+			UserName:  s.UserName,
+			Status:    "pending_confirmation",
+		})
+	}
+	PendingConfirmations.Store(id, tasks)
+
 	return sendMessage(cfg, chatID, msg)
 }
 
 func processConfirmation(userID, chatID int64, text string, cfg *config.Config, s *DialogState) {
-	if text == "cancel" {
+	if strings.HasPrefix(text, "cancel_dialog:") {
+		id := strings.TrimPrefix(text, "cancel_dialog:")
+		PendingConfirmations.Delete(id)
 		CancelDialog(userID, chatID, cfg)
 		return
-	} else if text == "confirm" {
-		var tasks []types.DeployRequest
-		for _, env := range s.SelectedEnvs {
-			deployReq := types.DeployRequest{
-				Service:   s.Selected,
-				Env:       env, // 优化：保持大小写
-				Version:   s.Version,
-				Timestamp: time.Now(),
-				UserName:  s.UserName,
-				Status:    "pending",
+	}
+	if strings.HasPrefix(text, "confirm_dialog:") {
+		id := strings.TrimPrefix(text, "confirm_dialog:")
+		if tasks, ok := PendingConfirmations.Load(id); ok {
+			for _, t := range tasks.([]types.DeployRequest) {
+				taskQueue.Enqueue(queue.Task{DeployRequest: t})
 			}
-			taskQueue.Enqueue(queue.Task{DeployRequest: deployReq})
-			tasks = append(tasks, deployReq)
+			PendingConfirmations.Delete(id)
 		}
-		sendMessage(cfg, chatID, "任务已提交 / Tasks submitted")
 		s.Stage = "continue"
 		sentMsg, _ := sendContinuePrompt(userID, chatID, cfg, s)
 		s.Messages = append(s.Messages, sentMsg.MessageID)
@@ -369,8 +393,10 @@ func processContinue(userID, chatID int64, text string, cfg *config.Config, s *D
 		s.Selected = ""
 		s.SelectedEnvs = nil
 		s.Version = ""
+		s.RetryCount = 0
 		sendMessage(cfg, chatID, "开始新部署 / Starting new deployment")
-		sendServiceSelection(userID, chatID, cfg, s)
+		sentMsg, _ := sendServiceSelection(userID, chatID, cfg, s)
+		s.Messages = append(s.Messages, sentMsg.MessageID)
 	}
 }
 
@@ -398,24 +424,6 @@ func SendConfirmation(category string, chatID int64, message string, callbackDat
 	msg.ParseMode = "HTML"
 	_, err = bot.Send(msg)
 	return err
-}
-
-func remove(slice []string, item string) []string {
-	for i, s := range slice {
-		if s == item {
-			return append(slice[:i], slice[i+1:]...)
-		}
-	}
-	return slice
-}
-
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
 }
 
 func CancelDialog(userID, chatID int64, cfg *config.Config) bool {
@@ -452,7 +460,6 @@ func monitorDialogTimeout(userID, chatID int64, cfg *config.Config, s *DialogSta
 		}
 	case <-s.timeoutCancel:
 		log.Printf("Timeout cancelled for user %d in chat %d", userID, chatID)
-		go monitorDialogTimeout(userID, chatID, cfg, s) // Restart timeout
 	}
 }
 
@@ -546,4 +553,22 @@ func deleteMessages(s *DialogState, cfg *config.Config) {
 			log.Printf("Deleted message %d in chat %d", msgID, s.ChatID)
 		}
 	}
+}
+
+func remove(slice []string, item string) []string {
+	for i, s := range slice {
+		if s == item {
+			return append(slice[:i], slice[i+1:]...)
+		}
+	}
+	return slice
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }

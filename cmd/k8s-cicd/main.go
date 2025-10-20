@@ -1,4 +1,3 @@
-// cmd/cicd/main.go
 package main
 
 import (
@@ -10,13 +9,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"k8s-cicd/internal/config"
 	k8shttp "k8s-cicd/internal/http"
@@ -25,6 +23,7 @@ import (
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
 	"k8s-cicd/internal/types"
+	"k8s-cicd/internal/utils"
 )
 
 var (
@@ -159,7 +158,7 @@ func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error)
 		}
 		for _, dep := range deployments.Items {
 			service := dep.GetName()
-			category := telegram.ClassifyService(service, cfg.ServiceKeywords)
+			category := utils.ClassifyService(service, cfg.ServiceKeywords)
 			services[category] = append(services[category], service)
 		}
 	}
@@ -354,7 +353,7 @@ func processTask(task queue.Task) {
 			} else {
 				rollbackReady, rollbackErr := k8sClient.CheckNewPodStatus(checkCtx, task.DeployRequest.Service, oldImage, namespace)
 				if rollbackReady {
-					result.ErrorMsg += fmt.Sprintf("; Rollback succeeded to version: %s", getVersionFromImage(oldImage))
+					result.ErrorMsg += fmt.Sprintf("; Rollback succeeded to version: %s", utils.GetVersionFromImage(oldImage))
 				} else {
 					result.ErrorMsg += fmt.Sprintf("; Rollback verification failed: %v", rollbackErr)
 				}
@@ -388,14 +387,6 @@ func processTask(task queue.Task) {
 		}()
 		feedbackCompleteToGateway(cfg, taskKey)
 	}
-}
-
-func getVersionFromImage(image string) string {
-	parts := strings.Split(image, ":")
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return "unknown"
 }
 
 func feedbackCompleteToGateway(cfg *config.Config, taskKey string) {

@@ -1,4 +1,3 @@
-// internal/http/client.go
 package http
 
 import (
@@ -43,7 +42,6 @@ func FetchTasks(ctx context.Context, gatewayURL, env string) ([]types.DeployRequ
 			continue
 		}
 
-		// Try to decode as map first (for "restarted" case)
 		var respMap map[string]interface{}
 		decoder := json.NewDecoder(resp.Body)
 		err = decoder.Decode(&respMap)
@@ -63,30 +61,5 @@ func FetchTasks(ctx context.Context, gatewayURL, env string) ([]types.DeployRequ
 			return tasks, respMap, nil
 		}
 
-		// Fallback to decoding as array (normal case)
-		if err != nil {
-			// Reset the response body to allow re-reading
-			resp.Body.Close()
-			resp, err = client.Do(req) // Redo the request
-			if err != nil {
-				log.Printf("Failed to retry request for env %s (attempt %d/%d): %v", env, attempt, maxRetries, err)
-				if attempt == maxRetries {
-					return nil, nil, fmt.Errorf("failed to retry request after %d attempts: %v", maxRetries, err)
-				}
-				continue
-			}
-			defer resp.Body.Close()
-
-			var tasks []types.DeployRequest
-			if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
-				log.Printf("Failed to decode tasks response for env %s (attempt %d/%d): %v", env, attempt, maxRetries, err)
-				if attempt == maxRetries {
-					return nil, nil, fmt.Errorf("failed to decode tasks response: %v", err)
-				}
-				continue
-			}
-			return tasks, map[string]interface{}{}, nil // Empty map for non-restarted case
-		}
-	}
-	return nil, nil, fmt.Errorf("failed to fetch tasks after %d attempts", maxRetries)
-}
+		resp.Body.Close()
+		resp, err = client.Do
