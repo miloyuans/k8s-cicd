@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"k8s-cicd/internal/storage"
-	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -15,12 +14,10 @@ import (
 
 // Bot 封装 Telegram 机器人功能
 type Bot struct {
-	bot          *tgbotapi.BotAPI
-	storage      *storage.RedisStorage
-	logger       *logrus.Logger
-	httpClient   *http.Client
-	servicesAPI  string // 服务 API 地址
-	environsAPI  string // 环境 API 地址
+	bot        *tgbotapi.BotAPI
+	storage    *storage.RedisStorage
+	logger     *logrus.Logger
+	httpClient *http.Client
 }
 
 // UserState 保存用户交互状态
@@ -32,6 +29,7 @@ type UserState struct {
 	ChatID       int64    // 用户聊天 ID
 	UserID       int64    // 用户 ID（Telegram 用户 ID）
 	Messages     []int    // 交互消息 ID 列表
+	LastMsgID    int      // 最后用户消息 ID（用于回复）
 }
 
 // NewBot 初始化 Telegram 机器人
@@ -48,12 +46,10 @@ func NewBot(token string) (*Bot, error) {
 
 	logger := logrus.New()
 	return &Bot{
-		bot:         bot,
-		storage:     redisStorage,
-		logger:      logger,
-		httpClient:  &http.Client{Timeout: 10 * time.Second},
-		servicesAPI: "http://external-api/services",   // 需替换为实际地址
-		environsAPI: "http://external-api/environments", // 需替换为实际地址
+		bot:        bot,
+		storage:    redisStorage,
+		logger:     logger,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}, nil
 }
 
@@ -73,104 +69,34 @@ func (b *Bot) Start() {
 	}
 }
 
-// fetchServices 从外部 API 获取服务列表并去重存储
-func (b *Bot) fetchServices() ([]string, error) {
-	resp, err := b.httpClient.Get(b.servicesAPI)
-	if err != nil {
-		b.logger.Errorf("获取服务列表失败: %v", err)
-		return nil, err
+// getServices 从 Redis 获取服务列表
+func (b *Bot) getServices() ([]string, error) {
+	data, err := b.storage.Get("services")
+	if err != nil || data == "" {
+		b.logger.Warn("从 Redis 获取服务列表失败，无数据")
+		return nil, fmt.Errorf("服务列表未初始化，请等待外部服务推送")
 	}
-	defer resp.Body.Close()
-
 	var services []string
-	if err := json.NewDecoder(resp.Body).Decode(&services); err != nil {
+	if err := json.Unmarshal([]byte(data), &services); err != nil {
 		b.logger.Errorf("解析服务列表失败: %v", err)
 		return nil, err
 	}
-
-	// 去重
-	uniqueServices := make(map[string]bool)
-	for _, svc := range services {
-		uniqueServices[strings.ToUpper(svc)] = true
-	}
-	result := make([]string, 0, len(uniqueServices))
-	for svc := range uniqueServices {
-		result = append(result, svc)
-	}
-	sort.Strings(result)
-
-	// 存储到 Redis
-	data, _ := json.Marshal(result)
-	b.storage.Set("services", string(data))
-	b.logger.Infof("存储服务列表: %v", result)
-	return result, nil
+	return services, nil
 }
 
-// fetchEnvironments 从外部 API 获取环境列表并去重存储
-func (b *Bot) fetchEnvironments() ([]string, error) {
-	resp, err := b.httpClient.Get(b.environsAPI)
-	if err != nil {
-		b.logger.Errorf("获取环境列表失败: %v", err)
-		return nil, err
+// getEnvironments 从 Redis 获取环境列表
+func (b *Bot) getEnvironments() ([]string, error) {
+	data, err := b.storage.Get("environments")
+	if err != nil || data == "" {
+		b.logger.Warn("从 Redis 获取环境列表失败，无数据")
+		return nil, fmt.Errorf("环境列表未初始化，请等待外部服务推送")
 	}
-	defer resp.Body.Close()
-
 	var envs []string
-	if err := json.NewDecoder(resp.Body).Decode(&envs); err != nil {
+	if err := json.Unmarshal([]byte(data), &envs); err != nil {
 		b.logger.Errorf("解析环境列表失败: %v", err)
 		return nil, err
 	}
-
-	// 去重
-	uniqueEnvs := make(map[string]bool)
-	for _, env := range envs {
-		uniqueEnvs[strings.ToUpper(env)] = true
-	}
-	result := make([]string, 0, len(uniqueEnvs))
-	for env := range uniqueEnvs {
-		result = append(result, env)
-	}
-	sort.Strings(result)
-
-	// 存储到 Redis
-	data, _ := json.Marshal(result)
-	b.storage.Set("environments", string(data))
-	b.logger.Infof("存储环境列表: %v", result)
-	return result, nil
-}
-
-// getServices 从 Redis 获取服务列表，失败则从 API 刷新
-func (b *Bot) getServices() []string {
-	data, err := b.storage.Get("services")
-	if err != nil || data == "" {
-		b.logger.Warn("从 Redis 获取服务列表失败，尝试从 API 刷新")
-		services, err := b.fetchServices()
-		if err != nil {
-			b.logger.Errorf("刷新服务列表失败: %v", err)
-			return []string{"ServiceA", "ServiceB", "ServiceC"} // 回退默认值
-		}
-		return services
-	}
-	var services []string
-	json.Unmarshal([]byte(data), &services)
-	return services
-}
-
-// getEnvironments 从 Redis 获取环境列表，失败则从 API 刷新
-func (b *Bot) getEnvironments() []string {
-	data, err := b.storage.Get("environments")
-	if err != nil || data == "" {
-		b.logger.Warn("从 Redis 获取环境列表失败，尝试从 API 刷新")
-		envs, err := b.fetchEnvironments()
-		if err != nil {
-			b.logger.Errorf("刷新环境列表失败: %v", err)
-			return []string{"Dev", "Test", "Prod"} // 回退默认值
-		}
-		return envs
-	}
-	var envs []string
-	json.Unmarshal([]byte(data), &envs)
-	return envs
+	return envs, nil
 }
 
 // handleMessage 处理用户文本输入
@@ -198,6 +124,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		if b.isVersionUnique(state.Service, msg.Text) {
 			state.Version = msg.Text
 			state.Step = 4
+			state.LastMsgID = msg.MessageID // 记录版本输入消息 ID
 			b.SaveState(chatID, state)
 			b.showConfirmation(chatID, &state)
 		} else {
@@ -211,11 +138,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 // startInteraction 开始交互流程，显示服务选择弹窗
 func (b *Bot) startInteraction(chatID, userID int64) {
-	b.logger.Infof("用户 %d 开始交互流程", chatID)
-	// 刷新数据
-	b.fetchServices()
-	b.fetchEnvironments()
-
+	b.logger.Infof("用户 %d (UserID: %d) 开始交互流程", chatID, userID)
 	// 初始化用户状态
 	state := UserState{
 		Step:   1,
@@ -230,7 +153,14 @@ func (b *Bot) startInteraction(chatID, userID int64) {
 
 // showServiceSelection 显示服务选择弹窗
 func (b *Bot) showServiceSelection(chatID int64, state *UserState) {
-	services := b.getServices()
+	services, err := b.getServices()
+	if err != nil {
+		b.logger.Warnf("用户 %d 获取服务列表失败: %v", chatID, err)
+		b.SendMessage(chatID, err.Error(), nil)
+		b.deleteState(chatID)
+		return
+	}
+
 	cols := 3
 	if len(services) < cols {
 		cols = len(services)
@@ -286,7 +216,14 @@ func (b *Bot) showServiceSelection(chatID int64, state *UserState) {
 
 // showEnvironmentSelection 显示环境选择弹窗
 func (b *Bot) showEnvironmentSelection(chatID int64, state *UserState) {
-	environments := b.getEnvironments()
+	environments, err := b.getEnvironments()
+	if err != nil {
+		b.logger.Warnf("用户 %d 获取环境列表失败: %v", chatID, err)
+		b.SendMessage(chatID, err.Error(), nil)
+		b.deleteState(chatID)
+		return
+	}
+
 	cols := 3
 	if len(environments) < cols {
 		cols = len(environments)
@@ -350,10 +287,22 @@ func (b *Bot) showConfirmation(chatID int64, state *UserState) {
 		lastMsgID := state.Messages[len(state.Messages)-1]
 		editMsg := tgbotapi.NewEditMessageText(chatID, lastMsgID, msgText)
 		editMsg.ReplyMarkup = &keyboard
+		editMsg.ReplyToMessageID = state.LastMsgID // 回复版本输入消息
 		var err error
 		sentMsg, err = b.bot.Send(editMsg)
 		if err != nil {
 			b.logger.Errorf("编辑确认消息失败，用户 %d: %v", chatID, err)
+			// 回退到发送新消息
+			msg := tgbotapi.NewMessage(chatID, msgText)
+			msg.ReplyMarkup = keyboard
+			msg.ReplyToMessageID = state.LastMsgID
+			sentMsg, err = b.bot.Send(msg)
+			if err != nil {
+				b.logger.Errorf("发送确认消息失败，用户 %d: %v", chatID, err)
+			} else {
+				state.Messages = append(state.Messages, sentMsg.MessageID)
+				b.SaveState(chatID, *state)
+			}
 		} else {
 			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
 			b.SaveState(chatID, *state)
@@ -361,6 +310,7 @@ func (b *Bot) showConfirmation(chatID int64, state *UserState) {
 	} else {
 		msg := tgbotapi.NewMessage(chatID, msgText)
 		msg.ReplyMarkup = keyboard
+		msg.ReplyToMessageID = state.LastMsgID // 回复版本输入消息
 		var err error
 		sentMsg, err = b.bot.Send(msg)
 		if err != nil {
@@ -404,6 +354,20 @@ func (b *Bot) askContinue(chatID int64, state *UserState) {
 	}
 }
 
+// deleteMessages 删除所有交互消息
+func (b *Bot) deleteMessages(chatID int64, state *UserState) {
+	for _, msgID := range state.Messages {
+		deleteMsg := tgbotapi.NewDeleteMessage(chatID, msgID)
+		if _, err := b.bot.Request(deleteMsg); err != nil {
+			b.logger.Errorf("删除消息 %d 失败，用户 %d: %v", msgID, chatID, err)
+		} else {
+			b.logger.Infof("删除消息 %d 成功，用户 %d", msgID, chatID)
+		}
+	}
+	state.Messages = nil
+	b.SaveState(chatID, *state)
+}
+
 // handleCallback 处理回调查询
 func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	chatID := query.Message.Chat.ID
@@ -435,6 +399,7 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 			}
 		} else if data == "cancel" {
 			b.logger.Infof("用户 %d 取消服务选择，会话关闭", chatID)
+			b.deleteMessages(chatID, &state)
 			b.SendMessage(chatID, "会话已关闭", nil)
 			b.deleteState(chatID)
 		}
@@ -459,6 +424,7 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 			}
 		} else if data == "cancel" {
 			b.logger.Infof("用户 %d 取消环境选择，会话关闭", chatID)
+			b.deleteMessages(chatID, &state)
 			b.SendMessage(chatID, "会话已关闭", nil)
 			b.deleteState(chatID)
 		}
@@ -466,21 +432,25 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 		if data == "confirm_yes" {
 			b.logger.Infof("用户 %d 确认提交数据: 服务=%s, 环境=%v, 版本=%s", chatID, state.Service, state.Environments, state.Version)
 			b.persistData(state)
+			b.deleteMessages(chatID, &state) // 提交后清理消息
 			b.SendMessage(chatID, "数据提交成功！", nil)
 			state.Step = 5
 			b.SaveState(chatID, state)
 			b.askContinue(chatID, &state)
 		} else if data == "confirm_no" {
 			b.logger.Infof("用户 %d 取消数据提交，会话关闭", chatID)
+			b.deleteMessages(chatID, &state)
 			b.SendMessage(chatID, "会话已关闭", nil)
 			b.deleteState(chatID)
 		}
 	case 5: // 是否继续
 		if data == "restart_yes" {
 			b.logger.Infof("用户 %d 选择继续提交，重新开始交互", chatID)
+			b.deleteMessages(chatID, &state)
 			b.startInteraction(chatID, state.UserID)
 		} else if data == "restart_no" {
 			b.logger.Infof("用户 %d 选择结束交互，会话关闭", chatID)
+			b.deleteMessages(chatID, &state)
 			b.SendMessage(chatID, "会话已关闭", nil)
 			b.deleteState(chatID)
 		}
@@ -520,7 +490,7 @@ func (b *Bot) SaveState(chatID int64, state UserState) {
 
 // getState 从 Redis 获取用户状态
 func (b *Bot) getState(chatID int64) (UserState, error) {
-	data, err := b.storage.Get(fmt.Sprintf("user:%d", chatID),)
+	data, err := b.storage.Get(fmt.Sprintf("user:%d", chatID))
 	if err != nil {
 		b.logger.Errorf("获取用户 %d 状态失败: %v", chatID, err)
 		return UserState{}, err
