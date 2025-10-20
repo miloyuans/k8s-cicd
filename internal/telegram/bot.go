@@ -15,7 +15,6 @@ import (
 
 	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"k8s-cicd/internal/config"
-	"k8s-cicd/internal/dialog"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/types"
@@ -29,7 +28,6 @@ var (
 )
 
 func StartBot(cfg *config.Config, q *queue.Queue) {
-	dialog.SetTaskQueue(q)
 	bots = make(map[string]*tgbotapi.BotAPI)
 	compiledKeywords = make(map[string][]*regexp.Regexp)
 
@@ -100,11 +98,11 @@ func StartBot(cfg *config.Config, q *queue.Queue) {
 		}
 		bots[service] = bot
 		log.Printf("Started bot for service %s", service)
-		go handleBot(bot, cfg, service)
+		go handleBot(bot, cfg, service, q)
 	}
 }
 
-func GetBot(service string) (*tgbotapi.BotAPI, error) {
+func GetBot(service string) (BotInterface, error) {
 	bot, ok := bots[service]
 	if !ok {
 		return nil, fmt.Errorf("no bot configured for service %s", service)
@@ -112,7 +110,7 @@ func GetBot(service string) (*tgbotapi.BotAPI, error) {
 	return bot, nil
 }
 
-func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
+func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string, q *queue.Queue) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 	updates := bot.GetUpdatesChan(u)
@@ -135,7 +133,8 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 			for _, trigger := range cfg.TriggerKeywords {
 				if text == trigger {
 					log.Printf("User %d triggered dialog via keyword %s for service %s in chat %d", userID, trigger, service, chatID)
-					dialog.StartDialog(userID, chatID, service, cfg, userName)
+					// Pass the bot instance to StartDialog
+					dialog.StartDialog(userID, chatID, service, cfg, userName, bot)
 					triggered = true
 					break
 				}
@@ -148,7 +147,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 			for _, cancel := range cfg.CancelKeywords {
 				if text == cancel {
 					log.Printf("User %d requested to cancel dialog in chat %d", userID, chatID)
-					dialog.CancelDialog(userID, chatID, cfg)
+					dialog.CancelDialog(userID, chatID, cfg, bot)
 					canceled = true
 					break
 				}
@@ -159,7 +158,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 
 			if dialog.IsDialogActive(userID) {
 				log.Printf("Processing dialog input for user %d in chat %d: %s", userID, chatID, text)
-				dialog.ProcessDialog(userID, chatID, text, cfg)
+				dialog.ProcessDialog(userID, chatID, text, cfg, bot)
 				continue
 			}
 
@@ -176,7 +175,7 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				id := strings.TrimPrefix(callbackData, "confirm_api:")
 				if tasks, ok := dialog.PendingConfirmations.Load(id); ok {
 					for _, t := range tasks.([]types.DeployRequest) {
-						queue.GlobalTaskQueue.ConfirmTask(t)
+						q.ConfirmTask(t)
 					}
 					dialog.PendingConfirmations.Delete(id)
 					edit := tgbotapi.NewEditMessageText(chatID, messageID, update.CallbackQuery.Message.Text+"\n\n已确认 / Confirmed")
@@ -187,14 +186,10 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 				dialog.PendingConfirmations.Delete(id)
 				edit := tgbotapi.NewEditMessageText(chatID, messageID, update.CallbackQuery.Message.Text+"\n\n已取消 / Cancelled")
 				bot.Send(edit)
-			} else if strings.HasPrefix(callbackData, "confirm_dialog:") || strings.HasPrefix(callbackData, "cancel_dialog:") {
-				dialog.ProcessDialog(userID, chatID, callbackData, cfg)
-			} else if dialog.IsDialogActive(userID) {
-				// Handle dialog-specific callbacks
-				if strings.HasPrefix(callbackData, "service:") || strings.HasPrefix(callbackData, "env:") ||
-					callbackData == "env_done" || callbackData == "continue_yes" || callbackData == "continue_no" {
-					dialog.ProcessDialog(userID, chatID, callbackData, cfg)
-				}
+			} else if strings.HasPrefix(callbackData, "confirm_dialog:") || strings.HasPrefix(callbackData, "cancel_dialog:") ||
+				strings.HasPrefix(callbackData, "service:") || strings.HasPrefix(callbackData, "env:") ||
+				callbackData == "env_done" || callbackData == "continue_yes" || callbackData == "continue_no" {
+				dialog.ProcessDialog(userID, chatID, callbackData, cfg, bot)
 			}
 		}
 	}
@@ -320,7 +315,7 @@ func NotifyDeployTeam(cfg *config.Config, result *storage.DeployResult) error {
 	return fmt.Errorf("failed to send deploy notification after %d attempts", maxRetries)
 }
 
-func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) error {
+func sendMessage(bot BotInterface, chatID int64, text string) error {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "HTML"
 	_, err := bot.Send(msg)
@@ -364,7 +359,7 @@ func logToFile(message string, result *storage.DeployResult) error {
 		log.Printf("Failed to marshal notification failure log: %v", err)
 		return err
 	}
-	if _, err := f.WriteString(string(data) + "\n"); err != nil {
+	if _, err := f.WriteString(string(data)+"\n"); err != nil {
 		log.Printf("Failed to write to notification failure log file %s: %v", fileName, err)
 		return err
 	}
