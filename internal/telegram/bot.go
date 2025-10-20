@@ -53,20 +53,38 @@ func (b *Bot) Start() {
 
 	updates := b.bot.GetUpdatesChan(u)
 	for update := range updates {
-		if update.Message != nil && update.Message.IsCommand() {
-			b.handleCommand(update.Message)
+		if update.Message != nil {
+			b.handleMessage(update.Message)
 		} else if update.CallbackQuery != nil {
 			b.handleCallback(update.CallbackQuery)
-		} else if update.Message != nil {
-			b.handleMessage(update.Message)
 		}
 	}
 }
 
-// handleCommand 处理 Telegram 命令
-func (b *Bot) handleCommand(msg *tgbotapi.Message) {
-	if msg.Command() == "start" {
-		b.startInteraction(msg.Chat.ID)
+// handleMessage 处理用户文本输入
+func (b *Bot) handleMessage(msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	state, err := b.getState(chatID)
+	if err != nil {
+		// 如果没有状态，检查是否输入 "ai" 触发交互
+		if strings.ToLower(msg.Text) == "ai" {
+			b.startInteraction(chatID)
+			return
+		}
+		b.logger.Errorf("获取用户状态失败: %v", err)
+		return
+	}
+
+	switch state.Step {
+	case 3: // 输入版本号
+		if b.isVersionUnique(msg.Text) {
+			state.Version = msg.Text
+			state.Step = 4
+			b.SaveState(chatID, state)
+			b.showConfirmation(chatID, state)
+		} else {
+			b.SendMessage(chatID, "版本号已存在，请输入唯一版本号：", nil)
+		}
 	}
 }
 
@@ -86,7 +104,7 @@ func (b *Bot) startInteraction(chatID int64) {
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(svc, fmt.Sprintf("service:%s", svc)))
 	}
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(buttons...))
-	b.SendMessage(chatID, "请选择服务：", &keyboard)
+	b.SendMessage(chatID, "请选择服务（单选）：", &keyboard)
 }
 
 // handleCallback 处理回调查询
@@ -105,9 +123,17 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 			state.Service = strings.TrimPrefix(data, "service:")
 			state.Step = 2
 			b.SaveState(chatID, state)
-			b.showEnvironmentSelection(chatID)
+			keyboard := b.CreateYesNoKeyboard("service_confirm")
+			b.SendMessage(chatID, fmt.Sprintf("您选择了服务：%s，确认继续？", state.Service), &keyboard)
 		}
-	case 2: // 环境选择
+	case 2: // 服务确认
+		if data == "service_confirm_yes" {
+			b.showEnvironmentSelection(chatID)
+		} else if data == "service_confirm_no" {
+			b.SendMessage(chatID, "会话已关闭", nil)
+			b.deleteState(chatID)
+		}
+	case 3: // 环境选择
 		if strings.HasPrefix(data, "env:") {
 			env := strings.TrimPrefix(data, "env:")
 			if !contains(state.Environments, env) {
@@ -117,23 +143,31 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 			b.showEnvironmentSelection(chatID)
 		} else if data == "env_done" {
 			if len(state.Environments) > 0 {
-				state.Step = 3
-				b.SaveState(chatID, state)
-				b.SendMessage(chatID, "请输入版本号：", nil)
+				keyboard := b.CreateYesNoKeyboard("env_confirm")
+				b.SendMessage(chatID, fmt.Sprintf("您选择了环境：%s，确认继续？", strings.Join(state.Environments, ", ")), &keyboard)
 			} else {
 				b.SendMessage(chatID, "请至少选择一个环境！", nil)
 			}
 		}
-	case 4: // 确认提交
+	case 4: // 环境确认
+		if data == "env_confirm_yes" {
+			state.Step = 5
+			b.SaveState(chatID, state)
+			b.SendMessage(chatID, "请输入版本号：", nil)
+		} else if data == "env_confirm_no" {
+			b.SendMessage(chatID, "会话已关闭", nil)
+			b.deleteState(chatID)
+		}
+	case 5: // 确认提交
 		if data == "confirm_yes" {
 			b.persistData(state)
 			b.SendMessage(chatID, "数据提交成功！", nil)
 			b.askContinue(chatID)
 		} else if data == "confirm_no" {
-			keyboard := b.CreateYesNoKeyboard("restart")
-			b.SendMessage(chatID, "是否重新开始交互？", &keyboard)
+			b.SendMessage(chatID, "会话已关闭", nil)
+			b.deleteState(chatID)
 		}
-	case 5: // 是否继续
+	case 6: // 是否继续
 		if data == "restart_yes" {
 			b.startInteraction(chatID)
 		} else if data == "restart_no" {
@@ -143,23 +177,6 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	}
 
 	b.bot.Request(tgbotapi.NewCallback(query.ID, ""))
-}
-
-// handleMessage 处理用户文本输入
-func (b *Bot) handleMessage(msg *tgbotapi.Message) {
-	chatID := msg.Chat.ID
-	state, err := b.getState(chatID)
-	if err != nil {
-		b.logger.Errorf("获取用户状态失败: %v", err)
-		return
-	}
-
-	if state.Step == 3 {
-		state.Version = msg.Text
-		state.Step = 4
-		b.SaveState(chatID, state)
-		b.showConfirmation(chatID, state)
-	}
 }
 
 // showEnvironmentSelection 显示环境选择弹窗
@@ -185,7 +202,7 @@ func (b *Bot) showConfirmation(chatID int64, state UserState) {
 // askContinue 询问是否继续发布
 func (b *Bot) askContinue(chatID int64) {
 	keyboard := b.CreateYesNoKeyboard("restart")
-	b.SendMessage(chatID, "是否继续发布？", &keyboard)
+	b.SendMessage(chatID, "是否继续提交数据？", &keyboard)
 }
 
 // CreateYesNoKeyboard 创建是/否键盘
@@ -222,7 +239,9 @@ func (b *Bot) getState(chatID int64) (UserState, error) {
 		return UserState{}, err
 	}
 	var state UserState
-	json.Unmarshal([]byte(data), &state)
+	if err := json.Unmarshal([]byte(data), &state); err != nil {
+		return UserState{}, err
+	}
 	return state, nil
 }
 
@@ -235,6 +254,25 @@ func (b *Bot) deleteState(chatID int64) {
 func (b *Bot) persistData(state UserState) {
 	data, _ := json.Marshal(state)
 	b.storage.Push("deploy_queue", string(data))
+}
+
+// isVersionUnique 检查版本号是否唯一
+func (b *Bot) isVersionUnique(version string) bool {
+	items, err := b.storage.List("deploy_queue")
+	if err != nil {
+		b.logger.Errorf("检查版本号唯一性失败: %v", err)
+		return true // 假设错误时允许继续
+	}
+	for _, item := range items {
+		var state UserState
+		if err := json.Unmarshal([]byte(item), &state); err != nil {
+			continue
+		}
+		if state.Version == version {
+			return false
+		}
+	}
+	return true
 }
 
 // contains 检查字符串是否在切片中
