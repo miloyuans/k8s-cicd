@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"k8s-cicd/internal/storage"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -126,7 +125,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			state.Version = msg.Text
 			state.Step = 4
 			state.LastMsgID = msg.MessageID // 记录版本输入消息 ID
-			b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+			b.SaveState(fmt.Sprintf("user:%d", chatID), state)
 			b.showConfirmation(chatID, &state)
 		} else {
 			b.logger.Warnf("用户 %d 输入的版本号 %s 在服务 %s 下已存在", chatID, msg.Text, state.Service)
@@ -366,7 +365,7 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 		if strings.HasPrefix(data, "service:") {
 			state.Service = strings.TrimPrefix(data, "service:")
 			b.logger.Infof("用户 %d 选择服务: %s", chatID, state.Service)
-			b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+			b.SaveState(fmt.Sprintf("user:%d", chatID), state)
 			b.showServiceSelection(chatID, &state)
 		} else if data == "next_service" {
 			if state.Service == "" {
@@ -375,7 +374,7 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 			} else {
 				b.logger.Infof("用户 %d 确认服务选择，继续到环境选择", chatID)
 				state.Step = 2
-				b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+				b.SaveState(fmt.Sprintf("user:%d", chatID), state)
 				b.showEnvironmentSelection(chatID, &state)
 			}
 		} else if data == "cancel" {
@@ -390,7 +389,7 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 			if !contains(state.Environments, env) {
 				state.Environments = append(state.Environments, env)
 				b.logger.Infof("用户 %d 选择环境: %s", chatID, env)
-				b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+				b.SaveState(fmt.Sprintf("user:%d", chatID), state)
 			}
 			b.showEnvironmentSelection(chatID, &state)
 		} else if data == "next_env" {
@@ -400,7 +399,7 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 			} else {
 				b.logger.Infof("用户 %d 完成环境选择: %v", chatID, state.Environments)
 				state.Step = 3
-				b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+				b.SaveState(fmt.Sprintf("user:%d", chatID), state)
 				b.SendMessage(chatID, "请输入版本号：", nil)
 			}
 		} else if data == "cancel" {
@@ -416,7 +415,7 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 			b.deleteMessages(chatID, &state)
 			b.SendMessage(chatID, "数据提交成功！", nil)
 			state.Step = 5
-			b.SaveState(fmt.Sprintf("user:%d", chatID), *state)
+			b.SaveState(fmt.Sprintf("user:%d", chatID), state)
 			b.askContinue(chatID, &state)
 		} else if data == "confirm_no" {
 			b.logger.Infof("用户 %d 取消数据提交，会话关闭", chatID)
