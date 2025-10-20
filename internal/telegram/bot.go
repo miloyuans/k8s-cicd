@@ -77,7 +77,7 @@ func (b *Bot) startInteraction(chatID int64) {
 		Step:   1,
 		ChatID: chatID,
 	}
-	b.saveState(chatID, state)
+	b.SaveState(chatID, state)
 
 	// 服务选择弹窗
 	services := []string{"ServiceA", "ServiceB", "ServiceC"}
@@ -86,7 +86,7 @@ func (b *Bot) startInteraction(chatID int64) {
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(svc, fmt.Sprintf("service:%s", svc)))
 	}
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(buttons...))
-	b.sendMessage(chatID, "请选择服务：", &keyboard)
+	b.SendMessage(chatID, "请选择服务：", &keyboard)
 }
 
 // handleCallback 处理回调查询
@@ -104,7 +104,7 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 		if strings.HasPrefix(data, "service:") {
 			state.Service = strings.TrimPrefix(data, "service:")
 			state.Step = 2
-			b.saveState(chatID, state)
+			b.SaveState(chatID, state)
 			b.showEnvironmentSelection(chatID)
 		}
 	case 2: // 环境选择
@@ -112,32 +112,32 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 			env := strings.TrimPrefix(data, "env:")
 			if !contains(state.Environments, env) {
 				state.Environments = append(state.Environments, env)
-				b.saveState(chatID, state)
+				b.SaveState(chatID, state)
 			}
 			b.showEnvironmentSelection(chatID)
 		} else if data == "env_done" {
 			if len(state.Environments) > 0 {
 				state.Step = 3
-				b.saveState(chatID, state)
-				b.sendMessage(chatID, "请输入版本号：", nil)
+				b.SaveState(chatID, state)
+				b.SendMessage(chatID, "请输入版本号：", nil)
 			} else {
-				b.sendMessage(chatID, "请至少选择一个环境！", nil)
+				b.SendMessage(chatID, "请至少选择一个环境！", nil)
 			}
 		}
 	case 4: // 确认提交
 		if data == "confirm_yes" {
 			b.persistData(state)
-			b.sendMessage(chatID, "数据提交成功！", nil)
+			b.SendMessage(chatID, "数据提交成功！", nil)
 			b.askContinue(chatID)
 		} else if data == "confirm_no" {
-			keyboard := b.createYesNoKeyboard("restart")
-			b.sendMessage(chatID, "是否重新开始交互？", &keyboard) // 修复：传递指针
+			keyboard := b.CreateYesNoKeyboard("restart")
+			b.SendMessage(chatID, "是否重新开始交互？", &keyboard)
 		}
 	case 5: // 是否继续
 		if data == "restart_yes" {
 			b.startInteraction(chatID)
 		} else if data == "restart_no" {
-			b.sendMessage(chatID, "会话已关闭", nil)
+			b.SendMessage(chatID, "会话已关闭", nil)
 			b.deleteState(chatID)
 		}
 	}
@@ -157,7 +157,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	if state.Step == 3 {
 		state.Version = msg.Text
 		state.Step = 4
-		b.saveState(chatID, state)
+		b.SaveState(chatID, state)
 		b.showConfirmation(chatID, state)
 	}
 }
@@ -171,25 +171,25 @@ func (b *Bot) showEnvironmentSelection(chatID int64) {
 	}
 	buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("完成", "env_done"))
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(buttons...))
-	b.sendMessage(chatID, "请选择环境（可多选）：", &keyboard)
+	b.SendMessage(chatID, "请选择环境（可多选）：", &keyboard)
 }
 
 // showConfirmation 显示数据确认弹窗
 func (b *Bot) showConfirmation(chatID int64, state UserState) {
 	msg := fmt.Sprintf("请确认以下信息：\n服务: %s\n环境: %s\n版本: %s",
 		state.Service, strings.Join(state.Environments, ", "), state.Version)
-	keyboard := b.createYesNoKeyboard("confirm")
-	b.sendMessage(chatID, msg, &keyboard)
+	keyboard := b.CreateYesNoKeyboard("confirm")
+	b.SendMessage(chatID, msg, &keyboard)
 }
 
 // askContinue 询问是否继续发布
 func (b *Bot) askContinue(chatID int64) {
-	keyboard := b.createYesNoKeyboard("restart")
-	b.sendMessage(chatID, "是否继续发布？", &keyboard) // 修复：传递指针
+	keyboard := b.CreateYesNoKeyboard("restart")
+	b.SendMessage(chatID, "是否继续发布？", &keyboard)
 }
 
-// createYesNoKeyboard 创建是/否键盘
-func (b *Bot) createYesNoKeyboard(prefix string) tgbotapi.InlineKeyboardMarkup {
+// CreateYesNoKeyboard 创建是/否键盘
+func (b *Bot) CreateYesNoKeyboard(prefix string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("是", prefix+"_yes"),
@@ -198,19 +198,19 @@ func (b *Bot) createYesNoKeyboard(prefix string) tgbotapi.InlineKeyboardMarkup {
 	)
 }
 
-// sendMessage 发送 Telegram 消息
-func (b *Bot) sendMessage(chatID int64, text string, keyboard *tgbotapi.InlineKeyboardMarkup) {
+// SendMessage 发送 Telegram 消息
+func (b *Bot) SendMessage(chatID int64, text string, keyboard *tgbotapi.InlineKeyboardMarkup) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	if keyboard != nil {
-		msg.ReplyMarkup = *keyboard // 直接使用指针
+		msg.ReplyMarkup = *keyboard
 	}
 	if _, err := b.bot.Send(msg); err != nil {
 		b.logger.Errorf("发送消息失败: %v", err)
 	}
 }
 
-// saveState 保存用户状态到 Redis
-func (b *Bot) saveState(chatID int64, state UserState) {
+// SaveState 保存用户状态到 Redis
+func (b *Bot) SaveState(chatID int64, state UserState) {
 	data, _ := json.Marshal(state)
 	b.storage.Set(fmt.Sprintf("user:%d", chatID), string(data))
 }

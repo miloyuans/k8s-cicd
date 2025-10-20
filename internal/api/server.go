@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
 	"net/http"
@@ -65,15 +66,15 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	// 构造 Telegram 确认消息
 	state := telegram.UserState{
-		Service:     req.Service,
+		Service:      req.Service,
 		Environments: req.Environments,
-		Version:     req.Version,
-		ChatID:      123456789, // 假设的 ChatID，需根据实际情况获取
-		Step:        4,
+		Version:      req.Version,
+		ChatID:       123456789, // 假设的 ChatID，需根据实际情况获取
+		Step:         4,
 	}
 	s.bot.SaveState(state.ChatID, state)
 	msg := fmt.Sprintf("请确认以下信息：\n服务: %s\n环境: %s\n版本: %s\n用户: %s",
-		req.Service, req.Environments, req.Version, req.User)
+		req.Service, strings.Join(req.Environments, ", "), req.Version, req.User)
 	keyboard := s.bot.CreateYesNoKeyboard("confirm")
 	s.bot.SendMessage(state.ChatID, msg, &keyboard)
 
