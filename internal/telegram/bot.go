@@ -18,7 +18,6 @@ import (
 	"k8s-cicd/internal/dialog"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
-	"k8s-cicd/internal/types"
 )
 
 const (
@@ -248,7 +247,7 @@ func NotifyCompletion(cfg *config.Config, result *storage.DeployResult) error {
 			log.Printf("Successfully sent completion notification for service %s in env %s (success: %v)", result.Request.Service, result.Request.Env, result.Success)
 			return nil
 		}
-		if apiErr, ok := err.(tgbotapi.Error); ok && apiErr.ErrorCode == 429 {
+		if apiErr, ok := err.(tgbotapi.Error); ok && apiErr.Code == 429 {
 			retryAfter := RetryBaseDelay
 			if apiErr.RetryAfter > 0 {
 				retryAfter = time.Duration(apiErr.RetryAfter) * time.Second
@@ -319,7 +318,7 @@ func NotifyDeployTeam(cfg *config.Config, result *storage.DeployResult) error {
 			log.Printf("Successfully sent deploy notification for failed deployment of service %s in env %s", result.Request.Service, result.Request.Env)
 			return nil
 		}
-		if apiErr, ok := err.(tgbotapi.Error); ok && apiErr.ErrorCode == 429 {
+		if apiErr, ok := err.(tgbotapi.Error); ok && apiErr.Code == 429 {
 			retryAfter := RetryBaseDelay
 			if apiErr.RetryAfter > 0 {
 				retryAfter = time.Duration(apiErr.RetryAfter) * time.Second
