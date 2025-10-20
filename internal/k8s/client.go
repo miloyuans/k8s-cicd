@@ -15,8 +15,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -265,23 +263,15 @@ func (c *Client) RollbackDeployment(ctx context.Context, service, namespace stri
 	}
 	dep.Spec.Template.Spec.Containers[0].Image = oldImage
 
-	history, err := c.clientset.AppsV1().Deployments(namespace).GetScale(ctx, service, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get deployment history: %v", err)
-	}
-	var stableRev int64
-	for _, rev := range history.Status.Replicas {
-		// 假设逻辑找到stable revision
-		stableRev = rev // 简化，需要实际逻辑
-	}
-	dep.Annotations["deployment.kubernetes.io/revision"] = fmt.Sprintf("%d", stableRev)
+	// Clear the previous-image annotation after rollback
+	delete(dep.Annotations, "cicd/previous-image")
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		_, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
 		if err == nil {
 			break
 		}
-		log.Printf("Rollback failed for service %s to revision %d (attempt %d/%d): %v", service, stableRev, attempt, maxRetries, err)
+		log.Printf("Rollback failed for service %s to image %s (attempt %d/%d): %v", service, oldImage, attempt, maxRetries, err)
 		if attempt < maxRetries {
 			time.Sleep(2 * time.Second)
 		}
@@ -289,7 +279,7 @@ func (c *Client) RollbackDeployment(ctx context.Context, service, namespace stri
 	if err != nil {
 		return fmt.Errorf("rollback failed after %d attempts: %v", maxRetries, err)
 	}
-	log.Printf("Successfully initiated rollback for service %s to revision %d", service, stableRev)
+	log.Printf("Successfully initiated rollback for service %s to image %s", service, oldImage)
 	return nil
 }
 
