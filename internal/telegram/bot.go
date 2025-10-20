@@ -374,8 +374,15 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	data := query.Data
 	b.logger.Infof("用户 %d 触发回调: %s", chatID, data)
 
+	// 尝试从交互状态获取
 	state, err := b.getState(chatID)
 	if err != nil {
+		// 尝试从部署状态获取
+		deployState, err := b.getState(fmt.Sprintf("deploy:%d", chatID))
+		if err == nil {
+			b.handleDeployCallback(query, &deployState)
+			return
+		}
 		b.logger.Errorf("获取用户 %d 状态失败: %v", chatID, err)
 		return
 	}
@@ -432,7 +439,7 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 		if data == "confirm_yes" {
 			b.logger.Infof("用户 %d 确认提交数据: 服务=%s, 环境=%v, 版本=%s", chatID, state.Service, state.Environments, state.Version)
 			b.persistData(state)
-			b.deleteMessages(chatID, &state) // 提交后清理消息
+			b.deleteMessages(chatID, &state)
 			b.SendMessage(chatID, "数据提交成功！", nil)
 			state.Step = 5
 			b.SaveState(chatID, state)
@@ -459,6 +466,42 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	b.bot.Request(tgbotapi.NewCallback(query.ID, ""))
 }
 
+// handleDeployCallback 处理 /deploy 接口的确认回调
+func (b *Bot) handleDeployCallback(query *tgbotapi.CallbackQuery, state *UserState) {
+	chatID := query.Message.Chat.ID
+	data := query.Data
+	b.logger.Infof("用户 %d 触发部署回调: %s", chatID, data)
+
+	if data == "deploy_confirm_yes" {
+		b.logger.Infof("用户 %d 确认部署数据: 服务=%s, 环境=%v, 版本=%s", chatID, state.Service, state.Environments, state.Version)
+		b.persistData(*state)
+		b.deleteMessages(chatID, state)
+		b.SendMessage(chatID, "部署数据提交成功！", nil)
+		b.deleteState(fmt.Sprintf("deploy:%d", chatID))
+	} else if data == "deploy_confirm_no" {
+		b.logger.Infof("用户 %d 取消部署数据提交", chatID)
+		b.deleteMessages(chatID, state)
+		b.SendMessage(chatID, "部署请求已取消", nil)
+		b.deleteState(fmt.Sprintf("deploy:%d", chatID))
+	}
+
+	b.bot.Request(tgbotapi.NewCallback(query.ID, ""))
+}
+
+// deleteMessages 删除所有交互消息
+func (b *Bot) deleteMessages(chatID int64, state *UserState) {
+	for _, msgID := range state.Messages {
+		deleteMsg := tgbotapi.NewDeleteMessage(chatID, msgID)
+		if _, err := b.bot.Request(deleteMsg); err != nil {
+			b.logger.Errorf("删除消息 %d 失败，用户 %d: %v", msgID, chatID, err)
+		} else {
+			b.logger.Infof("删除消息 %d 成功，用户 %d", msgID, chatID)
+		}
+	}
+	state.Messages = nil
+	b.SaveState(fmt.Sprintf("deploy:%d", chatID), *state)
+}
+
 // CreateYesNoKeyboard 创建是/否键盘
 func (b *Bot) CreateYesNoKeyboard(prefix string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
@@ -482,31 +525,31 @@ func (b *Bot) SendMessage(chatID int64, text string, keyboard *tgbotapi.InlineKe
 }
 
 // SaveState 保存用户状态到 Redis
-func (b *Bot) SaveState(chatID int64, state UserState) {
+func (b *Bot) SaveState(key string, state UserState) {
 	data, _ := json.Marshal(state)
-	b.storage.Set(fmt.Sprintf("user:%d", chatID), string(data))
-	b.logger.Infof("保存用户 %d 状态: %v", chatID, state)
+	b.storage.Set(key, string(data))
+	b.logger.Infof("保存用户状态 %s: %v", key, state)
 }
 
 // getState 从 Redis 获取用户状态
-func (b *Bot) getState(chatID int64) (UserState, error) {
-	data, err := b.storage.Get(fmt.Sprintf("user:%d", chatID))
+func (b *Bot) getState(key string) (UserState, error) {
+	data, err := b.storage.Get(key)
 	if err != nil {
-		b.logger.Errorf("获取用户 %d 状态失败: %v", chatID, err)
+		b.logger.Errorf("获取状态 %s 失败: %v", key, err)
 		return UserState{}, err
 	}
 	var state UserState
 	if err := json.Unmarshal([]byte(data), &state); err != nil {
-		b.logger.Errorf("解析用户 %d 状态失败: %v", chatID, err)
+		b.logger.Errorf("解析状态 %s 失败: %v", key, err)
 		return UserState{}, err
 	}
 	return state, nil
 }
 
 // deleteState 删除用户状态
-func (b *Bot) deleteState(chatID int64) {
-	b.storage.Delete(fmt.Sprintf("user:%d", chatID))
-	b.logger.Infof("删除用户 %d 状态", chatID)
+func (b *Bot) deleteState(key string) {
+	b.storage.Delete(key)
+	b.logger.Infof("删除状态 %s", key)
 }
 
 // persistData 持久化数据到 Redis 队列

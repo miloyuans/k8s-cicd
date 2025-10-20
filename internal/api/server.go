@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"k8s-cicd/internal/storage"
 	"k8s-cicd/internal/telegram"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -13,10 +15,11 @@ import (
 
 // Server 封装 HTTP 服务
 type Server struct {
-	Router  *http.ServeMux
-	storage *storage.RedisStorage
-	logger  *logrus.Logger
-	bot     *telegram.Bot
+	Router      *http.ServeMux
+	storage     *storage.RedisStorage
+	logger      *logrus.Logger
+	bot         *telegram.Bot
+	whitelistIPs []string // IP 白名单
 }
 
 // DeployRequest 定义部署请求结构
@@ -25,6 +28,14 @@ type DeployRequest struct {
 	Environments []string `json:"environments"`
 	Version      string   `json:"version"`
 	User         string   `json:"user"`
+	ChatID       int64    `json:"chat_id"` // 新增 ChatID 字段
+}
+
+// PushRequest 定义推送请求结构
+type PushRequest struct {
+	Services     []string `json:"services"`
+	Environments []string `json:"environments"`
+	Deployments  []DeployRequest `json:"deployments"`
 }
 
 // QueryRequest 定义查询请求结构
@@ -35,20 +46,71 @@ type QueryRequest struct {
 
 // NewServer 初始化 HTTP 服务
 func NewServer(redisAddr string) *Server {
-	storage, _ := storage.NewRedisStorage(redisAddr)
+	storage, err := storage.NewRedisStorage(redisAddr)
+	if err != nil {
+		logrus.Fatalf("初始化 Redis 失败: %v", err)
+	}
 	logger := logrus.New()
-	bot, _ := telegram.NewBot("your-telegram-bot-token") // 需替换为实际 Token
-
-	server := &Server{
-		Router:  http.NewServeMux(),
-		storage: storage,
-		logger:  logger,
-		bot:     bot,
+	bot, err := telegram.NewBot("your-telegram-bot-token") // 需替换为实际 Token
+	if err != nil {
+		logrus.Fatalf("初始化 Telegram 机器人失败: %v", err)
 	}
 
-	server.Router.HandleFunc("/deploy", server.handleDeploy)
-	server.Router.HandleFunc("/query", server.handleQuery)
+	// 解析白名单 IP
+	whitelist := os.Getenv("WHITELIST_IPS")
+	whitelistIPs := []string{}
+	if whitelist != "" {
+		whitelistIPs = strings.Split(whitelist, ",")
+	}
+
+	server := &Server{
+		Router:      http.NewServeMux(),
+		storage:     storage,
+		logger:      logger,
+		bot:         bot,
+		whitelistIPs: whitelistIPs,
+	}
+
+	// 注册路由，使用 IP 白名单中间件
+	server.Router.HandleFunc("/deploy", server.ipWhitelistMiddleware(server.handleDeploy))
+	server.Router.HandleFunc("/query", server.ipWhitelistMiddleware(server.handleQuery))
+	server.Router.HandleFunc("/push", server.ipWhitelistMiddleware(server.handlePush))
 	return server
+}
+
+// ipWhitelistMiddleware IP 白名单中间件
+func (s *Server) ipWhitelistMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if len(s.whitelistIPs) == 0 {
+			next(w, r)
+			return
+		}
+
+		clientIP := r.RemoteAddr
+		if strings.Contains(clientIP, ":") {
+			clientIP, _, _ = net.SplitHostPort(clientIP)
+		}
+
+		for _, allowed := range s.whitelistIPs {
+			if strings.Contains(allowed, "/") {
+				_, ipNet, err := net.ParseCIDR(allowed)
+				if err != nil {
+					s.logger.Errorf("解析 CIDR %s 失败: %v", allowed, err)
+					continue
+				}
+				if ipNet.Contains(net.ParseIP(clientIP)) {
+					next(w, r)
+					return
+				}
+			} else if allowed == clientIP {
+				next(w, r)
+				return
+			}
+		}
+
+		s.logger.Warnf("IP %s 不允许访问", clientIP)
+		http.Error(w, "IP 不在白名单内", http.StatusForbidden)
+	}
 }
 
 // handleDeploy 处理部署请求
@@ -60,8 +122,14 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	var req DeployRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.logger.Errorf("解析请求失败: %v", err)
+		s.logger.Errorf("解析部署请求失败: %v", err)
 		http.Error(w, "无效的请求数据", http.StatusBadRequest)
+		return
+	}
+
+	if req.ChatID == 0 {
+		s.logger.Errorf("部署请求缺少 ChatID")
+		http.Error(w, "缺少 ChatID", http.StatusBadRequest)
 		return
 	}
 
@@ -70,22 +138,76 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		Service:      req.Service,
 		Environments: req.Environments,
 		Version:      req.Version,
-		ChatID:       123456789, // 假设的 ChatID，需根据实际情况获取
+		ChatID:       req.ChatID,
+		UserID:       req.ChatID, // 假设 ChatID 即 UserID，实际需映射
 		Step:         4,
 	}
-	s.bot.SaveState(state.ChatID, state)
+	s.bot.SaveState(fmt.Sprintf("deploy:%d", state.ChatID), state)
 	msg := fmt.Sprintf("请确认以下信息：\n服务: %s\n环境: %s\n版本: %s\n用户: %s",
 		req.Service, strings.Join(req.Environments, ", "), req.Version, req.User)
-	keyboard := s.bot.CreateYesNoKeyboard("confirm")
+	keyboard := s.bot.CreateYesNoKeyboard("deploy_confirm")
 	s.bot.SendMessage(state.ChatID, msg, &keyboard)
 
-	// 等待 Telegram 确认结果（这里简化为直接存储，实际需等待回调）
-	data, _ := json.Marshal(req)
-	s.storage.Push("deploy_queue", string(data))
 	s.logger.Infof("收到部署请求: %v", req)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "请求已提交，等待 Telegram 确认"})
+}
+
+// handlePush 处理外部服务推送请求
+func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "仅支持 POST 方法", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req PushRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.Errorf("解析推送请求失败: %v", err)
+		http.Error(w, "无效的请求数据", http.StatusBadRequest)
+		return
+	}
+
+	// 去重并存储服务列表
+	if len(req.Services) > 0 {
+		uniqueServices := make(map[string]bool)
+		for _, svc := range req.Services {
+			uniqueServices[strings.ToUpper(svc)] = true
+		}
+		services := make([]string, 0, len(uniqueServices))
+		for svc := range uniqueServices {
+			services = append(services, svc)
+		}
+		sort.Strings(services)
+		data, _ := json.Marshal(services)
+		s.storage.Set("services", string(data))
+		s.logger.Infof("存储服务列表: %v", services)
+	}
+
+	// 去重并存储环境列表
+	if len(req.Environments) > 0 {
+		uniqueEnvs := make(map[string]bool)
+		for _, env := range req.Environments {
+			uniqueEnvs[strings.ToUpper(env)] = true
+		}
+		envs := make([]string, 0, len(uniqueEnvs))
+		for env := range uniqueEnvs {
+			envs = append(envs, env)
+		}
+		sort.Strings(envs)
+		data, _ := json.Marshal(envs)
+		s.storage.Set("environments", string(data))
+		s.logger.Infof("存储环境列表: %v", envs)
+	}
+
+	// 存储部署数据
+	for _, dep := range req.Deployments {
+		data, _ := json.Marshal(dep)
+		s.storage.Push("deploy_queue", string(data))
+		s.logger.Infof("推送部署数据: 服务=%s, 环境=%v, 版本=%s, 用户=%s", dep.Service, dep.Environments, dep.Version, dep.User)
+	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "请求已提交，等待确认"})
+	json.NewEncoder(w).Encode(map[string]string{"message": "数据推送成功"})
 }
 
 // handleQuery 处理查询请求
