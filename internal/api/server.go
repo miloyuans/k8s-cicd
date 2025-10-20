@@ -28,13 +28,13 @@ type DeployRequest struct {
 	Environments []string `json:"environments"`
 	Version      string   `json:"version"`
 	User         string   `json:"user"`
-	ChatID       int64    `json:"chat_id"` // 新增 ChatID 字段
+	ChatID       int64    `json:"chat_id"`
 }
 
 // PushRequest 定义推送请求结构
 type PushRequest struct {
-	Services     []string `json:"services"`
-	Environments []string `json:"environments"`
+	Services     []string        `json:"services"`
+	Environments []string        `json:"environments"`
 	Deployments  []DeployRequest `json:"deployments"`
 }
 
@@ -42,6 +42,15 @@ type PushRequest struct {
 type QueryRequest struct {
 	Environment string `json:"environment"`
 	User        string `json:"user"`
+}
+
+// StatusRequest 定义任务状态更新请求结构
+type StatusRequest struct {
+	Service      string `json:"service"`
+	Version      string `json:"version"`
+	Environment  string `json:"environment"`
+	User         string `json:"user"`
+	Status       string `json:"status"` // "success", "failure", "no_action"
 }
 
 // NewServer 初始化 HTTP 服务
@@ -75,6 +84,7 @@ func NewServer(redisAddr string) *Server {
 	server.Router.HandleFunc("/deploy", server.ipWhitelistMiddleware(server.handleDeploy))
 	server.Router.HandleFunc("/query", server.ipWhitelistMiddleware(server.handleQuery))
 	server.Router.HandleFunc("/push", server.ipWhitelistMiddleware(server.handlePush))
+	server.Router.HandleFunc("/status", server.ipWhitelistMiddleware(server.handleStatus))
 	return server
 }
 
@@ -199,11 +209,11 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		s.logger.Infof("存储环境列表: %v", envs)
 	}
 
-	// 存储部署数据
-	for _, dep := range req.Deployments {
-		data, _ := json.Marshal(dep)
-		s.storage.Push("deploy_queue", string(data))
-		s.logger.Infof("推送部署数据: 服务=%s, 环境=%v, 版本=%s, 用户=%s", dep.Service, dep.Environments, dep.Version, dep.User)
+	// 存储部署数据（不进入队列）
+	if len(req.Deployments) > 0 {
+		data, _ := json.Marshal(req.Deployments)
+		s.storage.Set("deployments", string(data))
+		s.logger.Infof("存储部署数据: %v", req.Deployments)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -240,7 +250,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for _, env := range deployReq.Environments {
-			if env == req.Environment {
+			if env == req.Environment && deployReq.Status != "success" && deployReq.Status != "failure" {
 				results = append(results, deployReq)
 			}
 		}
@@ -253,4 +263,76 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(results)
+}
+
+// handleStatus 处理任务状态更新请求
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "仅支持 POST 方法", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req StatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.Errorf("解析状态更新请求失败: %v", err)
+		http.Error(w, "无效的请求数据", http.StatusBadRequest)
+		return
+	}
+
+	// 验证状态
+	if req.Status != "success" && req.Status != "failure" && req.Status != "no_action" {
+		s.logger.Errorf("无效的状态值: %s", req.Status)
+		http.Error(w, "无效的状态值", http.StatusBadRequest)
+		return
+	}
+
+	// 获取队列数据
+	items, err := s.storage.List("deploy_queue")
+	if err != nil {
+		s.logger.Errorf("获取队列失败: %v", err)
+		http.Error(w, "获取队列失败", http.StatusInternalServerError)
+		return
+	}
+
+	// 更新匹配的任务状态
+	updated := false
+	newItems := []string{}
+	for _, item := range items {
+		var deployReq DeployRequest
+		if err := json.Unmarshal([]byte(item), &deployReq); err != nil {
+			s.logger.Errorf("解析队列数据失败: %v", err)
+			newItems = append(newItems, item)
+			continue
+		}
+		if deployReq.Service == req.Service && deployReq.Version == req.Version && contains(deployReq.Environments, req.Environment) && deployReq.User == req.User {
+			deployReq.Status = req.Status
+			updated = true
+		}
+		data, _ := json.Marshal(deployReq)
+		newItems = append(newItems, string(data))
+	}
+
+	if updated {
+		// 清空并重新写入队列
+		s.storage.Delete("deploy_queue")
+		for _, item := range newItems {
+			s.storage.Push("deploy_queue", item)
+		}
+		s.logger.Infof("更新任务状态: 服务=%s, 版本=%s, 环境=%s, 用户=%s, 状态=%s", req.Service, req.Version, req.Environment, req.User, req.Status)
+	} else {
+		s.logger.Warnf("未找到匹配任务: 服务=%s, 版本=%s, 环境=%s, 用户=%s", req.Service, req.Version, req.Environment, req.User)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "状态更新成功"})
+}
+
+// contains 检查字符串是否在切片中
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
