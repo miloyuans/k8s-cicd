@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"k8s-cicd/internal/storage"
 	"strings"
-	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/sirupsen/logrus"
@@ -13,10 +12,10 @@ import (
 
 // Bot 封装 Telegram 机器人功能
 type Bot struct {
-	bot        *tgbotapi.BotAPI
-	storage    *storage.RedisStorage
-	logger     *logrus.Logger
-	groupID    int64 // Telegram 群组 ID
+	bot     *tgbotapi.BotAPI
+	storage *storage.RedisStorage
+	logger  *logrus.Logger
+	groupID int64 // Telegram 群组 ID
 }
 
 // UserState 保存用户交互状态
@@ -376,7 +375,7 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 				b.logger.Infof("用户 %d 确认服务选择，继续到环境选择", userID)
 				state.Step = 2
 				b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-				b.showServiceSelection(chatID, &state)
+				b.showEnvironmentSelection(chatID, &state)
 			}
 		} else if data == "cancel" {
 			b.logger.Infof("用户 %d 取消服务选择，会话关闭", userID)
