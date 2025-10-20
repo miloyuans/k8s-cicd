@@ -1,3 +1,4 @@
+// 文件: internal/config/config.go
 package config
 
 import (

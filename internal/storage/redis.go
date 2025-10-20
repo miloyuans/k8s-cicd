@@ -1,8 +1,10 @@
+// 文件: internal/storage/redis.go
 package storage
 
 import (
-	"github.com/redis/go-redis/v9"
 	"context"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // RedisStorage 封装 Redis 操作

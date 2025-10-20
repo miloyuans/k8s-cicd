@@ -1,3 +1,4 @@
+// 文件: main.go
 package main
 
 import (

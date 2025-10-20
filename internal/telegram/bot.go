@@ -1,3 +1,4 @@
+// 文件: internal/telegram/bot.go
 package telegram
 
 import (
@@ -195,7 +196,7 @@ func (b *Bot) showServiceSelection(chatID int64, state *UserState) {
 			b.logger.Errorf("编辑服务选择消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
 		}
 	} else {
 		msg := tgbotapi.NewMessage(chatID, msgText)
@@ -207,7 +208,7 @@ func (b *Bot) showServiceSelection(chatID int64, state *UserState) {
 			b.logger.Errorf("发送服务选择消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
 		}
 	}
 	b.logger.Infof("用户 %d 显示服务选择弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
@@ -258,7 +259,7 @@ func (b *Bot) showEnvironmentSelection(chatID int64, state *UserState) {
 			b.logger.Errorf("编辑环境选择消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
 		}
 	} else {
 		msg := tgbotapi.NewMessage(chatID, msgText)
@@ -270,35 +271,34 @@ func (b *Bot) showEnvironmentSelection(chatID int64, state *UserState) {
 			b.logger.Errorf("发送环境选择消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
 		}
 	}
 	b.logger.Infof("用户 %d 显示环境选择弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
 }
 
-// showConfirmation 显示数据确认弹窗
+// showConfirmation 显示确认弹窗
 func (b *Bot) showConfirmation(chatID int64, state *UserState) {
-	b.logger.Infof("用户 %d 显示确认弹窗: 服务=%s, 环境=%v, 版本=%s", state.UserID, state.Service, state.Environments, state.Version)
 	msgText := fmt.Sprintf("请确认以下信息：\n服务: %s\n环境: %s\n版本: %s", state.Service, strings.Join(state.Environments, ", "), state.Version)
 	keyboard := b.CreateYesNoKeyboard("confirm")
+	var sentMsg tgbotapi.Message
 	msg := tgbotapi.NewMessage(chatID, msgText)
-	msg.ReplyMarkup = keyboard
-	msg.ReplyToMessageID = state.LastMsgID // 回复版本输入消息
-	msg.ParseMode = "HTML"
-	sentMsg, err := b.bot.Send(msg)
+	msg.ReplyMarkup = &keyboard
+	var err error
+	sentMsg, err = b.bot.Send(msg)
 	if err != nil {
 		b.logger.Errorf("发送确认消息失败，用户 %d: %v", state.UserID, err)
-	} else {
-		state.Messages = append(state.Messages, sentMsg.MessageID)
-		b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
+		return
 	}
+	state.Messages = append(state.Messages, sentMsg.MessageID)
+	b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
+	b.logger.Infof("用户 %d 显示确认弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
 }
 
-// askContinue 询问是否继续发布
+// askContinue 询问是否继续提交
 func (b *Bot) askContinue(chatID int64, state *UserState) {
-	b.logger.Infof("用户 %d 显示是否继续提交弹窗", state.UserID)
+	msgText := "是否继续提交新数据？"
 	keyboard := b.CreateYesNoKeyboard("restart")
-	msgText := "是否继续提交数据？"
 	var sentMsg tgbotapi.Message
 	if len(state.Messages) > 0 {
 		lastMsgID := state.Messages[len(state.Messages)-1]
@@ -310,20 +310,21 @@ func (b *Bot) askContinue(chatID int64, state *UserState) {
 			b.logger.Errorf("编辑继续提交消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
 		}
 	} else {
 		msg := tgbotapi.NewMessage(chatID, msgText)
-		msg.ReplyMarkup = keyboard
+		msg.ReplyMarkup = &keyboard
 		var err error
 		sentMsg, err = b.bot.Send(msg)
 		if err != nil {
 			b.logger.Errorf("发送继续提交消息失败，用户 %d: %v", state.UserID, err)
 		} else {
 			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
+			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
 		}
 	}
+	b.logger.Infof("用户 %d 显示继续提交弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
 }
 
 // deleteMessages 删除所有交互消息
@@ -337,7 +338,7 @@ func (b *Bot) deleteMessages(chatID int64, state *UserState) {
 		}
 	}
 	state.Messages = nil
-	b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), state)
+	b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
 }
 
 // handleCallback 处理回调查询
