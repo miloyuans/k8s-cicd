@@ -1,8 +1,9 @@
+// config.go
 package config
 
 import (
 	"fmt"
-	"log"
+	"log" // Added import for log package
 	"net"
 	"os"
 	"path/filepath"
@@ -18,7 +19,7 @@ type Config struct {
 	PollInterval       int                 `yaml:"poll_interval"`
 	TelegramBots       map[string]string   `yaml:"telegram_bots"`
 	TelegramChats      map[string]int64    `yaml:"telegram_chats"`
-	ServiceKeywords    map[string][]string `yaml:"service_keywords"`
+	ServiceKeywords    map[string][]string `yaml:"service_keywords"` // keyword: list of patterns
 	KubeConfigPath     string              `yaml:"kube_config_path"`
 	Namespace          string              `yaml:"namespace"`
 	TimeoutSeconds     int                 `yaml:"timeout_seconds"`
@@ -29,8 +30,8 @@ type Config struct {
 	ServicesDir        string              `yaml:"services_dir"`
 	Environments       map[string]string   `yaml:"environments"`
 	DialogTimeout      int                 `yaml:"dialog_timeout"`
-	StorageDir         string
-	DeployCategory     string `yaml:"deploy_category"`
+	StorageDir         string              // Added for configurable storage directory
+	DeployCategory     string              `yaml:"deploy_category"` // New: category for deploy team notifications
 }
 
 func LoadConfig(filePath string) *Config {
@@ -44,6 +45,12 @@ func LoadConfig(filePath string) *Config {
 		fmt.Fprintf(os.Stderr, "Failed to unmarshal config: %v\n", err)
 		os.Exit(1)
 	}
+	// Normalize environment keys to lowercase
+	for k, v := range cfg.Environments {
+		delete(cfg.Environments, k)
+		cfg.Environments[strings.ToLower(k)] = v
+	}
+	// Debug: Log loaded ServiceKeywords
 	log.Printf("Loaded ServiceKeywords: %v", cfg.ServiceKeywords)
 	if cfg.TimeoutSeconds == 0 {
 		cfg.TimeoutSeconds = 300
@@ -52,7 +59,7 @@ func LoadConfig(filePath string) *Config {
 		cfg.MaxConcurrency = 10
 	}
 	if cfg.PollInterval == 0 {
-		cfg.PollInterval = 10
+		cfg.PollInterval = 10 // Reduced to 10s for faster polling
 	}
 	if cfg.ServicesDir == "" {
 		cfg.ServicesDir = "services"
@@ -70,22 +77,21 @@ func LoadConfig(filePath string) *Config {
 		cfg.GatewayListenAddr = ":8081"
 	}
 	if cfg.StorageDir == "" {
-		cfg.StorageDir = "storage"
+		cfg.StorageDir = "storage" // Default, overridden by main.go
 	}
 	if len(cfg.Environments) == 0 {
 		cfg.Environments = make(map[string]string)
 	}
 	if cfg.DeployCategory == "" {
-		cfg.DeployCategory = "deploy"
+		cfg.DeployCategory = "deploy" // Default deploy category
 	}
 	return &cfg
 }
 
 func LoadServiceLists(servicesDir string, telegramBots map[string]string) (map[string][]string, error) {
-	if _, err := os.Stat(servicesDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(servicesDir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create services directory %s: %v", servicesDir, err)
-		}
+	if _, err := os.Stat(servicesDir); err == nil {
+	} else if err := os.MkdirAll(servicesDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create services directory %s: %v", servicesDir, err)
 	}
 
 	serviceLists := make(map[string][]string)
