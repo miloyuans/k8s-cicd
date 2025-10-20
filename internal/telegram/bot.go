@@ -19,11 +19,11 @@ type Bot struct {
 
 // UserState 保存用户交互状态
 type UserState struct {
-	Step        int      // 当前交互步骤
-	Service     string   // 选择的服务
+	Step         int      // 当前交互步骤
+	Service      string   // 选择的服务
 	Environments []string // 选择的环境
-	Version     string   // 输入的版本号
-	ChatID      int64    // 用户聊天 ID
+	Version      string   // 输入的版本号
+	ChatID       int64    // 用户聊天 ID
 }
 
 // NewBot 初始化 Telegram 机器人
@@ -130,7 +130,8 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 			b.sendMessage(chatID, "数据提交成功！", nil)
 			b.askContinue(chatID)
 		} else if data == "confirm_no" {
-			b.sendMessage(chatID, "是否重新开始交互？", b.createYesNoKeyboard("restart"))
+			keyboard := b.createYesNoKeyboard("restart")
+			b.sendMessage(chatID, "是否重新开始交互？", &keyboard) // 修复：传递指针
 		}
 	case 5: // 是否继续
 		if data == "restart_yes" {
@@ -184,7 +185,7 @@ func (b *Bot) showConfirmation(chatID int64, state UserState) {
 // askContinue 询问是否继续发布
 func (b *Bot) askContinue(chatID int64) {
 	keyboard := b.createYesNoKeyboard("restart")
-	b.sendMessage(chatID, "是否继续发布？", &keyboard)
+	b.sendMessage(chatID, "是否继续发布？", &keyboard) // 修复：传递指针
 }
 
 // createYesNoKeyboard 创建是/否键盘
@@ -201,7 +202,7 @@ func (b *Bot) createYesNoKeyboard(prefix string) tgbotapi.InlineKeyboardMarkup {
 func (b *Bot) sendMessage(chatID int64, text string, keyboard *tgbotapi.InlineKeyboardMarkup) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	if keyboard != nil {
-		msg.ReplyMarkup = keyboard
+		msg.ReplyMarkup = *keyboard // 直接使用指针
 	}
 	if _, err := b.bot.Send(msg); err != nil {
 		b.logger.Errorf("发送消息失败: %v", err)
