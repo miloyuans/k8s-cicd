@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -15,10 +16,10 @@ import (
 
 // Server 封装 HTTP 服务
 type Server struct {
-	Router      *http.ServeMux
-	storage     *storage.RedisStorage
-	logger      *logrus.Logger
-	bot         *telegram.Bot
+	Router       *http.ServeMux
+	storage      *storage.RedisStorage
+	logger       *logrus.Logger
+	bot          *telegram.Bot
 	whitelistIPs []string // IP 白名单
 }
 
@@ -29,6 +30,7 @@ type DeployRequest struct {
 	Version      string   `json:"version"`
 	User         string   `json:"user"`
 	ChatID       int64    `json:"chat_id"`
+	Status       string   `json:"status"` // 任务状态：pending, success, failure, no_action
 }
 
 // PushRequest 定义推送请求结构
@@ -46,11 +48,11 @@ type QueryRequest struct {
 
 // StatusRequest 定义任务状态更新请求结构
 type StatusRequest struct {
-	Service      string `json:"service"`
-	Version      string `json:"version"`
-	Environment  string `json:"environment"`
-	User         string `json:"user"`
-	Status       string `json:"status"` // "success", "failure", "no_action"
+	Service     string `json:"service"`
+	Version     string `json:"version"`
+	Environment string `json:"environment"`
+	User        string `json:"user"`
+	Status      string `json:"status"` // success, failure, no_action
 }
 
 // NewServer 初始化 HTTP 服务
@@ -73,10 +75,10 @@ func NewServer(redisAddr string) *Server {
 	}
 
 	server := &Server{
-		Router:      http.NewServeMux(),
-		storage:     storage,
-		logger:      logger,
-		bot:         bot,
+		Router:       http.NewServeMux(),
+		storage:      storage,
+		logger:       logger,
+		bot:          bot,
 		whitelistIPs: whitelistIPs,
 	}
 
