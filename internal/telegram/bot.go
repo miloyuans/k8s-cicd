@@ -1,7 +1,6 @@
 package telegram
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"k8s-cicd/internal/storage"
@@ -31,6 +30,7 @@ type UserState struct {
 	Environments []string // 选择的环境
 	Version      string   // 输入的版本号
 	ChatID       int64    // 用户聊天 ID
+	UserID       int64    // 用户 ID（Telegram 用户 ID）
 	Messages     []int    // 交互消息 ID 列表
 }
 
@@ -181,7 +181,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	// 检查是否输入 "ai" 触发交互
 	if strings.ToLower(msg.Text) == "ai" {
 		b.logger.Infof("用户 %d 触发交互，输入: %s", chatID, msg.Text)
-		b.startInteraction(chatID)
+		b.startInteraction(chatID, msg.From.ID)
 		return
 	}
 
@@ -199,7 +199,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			state.Version = msg.Text
 			state.Step = 4
 			b.SaveState(chatID, state)
-			b.showConfirmation(chatID, state)
+			b.showConfirmation(chatID, &state)
 		} else {
 			b.logger.Warnf("用户 %d 输入的版本号 %s 在服务 %s 下已存在", chatID, msg.Text, state.Service)
 			b.SendMessage(chatID, fmt.Sprintf("此服务 %s 下版本号 %s 已存在，请输入新版本号：", state.Service, msg.Text), nil)
@@ -210,12 +210,17 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 }
 
 // startInteraction 开始交互流程，显示服务选择弹窗
-func (b *Bot) startInteraction(chatID int64) {
+func (b *Bot) startInteraction(chatID, userID int64) {
 	b.logger.Infof("用户 %d 开始交互流程", chatID)
+	// 刷新数据
+	b.fetchServices()
+	b.fetchEnvironments()
+
 	// 初始化用户状态
 	state := UserState{
 		Step:   1,
 		ChatID: chatID,
+		UserID: userID,
 	}
 	b.SaveState(chatID, state)
 
@@ -473,7 +478,7 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	case 5: // 是否继续
 		if data == "restart_yes" {
 			b.logger.Infof("用户 %d 选择继续提交，重新开始交互", chatID)
-			b.startInteraction(chatID)
+			b.startInteraction(chatID, state.UserID)
 		} else if data == "restart_no" {
 			b.logger.Infof("用户 %d 选择结束交互，会话关闭", chatID)
 			b.SendMessage(chatID, "会话已关闭", nil)
@@ -515,7 +520,7 @@ func (b *Bot) SaveState(chatID int64, state UserState) {
 
 // getState 从 Redis 获取用户状态
 func (b *Bot) getState(chatID int64) (UserState, error) {
-	data, err := b.storage.Get(fmt.Sprintf("user:%d", chatID))
+	data, err := b.storage.Get(fmt.Sprintf("user:%d", chatID),)
 	if err != nil {
 		b.logger.Errorf("获取用户 %d 状态失败: %v", chatID, err)
 		return UserState{}, err
