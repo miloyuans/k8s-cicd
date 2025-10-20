@@ -1,10 +1,14 @@
 package telegram
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"k8s-cicd/internal/storage"
+	"net/http"
+	"sort"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/sirupsen/logrus"
@@ -12,9 +16,12 @@ import (
 
 // Bot 封装 Telegram 机器人功能
 type Bot struct {
-	bot     *tgbotapi.BotAPI
-	storage *storage.RedisStorage
-	logger  *logrus.Logger
+	bot          *tgbotapi.BotAPI
+	storage      *storage.RedisStorage
+	logger       *logrus.Logger
+	httpClient   *http.Client
+	servicesAPI  string // 服务 API 地址
+	environsAPI  string // 环境 API 地址
 }
 
 // UserState 保存用户交互状态
@@ -24,6 +31,7 @@ type UserState struct {
 	Environments []string // 选择的环境
 	Version      string   // 输入的版本号
 	ChatID       int64    // 用户聊天 ID
+	Messages     []int    // 交互消息 ID 列表
 }
 
 // NewBot 初始化 Telegram 机器人
@@ -40,9 +48,12 @@ func NewBot(token string) (*Bot, error) {
 
 	logger := logrus.New()
 	return &Bot{
-		bot:     bot,
-		storage: redisStorage,
-		logger:  logger,
+		bot:         bot,
+		storage:     redisStorage,
+		logger:      logger,
+		httpClient:  &http.Client{Timeout: 10 * time.Second},
+		servicesAPI: "http://external-api/services",   // 需替换为实际地址
+		environsAPI: "http://external-api/environments", // 需替换为实际地址
 	}, nil
 }
 
@@ -60,6 +71,106 @@ func (b *Bot) Start() {
 			b.handleCallback(update.CallbackQuery)
 		}
 	}
+}
+
+// fetchServices 从外部 API 获取服务列表并去重存储
+func (b *Bot) fetchServices() ([]string, error) {
+	resp, err := b.httpClient.Get(b.servicesAPI)
+	if err != nil {
+		b.logger.Errorf("获取服务列表失败: %v", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var services []string
+	if err := json.NewDecoder(resp.Body).Decode(&services); err != nil {
+		b.logger.Errorf("解析服务列表失败: %v", err)
+		return nil, err
+	}
+
+	// 去重
+	uniqueServices := make(map[string]bool)
+	for _, svc := range services {
+		uniqueServices[strings.ToUpper(svc)] = true
+	}
+	result := make([]string, 0, len(uniqueServices))
+	for svc := range uniqueServices {
+		result = append(result, svc)
+	}
+	sort.Strings(result)
+
+	// 存储到 Redis
+	data, _ := json.Marshal(result)
+	b.storage.Set("services", string(data))
+	b.logger.Infof("存储服务列表: %v", result)
+	return result, nil
+}
+
+// fetchEnvironments 从外部 API 获取环境列表并去重存储
+func (b *Bot) fetchEnvironments() ([]string, error) {
+	resp, err := b.httpClient.Get(b.environsAPI)
+	if err != nil {
+		b.logger.Errorf("获取环境列表失败: %v", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var envs []string
+	if err := json.NewDecoder(resp.Body).Decode(&envs); err != nil {
+		b.logger.Errorf("解析环境列表失败: %v", err)
+		return nil, err
+	}
+
+	// 去重
+	uniqueEnvs := make(map[string]bool)
+	for _, env := range envs {
+		uniqueEnvs[strings.ToUpper(env)] = true
+	}
+	result := make([]string, 0, len(uniqueEnvs))
+	for env := range uniqueEnvs {
+		result = append(result, env)
+	}
+	sort.Strings(result)
+
+	// 存储到 Redis
+	data, _ := json.Marshal(result)
+	b.storage.Set("environments", string(data))
+	b.logger.Infof("存储环境列表: %v", result)
+	return result, nil
+}
+
+// getServices 从 Redis 获取服务列表，失败则从 API 刷新
+func (b *Bot) getServices() []string {
+	data, err := b.storage.Get("services")
+	if err != nil || data == "" {
+		b.logger.Warn("从 Redis 获取服务列表失败，尝试从 API 刷新")
+		services, err := b.fetchServices()
+		if err != nil {
+			b.logger.Errorf("刷新服务列表失败: %v", err)
+			return []string{"ServiceA", "ServiceB", "ServiceC"} // 回退默认值
+		}
+		return services
+	}
+	var services []string
+	json.Unmarshal([]byte(data), &services)
+	return services
+}
+
+// getEnvironments 从 Redis 获取环境列表，失败则从 API 刷新
+func (b *Bot) getEnvironments() []string {
+	data, err := b.storage.Get("environments")
+	if err != nil || data == "" {
+		b.logger.Warn("从 Redis 获取环境列表失败，尝试从 API 刷新")
+		envs, err := b.fetchEnvironments()
+		if err != nil {
+			b.logger.Errorf("刷新环境列表失败: %v", err)
+			return []string{"Dev", "Test", "Prod"} // 回退默认值
+		}
+		return envs
+	}
+	var envs []string
+	json.Unmarshal([]byte(data), &envs)
+	return envs
 }
 
 // handleMessage 处理用户文本输入
@@ -109,13 +220,183 @@ func (b *Bot) startInteraction(chatID int64) {
 	b.SaveState(chatID, state)
 
 	// 服务选择弹窗
-	services := []string{"ServiceA", "ServiceB", "ServiceC"}
-	var buttons []tgbotapi.InlineKeyboardButton
-	for _, svc := range services {
-		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(svc, fmt.Sprintf("service:%s", svc)))
+	b.showServiceSelection(chatID, &state)
+}
+
+// showServiceSelection 显示服务选择弹窗
+func (b *Bot) showServiceSelection(chatID int64, state *UserState) {
+	services := b.getServices()
+	cols := 3
+	if len(services) < cols {
+		cols = len(services)
 	}
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(buttons...))
-	b.SendMessage(chatID, "请选择服务（单选）：", &keyboard)
+	var buttons [][]tgbotapi.InlineKeyboardButton
+	var row []tgbotapi.InlineKeyboardButton
+	for i, svc := range services {
+		displayText := svc
+		if state.Service == svc {
+			displayText = fmt.Sprintf("<b>✅ %s</b>", svc)
+		}
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, fmt.Sprintf("service:%s", svc)))
+		if len(row) == cols || i == len(services)-1 {
+			buttons = append(buttons, row)
+			row = []tgbotapi.InlineKeyboardButton{}
+		}
+	}
+	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_service"),
+		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
+	})
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	msgText := fmt.Sprintf("请选择服务（单选）:\n当前选中: %s", state.Service)
+	var sentMsg tgbotapi.Message
+	if len(state.Messages) > 0 {
+		lastMsgID := state.Messages[len(state.Messages)-1]
+		editMsg := tgbotapi.NewEditMessageText(chatID, lastMsgID, msgText)
+		editMsg.ReplyMarkup = &keyboard
+		editMsg.ParseMode = "HTML"
+		var err error
+		sentMsg, err = b.bot.Send(editMsg)
+		if err != nil {
+			b.logger.Errorf("编辑服务选择消息失败，用户 %d: %v", chatID, err)
+		} else {
+			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
+			b.SaveState(chatID, *state)
+		}
+	} else {
+		msg := tgbotapi.NewMessage(chatID, msgText)
+		msg.ReplyMarkup = keyboard
+		msg.ParseMode = "HTML"
+		var err error
+		sentMsg, err = b.bot.Send(msg)
+		if err != nil {
+			b.logger.Errorf("发送服务选择消息失败，用户 %d: %v", chatID, err)
+		} else {
+			state.Messages = append(state.Messages, sentMsg.MessageID)
+			b.SaveState(chatID, *state)
+		}
+	}
+	b.logger.Infof("用户 %d 显示服务选择弹窗，消息 ID: %d", chatID, sentMsg.MessageID)
+}
+
+// showEnvironmentSelection 显示环境选择弹窗
+func (b *Bot) showEnvironmentSelection(chatID int64, state *UserState) {
+	environments := b.getEnvironments()
+	cols := 3
+	if len(environments) < cols {
+		cols = len(environments)
+	}
+	var buttons [][]tgbotapi.InlineKeyboardButton
+	var row []tgbotapi.InlineKeyboardButton
+	for i, env := range environments {
+		displayText := env
+		if contains(state.Environments, env) {
+			displayText = fmt.Sprintf("<b>✅ %s</b>", env)
+		}
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, fmt.Sprintf("env:%s", env)))
+		if len(row) == cols || i == len(environments)-1 {
+			buttons = append(buttons, row)
+			row = []tgbotapi.InlineKeyboardButton{}
+		}
+	}
+	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_env"),
+		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
+	})
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	msgText := fmt.Sprintf("请选择环境（可多选）:\n当前选中: %s", strings.Join(state.Environments, ", "))
+	var sentMsg tgbotapi.Message
+	if len(state.Messages) > 0 {
+		lastMsgID := state.Messages[len(state.Messages)-1]
+		editMsg := tgbotapi.NewEditMessageText(chatID, lastMsgID, msgText)
+		editMsg.ReplyMarkup = &keyboard
+		editMsg.ParseMode = "HTML"
+		var err error
+		sentMsg, err = b.bot.Send(editMsg)
+		if err != nil {
+			b.logger.Errorf("编辑环境选择消息失败，用户 %d: %v", chatID, err)
+		} else {
+			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
+			b.SaveState(chatID, *state)
+		}
+	} else {
+		msg := tgbotapi.NewMessage(chatID, msgText)
+		msg.ReplyMarkup = keyboard
+		msg.ParseMode = "HTML"
+		var err error
+		sentMsg, err = b.bot.Send(msg)
+		if err != nil {
+			b.logger.Errorf("发送环境选择消息失败，用户 %d: %v", chatID, err)
+		} else {
+			state.Messages = append(state.Messages, sentMsg.MessageID)
+			b.SaveState(chatID, *state)
+		}
+	}
+	b.logger.Infof("用户 %d 显示环境选择弹窗，消息 ID: %d", chatID, sentMsg.MessageID)
+}
+
+// showConfirmation 显示数据确认弹窗
+func (b *Bot) showConfirmation(chatID int64, state *UserState) {
+	b.logger.Infof("用户 %d 显示确认弹窗: 服务=%s, 环境=%v, 版本=%s", chatID, state.Service, state.Environments, state.Version)
+	msgText := fmt.Sprintf("请确认以下信息：\n服务: %s\n环境: %s\n版本: %s", state.Service, strings.Join(state.Environments, ", "), state.Version)
+	keyboard := b.CreateYesNoKeyboard("confirm")
+	var sentMsg tgbotapi.Message
+	if len(state.Messages) > 0 {
+		lastMsgID := state.Messages[len(state.Messages)-1]
+		editMsg := tgbotapi.NewEditMessageText(chatID, lastMsgID, msgText)
+		editMsg.ReplyMarkup = &keyboard
+		var err error
+		sentMsg, err = b.bot.Send(editMsg)
+		if err != nil {
+			b.logger.Errorf("编辑确认消息失败，用户 %d: %v", chatID, err)
+		} else {
+			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
+			b.SaveState(chatID, *state)
+		}
+	} else {
+		msg := tgbotapi.NewMessage(chatID, msgText)
+		msg.ReplyMarkup = keyboard
+		var err error
+		sentMsg, err = b.bot.Send(msg)
+		if err != nil {
+			b.logger.Errorf("发送确认消息失败，用户 %d: %v", chatID, err)
+		} else {
+			state.Messages = append(state.Messages, sentMsg.MessageID)
+			b.SaveState(chatID, *state)
+		}
+	}
+}
+
+// askContinue 询问是否继续发布
+func (b *Bot) askContinue(chatID int64, state *UserState) {
+	b.logger.Infof("用户 %d 显示是否继续提交弹窗", chatID)
+	keyboard := b.CreateYesNoKeyboard("restart")
+	msgText := "是否继续提交数据？"
+	var sentMsg tgbotapi.Message
+	if len(state.Messages) > 0 {
+		lastMsgID := state.Messages[len(state.Messages)-1]
+		editMsg := tgbotapi.NewEditMessageText(chatID, lastMsgID, msgText)
+		editMsg.ReplyMarkup = &keyboard
+		var err error
+		sentMsg, err = b.bot.Send(editMsg)
+		if err != nil {
+			b.logger.Errorf("编辑继续提交消息失败，用户 %d: %v", chatID, err)
+		} else {
+			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
+			b.SaveState(chatID, *state)
+		}
+	} else {
+		msg := tgbotapi.NewMessage(chatID, msgText)
+		msg.ReplyMarkup = keyboard
+		var err error
+		sentMsg, err = b.bot.Send(msg)
+		if err != nil {
+			b.logger.Errorf("发送继续提交消息失败，用户 %d: %v", chatID, err)
+		} else {
+			state.Messages = append(state.Messages, sentMsg.MessageID)
+			b.SaveState(chatID, *state)
+		}
+	}
 }
 
 // handleCallback 处理回调查询
@@ -134,65 +415,62 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	case 1: // 服务选择
 		if strings.HasPrefix(data, "service:") {
 			state.Service = strings.TrimPrefix(data, "service:")
-			state.Step = 2
-			b.SaveState(chatID, state)
 			b.logger.Infof("用户 %d 选择服务: %s", chatID, state.Service)
-			keyboard := b.CreateYesNoKeyboard("service_confirm")
-			b.SendMessage(chatID, fmt.Sprintf("您选择了服务：%s，确认继续？", state.Service), &keyboard)
-		}
-	case 2: // 服务确认
-		if data == "service_confirm_yes" {
-			b.logger.Infof("用户 %d 确认服务选择，继续到环境选择", chatID)
-			b.showEnvironmentSelection(chatID)
-		} else if data == "service_confirm_no" {
+			b.SaveState(chatID, state)
+			b.showServiceSelection(chatID, &state)
+		} else if data == "next_service" {
+			if state.Service == "" {
+				b.logger.Warnf("用户 %d 未选择服务", chatID)
+				b.SendMessage(chatID, "请先选择一个服务！", nil)
+			} else {
+				b.logger.Infof("用户 %d 确认服务选择，继续到环境选择", chatID)
+				state.Step = 2
+				b.SaveState(chatID, state)
+				b.showEnvironmentSelection(chatID, &state)
+			}
+		} else if data == "cancel" {
 			b.logger.Infof("用户 %d 取消服务选择，会话关闭", chatID)
 			b.SendMessage(chatID, "会话已关闭", nil)
 			b.deleteState(chatID)
 		}
-	case 3: // 环境选择
+	case 2: // 环境选择
 		if strings.HasPrefix(data, "env:") {
 			env := strings.TrimPrefix(data, "env:")
 			if !contains(state.Environments, env) {
 				state.Environments = append(state.Environments, env)
-				b.SaveState(chatID, state)
 				b.logger.Infof("用户 %d 选择环境: %s", chatID, env)
-			}
-			b.showEnvironmentSelection(chatID)
-		} else if data == "env_done" {
-			if len(state.Environments) > 0 {
-				b.logger.Infof("用户 %d 完成环境选择: %v", chatID, state.Environments)
-				keyboard := b.CreateYesNoKeyboard("env_confirm")
-				b.SendMessage(chatID, fmt.Sprintf("您选择了环境：%s，确认继续？", strings.Join(state.Environments, ", ")), &keyboard)
-				state.Step = 4
 				b.SaveState(chatID, state)
-			} else {
+			}
+			b.showEnvironmentSelection(chatID, &state)
+		} else if data == "next_env" {
+			if len(state.Environments) == 0 {
 				b.logger.Warnf("用户 %d 未选择任何环境", chatID)
 				b.SendMessage(chatID, "请至少选择一个环境！", nil)
+			} else {
+				b.logger.Infof("用户 %d 完成环境选择: %v", chatID, state.Environments)
+				state.Step = 3
+				b.SaveState(chatID, state)
+				b.SendMessage(chatID, "请输入版本号：", nil)
 			}
-		}
-	case 4: // 环境确认
-		if data == "env_confirm_yes" {
-			b.logger.Infof("用户 %d 确认环境选择，继续到版本输入", chatID)
-			state.Step = 5
-			b.SaveState(chatID, state)
-			b.SendMessage(chatID, "请输入版本号：", nil)
-		} else if data == "env_confirm_no" {
+		} else if data == "cancel" {
 			b.logger.Infof("用户 %d 取消环境选择，会话关闭", chatID)
 			b.SendMessage(chatID, "会话已关闭", nil)
 			b.deleteState(chatID)
 		}
-	case 5: // 确认提交
+	case 4: // 确认提交
 		if data == "confirm_yes" {
 			b.logger.Infof("用户 %d 确认提交数据: 服务=%s, 环境=%v, 版本=%s", chatID, state.Service, state.Environments, state.Version)
 			b.persistData(state)
 			b.SendMessage(chatID, "数据提交成功！", nil)
-			b.askContinue(chatID)
+			state.Step = 5
+			b.SaveState(chatID, state)
+			b.askContinue(chatID, &state)
 		} else if data == "confirm_no" {
 			b.logger.Infof("用户 %d 取消数据提交，会话关闭", chatID)
 			b.SendMessage(chatID, "会话已关闭", nil)
 			b.deleteState(chatID)
 		}
-	case 6: // 是否继续
+	case 5: // 是否继续
 		if data == "restart_yes" {
 			b.logger.Infof("用户 %d 选择继续提交，重新开始交互", chatID)
 			b.startInteraction(chatID)
@@ -206,41 +484,12 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	b.bot.Request(tgbotapi.NewCallback(query.ID, ""))
 }
 
-// showEnvironmentSelection 显示环境选择弹窗
-func (b *Bot) showEnvironmentSelection(chatID int64) {
-	b.logger.Infof("用户 %d 显示环境选择弹窗", chatID)
-	environments := []string{"Dev", "Test", "Prod"}
-	var buttons []tgbotapi.InlineKeyboardButton
-	for _, env := range environments {
-		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(env, fmt.Sprintf("env:%s", env)))
-	}
-	buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("完成", "env_done"))
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(buttons...))
-	b.SendMessage(chatID, "请选择环境（可多选）：", &keyboard)
-}
-
-// showConfirmation 显示数据确认弹窗
-func (b *Bot) showConfirmation(chatID int64, state UserState) {
-	b.logger.Infof("用户 %d 显示确认弹窗: 服务=%s, 环境=%v, 版本=%s", chatID, state.Service, state.Environments, state.Version)
-	msg := fmt.Sprintf("请确认以下信息：\n服务: %s\n环境: %s\n版本: %s",
-		state.Service, strings.Join(state.Environments, ", "), state.Version)
-	keyboard := b.CreateYesNoKeyboard("confirm")
-	b.SendMessage(chatID, msg, &keyboard)
-}
-
-// askContinue 询问是否继续发布
-func (b *Bot) askContinue(chatID int64) {
-	b.logger.Infof("用户 %d 显示是否继续提交弹窗", chatID)
-	keyboard := b.CreateYesNoKeyboard("restart")
-	b.SendMessage(chatID, "是否继续提交数据？", &keyboard)
-}
-
 // CreateYesNoKeyboard 创建是/否键盘
 func (b *Bot) CreateYesNoKeyboard(prefix string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("是", prefix+"_yes"),
-			tgbotapi.NewInlineKeyboardButtonData("否", prefix+"_no"),
+			tgbotapi.NewInlineKeyboardButtonData("是 / Yes", prefix+"_yes"),
+			tgbotapi.NewInlineKeyboardButtonData("否 / No", prefix+"_no"),
 		),
 	)
 }
