@@ -17,6 +17,7 @@ import (
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/queue"
 	"k8s-cicd/internal/storage"
+	"k8s-cicd/internal/telegram"
 	"k8s-cicd/internal/types"
 )
 
@@ -56,15 +57,15 @@ func StartDialog(userID, chatID int64, service string, cfg *config.Config, userN
 	}
 
 	newState := &DialogState{
-		UserID:        userID,
-		ChatID:        chatID,
-		Service:       service,
-		Stage:         "service",
-		StartedAt:     time.Now(),
-		UserName:      userName,
-		timeoutCancel: make(chan bool),
-		Messages:      []int{},
-		RetryCount:    0,
+		UserID:        userID
+		ChatID:        chatID
+		Service:       service
+		Stage:         "service"
+		StartedAt:     time.Now()
+		UserName:      userName
+		timeoutCancel: make(chan bool)
+		Messages:      []int{}
+		RetryCount:    0
 	}
 	dialogs.Store(userID, newState)
 
@@ -407,7 +408,7 @@ func processContinue(userID, chatID int64, text string, cfg *config.Config, s *D
 }
 
 func SendConfirmation(category string, chatID int64, message string, callbackData string, cfg *config.Config) error {
-	bot, err := GetBot(category)
+	bot, err := telegram.GetBot(category)
 	if err != nil {
 		log.Printf("No bot configured for category %s: %v", category, err)
 		return fmt.Errorf("no bot configured for category %s: %v", category, err)
@@ -461,7 +462,7 @@ func monitorDialogTimeout(userID, chatID int64, cfg *config.Config, s *DialogSta
 		}
 	case <-s.timeoutCancel:
 		log.Printf("Timeout cancelled for user %d in chat %d", userID, chatID)
-		go monitorDialogTimeout(userID, chatID, cfg, s) // Restart timeout
+		go monitorDialogTimeout(userID, chatID, cfg, s)
 	}
 }
 
@@ -483,7 +484,7 @@ func sendMessage(cfg *config.Config, chatID int64, text interface{}) (tgbotapi.M
 			return tgbotapi.Message{}, fmt.Errorf("no service or default chat found for chat %d", chatID)
 		}
 	}
-	bot, err := GetBot(service)
+	bot, err := telegram.GetBot(service)
 	if err != nil {
 		log.Printf("Failed to get bot for service %s: %v", service, err)
 		return tgbotapi.Message{}, err
@@ -531,7 +532,7 @@ func deleteMessages(s *DialogState, cfg *config.Config) {
 			return
 		}
 	}
-	bot, err := GetBot(service)
+	bot, err := telegram.GetBot(service)
 	if err != nil {
 		log.Printf("Failed to get bot for service %s: %v", service, err)
 		return
