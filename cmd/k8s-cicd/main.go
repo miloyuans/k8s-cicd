@@ -1,639 +1,505 @@
+// cmd/cicd/main.go
 package main
 
 import (
-    "bytes"
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
-    "net/http"
-    "os"
-    "path/filepath"
-    "regexp"
-    "sort"
-    "strings"
-    "time"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
 
-    corev1 "k8s.io/api/core/v1"
-    "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1"
 
-    "k8s-cicd/internal/config"
-    k8shttp "k8s-cicd/internal/http"
-    "k8s-cicd/internal/k8s"
-    "k8s-cicd/internal/queue"
-    "k8s-cicd/internal/storage"
-    "k8s-cicd/internal/telegram"
-    "k8s-cicd/internal/types"
+	"k8s-cicd/internal/config"
+	k8shttp "k8s-cicd/internal/http"
+	"k8s-cicd/internal/k8s"
+	"k8s-cicd/internal/queue"
+	"k8s-cicd/internal/storage"
+	"k8s-cicd/internal/telegram"
+	"k8s-cicd/internal/types"
 )
 
 var (
-    cfg       *config.Config
-    k8sClient *k8s.Client
-    taskQueue *queue.Queue
+	cfg       *config.Config
+	k8sClient *k8s.Client
+	taskQueue *queue.Queue
 )
 
 func main() {
-    cfg = config.LoadConfig("config.yaml")
-    cfg.StorageDir = "cicd_storage"
-    k8sClient = k8s.NewClient(cfg.KubeConfigPath)
+	cfg = config.LoadConfig("config.yaml")
+	cfg.StorageDir = "cicd_storage"
+	k8sClient = k8s.NewClient(cfg.KubeConfigPath)
 
-    if err := storage.EnsureStorageDir(cfg.StorageDir); err != nil {
-        log.Fatalf("Failed to create storage dir: %v", err)
-    }
+	if err := storage.EnsureStorageDir(cfg.StorageDir); err != nil {
+		log.Fatalf("Failed to create storage dir: %v", err)
+	}
 
-    initServicesDir(cfg)
+	initServicesDir(cfg)
 
-    storage.InitAllDailyFiles(cfg, k8sClient.DynamicClient())
-    storage.UpdateAllDeploymentVersions(cfg, k8sClient.DynamicClient())
-    go reportToGateway(cfg)
+	storage.InitAllDailyFiles(cfg, k8sClient.DynamicClient())
+	storage.UpdateAllDeploymentVersions(cfg, k8sClient.DynamicClient())
+	go reportToGateway(cfg)
 
-    taskQueue = queue.NewQueue(cfg, 100)
+	taskQueue = queue.NewQueue(cfg, 100)
 
-    log.Println("Performing initial task poll")
-    retryPendingTasks()
+	log.Println("Performing initial task poll")
+	retryPendingTasks()
 
-    for i := 0; i < cfg.MaxConcurrency; i++ {
-        go worker()
-    }
+	for i := 0; i < cfg.MaxConcurrency; i++ {
+		go worker()
+	}
 
-    go storage.DailyMaintenance(cfg, k8sClient.DynamicClient())
-    go pollGateway()
+	go storage.DailyMaintenance(cfg, k8sClient.DynamicClient())
+	go pollGateway()
 
-    updateAndReportServices()
-    go periodicUpdateServices()
+	updateAndReportServices()
+	go periodicUpdateServices()
 
-    select {}
+	select {}
 }
 
 func initServicesDir(cfg *config.Config) {
-    if _, err := os.Stat(cfg.ServicesDir); os.IsNotExist(err) {
-        if err := os.MkdirAll(cfg.ServicesDir, 0755); err != nil {
-            log.Fatalf("Failed to create services dir: %v", err)
-        }
-        for category := range cfg.TelegramBots {
-            filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
-            if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
-                log.Printf("Failed to init service file %s: %v", filePath, err)
-            }
-        }
-        filePath := filepath.Join(cfg.ServicesDir, "other.svc.list")
-        if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
-            log.Printf("Failed to init service file %s: %v", filePath, err)
-        }
-        log.Println("Initialized services directory and files")
-    }
+	if _, err := os.Stat(cfg.ServicesDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(cfg.ServicesDir, 0755); err != nil {
+			log.Fatalf("Failed to create services dir: %v", err)
+		}
+		for category := range cfg.TelegramBots {
+			filePath := filepath.Join(cfg.ServicesDir, fmt.Sprintf("%s.svc.list", category))
+			if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+				log.Printf("Failed to init service file %s: %v", filePath, err)
+			}
+		}
+		filePath := filepath.Join(cfg.ServicesDir, "other.svc.list")
+		if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+			log.Printf("Failed to init service file %s: %v", filePath, err)
+		}
+		log.Println("Initialized services directory and files")
+	}
 }
 
 func updateAndReportServices() {
-    log.Println("Immediate updating services")
-    storage.UpdateAllDeploymentVersions(cfg, k8sClient.DynamicClient())
-    go reportServicesToGateway(cfg)
+	log.Println("Immediate updating services")
+	storage.UpdateAllDeploymentVersions(cfg, k8sClient.DynamicClient())
+	go reportServicesToGateway(cfg)
 }
 
 func periodicUpdateServices() {
-    ticker := time.NewTicker(10 * time.Minute)
-    defer ticker.Stop()
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
 
-    for range ticker.C {
-        updateAndReportServices()
-    }
+	for range ticker.C {
+		updateAndReportServices()
+	}
 }
 
 func reportServicesToGateway(cfg *config.Config) {
-    services, err := collectAndClassifyServices(cfg)
-    if err != nil {
-        log.Printf("Failed to collect services: %v", err)
-        return
-    }
+	services, err := collectAndClassifyServices(cfg)
+	if err != nil {
+		log.Printf("Failed to collect services: %v", err)
+		return
+	}
 
-    data, err := json.Marshal(services)
-    if err != nil {
-        log.Printf("Failed to marshal services: %v", err)
-        return
-    }
+	data, err := json.Marshal(services)
+	if err != nil {
+		log.Printf("Failed to marshal services: %v", err)
+		return
+	}
 
-    attempt := 1
-    for {
-        req, err := http.NewRequest("POST", cfg.GatewayURL+"/services", bytes.NewBuffer(data))
-        if err != nil {
-            log.Printf("Failed to create services request (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-        req.Header.Set("Content-Type", "application/json")
+	attempt := 1
+	for {
+		req, err := http.NewRequest("POST", cfg.GatewayURL+"/services", bytes.NewBuffer(data))
+		if err != nil {
+			log.Printf("Failed to create services request (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-        client := &http.Client{Timeout: 10 * time.Second}
-        resp, err := client.Do(req)
-        if err != nil {
-            log.Printf("Failed to send services to gateway (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-        defer resp.Body.Close()
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Failed to send services to gateway (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		defer resp.Body.Close()
 
-        if resp.StatusCode != http.StatusOK {
-            log.Printf("Gateway services failed with status %d (attempt %d)", resp.StatusCode, attempt)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Gateway services failed with status %d (attempt %d)", resp.StatusCode, attempt)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
 
-        log.Printf("Successfully reported services to gateway")
-        return
-    }
-}
-
-func reportEnvironmentsToGateway(cfg *config.Config) {
-    data, err := json.Marshal(cfg.Environments)
-    if err != nil {
-        log.Printf("Failed to marshal environments: %v", err)
-        return
-    }
-    attempt := 1
-    for {
-        req, err := http.NewRequest("POST", cfg.GatewayURL+"/environments", bytes.NewBuffer(data))
-        if err != nil {
-            log.Printf("Failed to create environments request (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-        req.Header.Set("Content-Type", "application/json")
-
-        client := &http.Client{Timeout: 10 * time.Second}
-        resp, err := client.Do(req)
-        if err != nil {
-            log.Printf("Failed to send environments to gateway (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-        defer resp.Body.Close()
-
-        if resp.StatusCode != http.StatusOK {
-            log.Printf("Gateway environments failed with status %d (attempt %d)", resp.StatusCode, attempt)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-
-        log.Printf("Successfully reported environments to gateway")
-        return
-    }
-}
-
-func verifyDataFromGateway(cfg *config.Config) bool {
-    attempt := 1
-    for {
-        resp, err := http.Get(cfg.GatewayURL + "/verify-data")
-        if err != nil {
-            log.Printf("Failed to verify data from gateway (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            if attempt > 5 {
-                return false
-            }
-            continue
-        }
-        defer resp.Body.Close()
-
-        if resp.StatusCode != http.StatusOK {
-            log.Printf("Gateway verify-data failed with status %d (attempt %d)", resp.StatusCode, attempt)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            if attempt > 5 {
-                return false
-            }
-            continue
-        }
-
-        var status map[string]bool
-        if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-            log.Printf("Failed to decode verify-data response (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            if attempt > 5 {
-                return false
-            }
-            continue
-        }
-
-        if status["environments"] && status["services"] {
-            log.Printf("Verified data persistence on gateway")
-            return true
-        }
-
-        log.Printf("Data not fully persisted on gateway, retrying...")
-        time.Sleep(getBackoff(attempt))
-        attempt++
-        if attempt > 5 {
-            return false
-        }
-    }
-}
-
-func pollGateway() {
-    ticker := time.NewTicker(time.Duration(cfg.PollInterval) * time.Second)
-    defer ticker.Stop()
-
-    for range ticker.C {
-        for env, _ := range cfg.Environments {
-            ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-            defer cancel()
-
-            tasks, respMap, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
-            if err != nil {
-                log.Printf("Failed to fetch tasks for env %s: %v", env, err)
-                continue
-            }
-
-            if status, ok := respMap["status"].(string); ok && status == "restarted" {
-                log.Printf("Gateway reported restarted for env %s, triggering full report", env)
-                go reportToGateway(cfg)
-                go reportServicesToGateway(cfg)
-                go reportEnvironmentsToGateway(cfg)
-                if !verifyDataFromGateway(cfg) {
-                    log.Printf("Verification failed, will retry next poll")
-                }
-            }
-
-            for _, task := range tasks {
-                taskKey := queue.ComputeTaskKey(task)
-                if taskQueue.Exists(taskKey) {
-                    log.Printf("Task %s already exists, skipping", taskKey)
-                    continue
-                }
-                taskQueue.Enqueue(queue.Task{DeployRequest: task})
-                log.Printf("Enqueued task %s for env %s", taskKey, env)
-            }
-        }
-    }
-}
-
-func getBackoff(attempt int) time.Duration {
-    backoff := time.Duration(1<<uint(attempt-1)) * time.Second
-    if backoff > 60*time.Second {
-        return 60 * time.Second
-    }
-    return backoff
+		log.Printf("Successfully reported services to gateway")
+		return
+	}
 }
 
 func collectAndClassifyServices(cfg *config.Config) (map[string][]string, error) {
-    fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
-    data, err := os.ReadFile(fileName)
-    if err != nil {
-        return nil, fmt.Errorf("failed to read deploy file: %v", err)
-    }
-    var infos []storage.DeploymentInfo
-    if err := json.Unmarshal(data, &infos); err != nil {
-        return nil, fmt.Errorf("failed to unmarshal deploy file: %v", err)
-    }
-
-    classified := make(map[string][]string)
-    seenServices := make(map[string]bool)
-    for _, info := range infos {
-        if _, ok := seenServices[info.Service]; !ok {
-            seenServices[info.Service] = true
-            category := classifyService(info.Service, cfg.ServiceKeywords)
-            classified[category] = append(classified[category], info.Service)
-        }
-    }
-
-    for category := range classified {
-        sort.Strings(classified[category])
-    }
-    return classified, nil
+	services := make(map[string][]string)
+	for env, namespace := range cfg.Environments {
+		deployments, err := k8sClient.DynamicClient().Resource(schema.GroupVersionResource{
+			Group:    "apps",
+			Version:  "v1",
+			Resource: "deployments",
+		}).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list deployments for env %s: %v", env, err)
+		}
+		for _, dep := range deployments.Items {
+			service := dep.GetName()
+			category := telegram.ClassifyService(service, cfg.ServiceKeywords)
+			services[category] = append(services[category], service)
+		}
+	}
+	for category := range services {
+		sort.Strings(services[category])
+	}
+	return services, nil
 }
 
-func classifyService(service string, keywords map[string][]string) string {
-    lowerService := strings.ToLower(service)
-    for category, patterns := range keywords {
-        for _, pattern := range patterns {
-            lowerPattern := strings.ToLower(pattern)
-            if strings.HasPrefix(lowerPattern, "^") || strings.HasSuffix(lowerPattern, "$") || strings.Contains(lowerPattern, ".*") {
-                re, err := regexp.Compile(lowerPattern)
-                if err == nil && re.MatchString(lowerService) {
-                    return category
-                }
-            } else if strings.Contains(lowerService, lowerPattern) {
-                return category
-            }
-        }
-    }
-    return "other"
+func reportEnvironmentsToGateway(cfg *config.Config) {
+	data, err := json.Marshal(cfg.Environments)
+	if err != nil {
+		log.Printf("Failed to marshal environments: %v", err)
+		return
+	}
+	attempt := 1
+	for {
+		req, err := http.NewRequest("POST", cfg.GatewayURL+"/environments", bytes.NewBuffer(data))
+		if err != nil {
+			log.Printf("Failed to create environments request (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Failed to send environments to gateway (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Gateway environments failed with status %d (attempt %d)", resp.StatusCode, attempt)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+
+		log.Printf("Successfully reported environments to gateway")
+		return
+	}
 }
 
-func retryPendingTasks() {
-    fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
-    data, err := os.ReadFile(fileName)
-    if err != nil {
-        log.Printf("Failed to read deploy file for retry: %v", err)
-        return
-    }
-    var infos []storage.DeploymentInfo
-    if err := json.Unmarshal(data, &infos); err != nil {
-        log.Printf("Failed to unmarshal deploy file for retry: %v", err)
-        return
-    }
+func verifyDataFromGateway(cfg *config.Config) bool {
+	attempt := 1
+	for {
+		resp, err := http.Get(cfg.GatewayURL + "/verify-data")
+		if err != nil {
+			log.Printf("Failed to verify data from gateway (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			if attempt > 5 {
+				return false
+			}
+			continue
+		}
+		defer resp.Body.Close()
 
-    for _, info := range infos {
-        if info.Status == "pending" {
-            task := queue.Task{
-                DeployRequest: types.DeployRequest{
-                    Service:   info.Service,
-                    Env:       info.Env,
-                    Version:   getVersionFromImage(info.Image),
-                    Timestamp: info.Timestamp,
-                    UserName:  info.UserName,
-                    Status:    "pending",
-                },
-            }
-            taskQueue.Enqueue(task)
-            log.Printf("Retried pending task for service %s in env %s", info.Service, info.Env)
-        }
-    }
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Gateway verify-data failed with status %d (attempt %d)", resp.StatusCode, attempt)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			if attempt > 5 {
+				return false
+			}
+			continue
+		}
+
+		var status map[string]bool
+		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+			log.Printf("Failed to decode verify-data response (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			if attempt > 5 {
+				return false
+			}
+			continue
+		}
+
+		if status["environments_empty"] || status["services_empty"] {
+			return false
+		}
+		return true
+	}
+}
+
+func pollGateway() {
+	ticker := time.NewTicker(time.Duration(cfg.PollInterval) * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		for env := range cfg.Environments {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			tasks, respMap, err := k8shttp.FetchTasks(ctx, cfg.GatewayURL, env)
+			cancel()
+			if err != nil {
+				log.Printf("Failed to fetch tasks for env %s: %v", env, err)
+				continue
+			}
+			if status, ok := respMap["status"].(string); ok && status == "restarted" {
+				log.Printf("Gateway restarted for env %s, skipping tasks", env)
+				continue
+			}
+			for _, task := range tasks {
+				taskKey := queue.ComputeTaskKey(task)
+				if !taskQueue.Exists(taskKey) {
+					taskQueue.Enqueue(queue.Task{DeployRequest: task})
+				}
+			}
+		}
+	}
 }
 
 func worker() {
-    for task := range taskQueue.Dequeue() {
-        taskKey := queue.ComputeTaskKey(task.DeployRequest)
-        log.Printf("Processing task %s: service=%s, env=%s, version=%s, user=%s",
-            taskKey, task.DeployRequest.Service, task.DeployRequest.Env, task.DeployRequest.Version, task.DeployRequest.UserName)
+	for task := range taskQueue.Dequeue() {
+		processTask(task)
+	}
+}
 
-        namespace, ok := cfg.Environments[strings.ToLower(task.DeployRequest.Env)]
-        if !ok {
-            log.Printf("Invalid environment %s for task %s", task.DeployRequest.Env, taskKey)
-            continue
-        }
+func processTask(task queue.Task) {
+	taskKey := queue.ComputeTaskKey(task.DeployRequest)
+	log.Printf("Processing task %s", taskKey)
 
-        result := storage.DeployResult{
-            Request: task.DeployRequest,
-            Envs:    make(map[string]string),
-        }
+	namespace, ok := cfg.Environments[task.DeployRequest.Env]
+	if !ok {
+		log.Printf("Invalid environment %s for task %s", task.DeployRequest.Env, taskKey)
+		return
+	}
 
-        newImage, err := k8sClient.GetNewImage(task.DeployRequest.Service, task.DeployRequest.Version, namespace)
-        if err != nil {
-            result.Success = false
-            result.ErrorMsg = fmt.Sprintf("Failed to get new image: %v", err)
-            log.Printf("Failed to get new image for task %s: %v", taskKey, err)
-            storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
-            go func() {
-                if err := telegram.SendTelegramNotification(cfg, &result); err != nil {
-                    log.Printf("Failed to send Telegram notification for task %s: %v", taskKey, err)
-                }
-                if err := telegram.NotifyDeployTeam(cfg, &result); err != nil {
-                    log.Printf("Failed to send deploy team notification for task %s: %v", taskKey, err)
-                }
-            }()
-            feedbackCompleteToGateway(cfg, taskKey)
-            continue
-        }
+	updateCtx, updateCancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
+	defer updateCancel()
 
-        updateCtx, updateCancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
-        defer updateCancel()
+	newImage, err := k8sClient.GetNewImage(task.DeployRequest.Service, task.DeployRequest.Version, namespace)
+	if err != nil {
+		log.Printf("Failed to get new image for task %s: %v", taskKey, err)
+		return
+	}
 
-        success, errMsg, oldImage := k8sClient.UpdateDeployment(updateCtx, task.DeployRequest.Service, newImage, namespace)
-        if success {
-            checkCtx, checkCancel := context.WithTimeout(context.Background(), 2*time.Minute) // Extended timeout
-            defer checkCancel()
+	success, errMsg, oldImage := k8sClient.UpdateDeployment(updateCtx, task.DeployRequest.Service, newImage, namespace)
+	result := storage.DeployResult{
+		Request:  task.DeployRequest,
+		Success:  success,
+		ErrorMsg: errMsg,
+		OldImage: oldImage,
+		Events:   k8sClient.GetPodEvents(updateCtx, task.DeployRequest.Service, namespace),
+		Logs:     "",
+		Envs:     make(map[string]string),
+	}
 
-            maxAttempts := 3
-            for attempt := 1; attempt <= maxAttempts; attempt++ {
-                pods := k8sClient.GetPodsForDeployment(checkCtx, task.DeployRequest.Service, namespace)
-                if pods == nil {
-                    log.Printf("Failed to get pods for task %s (attempt %d/%d): retrying", taskKey, attempt, maxAttempts)
-                    if attempt < maxAttempts {
-                        time.Sleep(5 * time.Second)
-                        continue
-                    }
-                    result.Success = false
-                    result.ErrorMsg = "Failed to get pods after retries"
-                    break
-                }
+	if success {
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
+		defer checkCancel()
 
-                newPodsReady := true
-                var errMsgBuilder strings.Builder
-                var logsBuf strings.Builder
-                result.Events = k8sClient.GetPodEvents(checkCtx, task.DeployRequest.Service, namespace)
+		ready, readyErr := k8sClient.CheckNewPodStatus(checkCtx, task.DeployRequest.Service, newImage, namespace)
+		if ready {
+			result.Success = true
+			result.ErrorMsg = ""
+			storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "success", result.Request.UserName)
+			if err := telegram.SendTelegramNotification(cfg, &result); err != nil {
+				log.Printf("Failed to send Telegram notification for task %s: %v", taskKey, err)
+			}
+			feedbackCompleteToGateway(cfg, taskKey)
+		} else {
+			result.Success = false
+			result.ErrorMsg = fmt.Sprintf("Pod status check failed: %v", readyErr)
+			pods := k8sClient.GetPodsForDeployment(checkCtx, task.DeployRequest.Service, namespace)
+			if len(pods) > 0 {
+				result.Logs = k8sClient.GetPodLogs(checkCtx, pods[0].Name, namespace)
+				result.Envs = k8sClient.GetPodEnv(checkCtx, pods[0].Name, namespace)
+			}
+			maxRollbackAttempts := 3
+			var rollbackErr error
+			for attempt := 1; attempt <= maxRollbackAttempts; attempt++ {
+				rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), time.Duration(cfg.TimeoutSeconds)*time.Second)
+				rollbackErr = k8sClient.RollbackDeployment(rollbackCtx, task.DeployRequest.Service, namespace)
+				rollbackCancel()
+				if rollbackErr == nil {
+					break
+				}
+				log.Printf("Rollback failed for task %s (attempt %d/%d): %v", taskKey, attempt, maxRollbackAttempts, rollbackErr)
+				if attempt < maxRollbackAttempts {
+					time.Sleep(5 * time.Second)
+				}
+			}
+			if rollbackErr != nil {
+				result.ErrorMsg += fmt.Sprintf("; Rollback failed after %d attempts: %v", maxRollbackAttempts, rollbackErr)
+			} else {
+				rollbackReady, rollbackErr := k8sClient.CheckNewPodStatus(checkCtx, task.DeployRequest.Service, oldImage, namespace)
+				if rollbackReady {
+					result.ErrorMsg += fmt.Sprintf("; Rollback succeeded to version: %s", getVersionFromImage(oldImage))
+				} else {
+					result.ErrorMsg += fmt.Sprintf("; Rollback verification failed: %v", rollbackErr)
+				}
+			}
 
-                for _, pod := range pods {
-                    phase := pod.Status.Phase
-                    podObj, err := k8sClient.Client().CoreV1().Pods(namespace).Get(checkCtx, pod.Name, v1.GetOptions{})
-                    if err != nil {
-                        newPodsReady = false
-                        errMsgBuilder.WriteString(fmt.Sprintf("Pod %s: Failed to get status: %v\n", pod.Name, err))
-                        continue
-                    }
-                    ready := false
-                    for _, cond := range podObj.Status.Conditions {
-                        if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-                            ready = true
-                            break
-                        }
-                    }
-                    if phase == "Failed" || phase == "CrashLoopBackOff" || phase == "Evicted" {
-                        newPodsReady = false
-                        logsBuf.WriteString(fmt.Sprintf("Pod %s (%s): %s\n", pod.Name, phase, k8sClient.GetPodLogs(checkCtx, pod.Name, namespace)))
-                    } else if phase != "Running" || !ready {
-                        newPodsReady = false
-                        logsBuf.WriteString(fmt.Sprintf("Pod %s (%s, Ready=%v): %s\n", pod.Name, phase, ready, k8sClient.GetPodLogs(checkCtx, pod.Name, namespace)))
-                    }
-                }
-                result.Logs = logsBuf.String()
-                if newPodsReady {
-                    break
-                }
-                if attempt < maxAttempts {
-                    select {
-                    case <-checkCtx.Done():
-                        result.ErrorMsg = fmt.Sprintf("Context cancelled: %v", checkCtx.Err())
-                        break
-                    case <-time.After(5 * time.Second):
-                    }
-                } else {
-                    result.ErrorMsg = fmt.Sprintf("Pods not ready after %d attempts: %s", maxAttempts, errMsgBuilder.String())
-                }
-            }
-
-            if newPodsReady {
-                result.Success = true
-                result.OldImage = oldImage
-                storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "success", result.Request.UserName)
-                log.Printf("Deployment succeeded for task %s: service=%s, env=%s, version=%s, user=%s",
-                    taskKey, result.Request.Service, result.Request.Env, result.Request.Version, result.Request.UserName)
-                go func() {
-                    if err := telegram.SendTelegramNotification(cfg, &result); err != nil {
-                        log.Printf("Failed to send Telegram notification for task %s: %v", taskKey, err)
-                    }
-                }()
-                feedbackCompleteToGateway(cfg, taskKey)
-            } else {
-                result.Success = false
-                if result.ErrorMsg == "" {
-                    result.ErrorMsg = "Pod check failed after retries"
-                }
-                result.OldImage = oldImage
-
-                rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 1*time.Minute)
-                defer rollbackCancel()
-                maxRollbackAttempts := 3
-                var rollbackErr error
-                for attempt := 1; attempt <= maxRollbackAttempts; attempt++ {
-                    rollbackErr = k8sClient.RollbackDeployment(rollbackCtx, task.DeployRequest.Service, namespace)
-                    if rollbackErr == nil {
-                        break
-                    }
-                    log.Printf("Rollback failed for task %s (attempt %d/%d): %v", taskKey, attempt, maxRollbackAttempts, rollbackErr)
-                    if attempt < maxRollbackAttempts {
-                        time.Sleep(5 * time.Second)
-                    }
-                }
-                if rollbackErr != nil {
-                    result.ErrorMsg += fmt.Sprintf("; Rollback failed after %d attempts: %v", maxRollbackAttempts, rollbackErr)
-                } else {
-                    rollbackReady, rollbackErr := k8sClient.CheckNewPodStatus(rollbackCtx, task.DeployRequest.Service, oldImage, namespace)
-                    if rollbackReady {
-                        result.ErrorMsg += fmt.Sprintf("; Rollback succeeded to version: %s", getVersionFromImage(oldImage))
-                    } else {
-                        result.ErrorMsg += fmt.Sprintf("; Rollback verification failed: %v", rollbackErr)
-                    }
-                }
-
-                storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
-                go func() {
-                    if err := telegram.SendTelegramNotification(cfg, &result); err != nil {
-                        log.Printf("Failed to send Telegram notification for task %s: %v", taskKey, err)
-                    }
-                    if err := telegram.NotifyDeployTeam(cfg, &result); err != nil {
-                        log.Printf("Failed to send deploy team notification for task %s: %v", taskKey, err)
-                    }
-                }()
-                feedbackCompleteToGateway(cfg, taskKey)
-            }
-        } else {
-            result.Success = false
-            result.ErrorMsg = errMsg
-            result.OldImage = oldImage
-            result.Events = k8sClient.GetPodEvents(updateCtx, task.DeployRequest.Service, namespace)
-            result.Logs = "Deployment update failed"
-            storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
-            go func() {
-                if err := telegram.SendTelegramNotification(cfg, &result); err != nil {
-                    log.Printf("Failed to send Telegram notification for task %s: %v", taskKey, err)
-                }
-                if err := telegram.NotifyDeployTeam(cfg, &result); err != nil {
-                    log.Printf("Failed to send deploy team notification for task %s: %v", taskKey, err)
-                }
-            }()
-            feedbackCompleteToGateway(cfg, taskKey)
-        }
-    }
+			storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
+			go func() {
+				if err := telegram.SendTelegramNotification(cfg, &result); err != nil {
+					log.Printf("Failed to send Telegram notification for task %s: %v", taskKey, err)
+				}
+				if err := telegram.NotifyDeployTeam(cfg, &result); err != nil {
+					log.Printf("Failed to send deploy team notification for task %s: %v", taskKey, err)
+				}
+			}()
+			feedbackCompleteToGateway(cfg, taskKey)
+		}
+	} else {
+		result.Success = false
+		result.ErrorMsg = errMsg
+		result.OldImage = oldImage
+		result.Events = k8sClient.GetPodEvents(updateCtx, task.DeployRequest.Service, namespace)
+		result.Logs = "Deployment update failed"
+		storage.PersistDeployment(cfg, result.Request.Service, result.Request.Env, newImage, "failed", result.Request.UserName)
+		go func() {
+			if err := telegram.SendTelegramNotification(cfg, &result); err != nil {
+				log.Printf("Failed to send Telegram notification for task %s: %v", taskKey, err)
+			}
+			if err := telegram.NotifyDeployTeam(cfg, &result); err != nil {
+				log.Printf("Failed to send deploy team notification for task %s: %v", taskKey, err)
+			}
+		}()
+		feedbackCompleteToGateway(cfg, taskKey)
+	}
 }
 
 func getVersionFromImage(image string) string {
-    parts := strings.Split(image, ":")
-    if len(parts) == 2 {
-        return parts[1]
-    }
-    return "unknown"
+	parts := strings.Split(image, ":")
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return "unknown"
 }
 
 func feedbackCompleteToGateway(cfg *config.Config, taskKey string) {
-    data, err := json.Marshal(map[string]string{"task_key": taskKey})
-    if err != nil {
-        log.Printf("Failed to marshal complete data for task %s: %v", taskKey, err)
-        return
-    }
+	data, err := json.Marshal(map[string]string{"task_key": taskKey})
+	if err != nil {
+		log.Printf("Failed to marshal complete data for task %s: %v", taskKey, err)
+		return
+	}
 
-    attempt := 1
-    for {
-        req, err := http.NewRequest("POST", cfg.GatewayURL+"/complete", bytes.NewBuffer(data))
-        if err != nil {
-            log.Printf("Failed to create complete request for task %s (attempt %d): %v", taskKey, attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-        req.Header.Set("Content-Type", "application/json")
+	attempt := 1
+	for {
+		req, err := http.NewRequest("POST", cfg.GatewayURL+"/complete", bytes.NewBuffer(data))
+		if err != nil {
+			log.Printf("Failed to create complete request for task %s (attempt %d): %v", taskKey, attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-        client := &http.Client{Timeout: 10 * time.Second}
-        resp, err := client.Do(req)
-        if err != nil {
-            log.Printf("Failed to send complete to gateway for task %s (attempt %d): %v", taskKey, attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-        defer resp.Body.Close()
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Failed to send complete to gateway for task %s (attempt %d): %v", taskKey, attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		defer resp.Body.Close()
 
-        if resp.StatusCode != http.StatusOK {
-            log.Printf("Gateway complete failed with status %d for task %s (attempt %d)", resp.StatusCode, taskKey, attempt)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Gateway complete failed with status %d for task %s (attempt %d)", resp.StatusCode, taskKey, attempt)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
 
-        log.Printf("Feedback complete for task %s", taskKey)
-        return
-    }
+		log.Printf("Feedback complete for task %s", taskKey)
+		return
+	}
 }
 
 func reportToGateway(cfg *config.Config) {
-    fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
-    attempt := 1
-    for {
-        data, err := os.ReadFile(fileName)
-        if err != nil {
-            log.Printf("Failed to read deploy file for report (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-        var infos []storage.DeploymentInfo
-        if err := json.Unmarshal(data, &infos); err != nil {
-            log.Printf("Failed to unmarshal deploy file for report (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
+	fileName := storage.GetDailyFileName(time.Now(), "deploy", cfg.StorageDir)
+	attempt := 1
+	for {
+		data, err := os.ReadFile(fileName)
+		if err != nil {
+			log.Printf("Failed to read deploy file for report (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		var infos []storage.DeploymentInfo
+		if err := json.Unmarshal(data, &infos); err != nil {
+			log.Printf("Failed to unmarshal deploy file for report (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
 
-        reportData, err := json.Marshal(infos)
-        if err != nil {
-            log.Printf("Failed to marshal report (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
+		reportData, err := json.Marshal(infos)
+		if err != nil {
+			log.Printf("Failed to marshal report (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
 
-        req, err := http.NewRequest("POST", cfg.GatewayURL+"/report", bytes.NewBuffer(reportData))
-        if err != nil {
-            log.Printf("Failed to create report request (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-        req.Header.Set("Content-Type", "application/json")
+		req, err := http.NewRequest("POST", cfg.GatewayURL+"/report", bytes.NewBuffer(reportData))
+		if err != nil {
+			log.Printf("Failed to create report request (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-        client := &http.Client{Timeout: 10 * time.Second}
-        resp, err := client.Do(req)
-        if err != nil {
-            log.Printf("Failed to send report to gateway (attempt %d): %v", attempt, err)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
-        defer resp.Body.Close()
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Failed to send report to gateway (attempt %d): %v", attempt, err)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
+		defer resp.Body.Close()
 
-        if resp.StatusCode != http.StatusOK {
-            log.Printf("Gateway report failed with status %d (attempt %d)", resp.StatusCode, attempt)
-            time.Sleep(getBackoff(attempt))
-            attempt++
-            continue
-        }
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("Gateway report failed with status %d (attempt %d)", resp.StatusCode, attempt)
+			time.Sleep(getBackoff(attempt))
+			attempt++
+			continue
+		}
 
-        log.Printf("Successfully reported to gateway")
-        return
-    }
+		log.Printf("Successfully reported to gateway")
+		return
+	}
+}
+
+func getBackoff(attempt int) time.Duration {
+	return time.Duration(attempt*attempt) * time.Second
+}
+
+func retryPendingTasks() {
+	taskQueue.LoadPendingTasks()
 }

@@ -1,4 +1,4 @@
-// config.go
+// internal/config/config.go
 package config
 
 import (
@@ -45,11 +45,7 @@ func LoadConfig(filePath string) *Config {
 		fmt.Fprintf(os.Stderr, "Failed to unmarshal config: %v\n", err)
 		os.Exit(1)
 	}
-	// Normalize environment keys to lowercase
-	for k, v := range cfg.Environments {
-		delete(cfg.Environments, k)
-		cfg.Environments[strings.ToLower(k)] = v
-	}
+	// 优化：不转小写，保持大小写
 	// Debug: Log loaded ServiceKeywords
 	log.Printf("Loaded ServiceKeywords: %v", cfg.ServiceKeywords)
 	if cfg.TimeoutSeconds == 0 {

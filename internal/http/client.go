@@ -1,3 +1,4 @@
+// internal/http/client.go
 package http
 
 import (

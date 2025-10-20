@@ -1,3 +1,4 @@
+// internal/queue/queue.go
 package queue
 
 import (
@@ -88,15 +89,14 @@ func (q *Queue) Dequeue() <-chan Task {
 
 func (q *Queue) GetPendingTasks(env string) []types.DeployRequest {
 	var tasks []types.DeployRequest
-	lowerEnv := strings.ToLower(env)
 	q.taskMap.Range(func(key, value interface{}) bool {
 		task := value.(Task)
-		if strings.ToLower(task.DeployRequest.Env) == lowerEnv && task.DeployRequest.Status == "pending" {
+		if task.DeployRequest.Env == env && task.DeployRequest.Status == "pending" { // 优化：大小写敏感
 			tasks = append(tasks, task.DeployRequest)
 		}
 		return true
 	})
-	log.Printf("Returning %d pending tasks for env %s", len(tasks), lowerEnv)
+	log.Printf("Returning %d pending tasks for env %s", len(tasks), env)
 	return tasks
 }
 

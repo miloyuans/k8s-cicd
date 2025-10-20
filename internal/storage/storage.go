@@ -1,4 +1,4 @@
-// storage.go
+// internal/storage/storage.go
 package storage
 
 import (
@@ -175,34 +175,20 @@ func UpdateAllDeploymentVersions(cfg *config.Config, client dynamic.Interface) {
 			}
 		}
 	}
-
 	if updated {
-		newData, err := json.MarshalIndent(infos, "", "  ")
+		data, err = json.MarshalIndent(infos, "", "  ")
 		if err != nil {
-			fmt.Printf("Failed to marshal updated deploy file %s: %v\n", fileName, err)
+			fmt.Printf("Failed to marshal deploy file %s: %v\n", fileName, err)
 			return
 		}
-		if err := os.WriteFile(fileName, newData, 0644); err != nil {
-			fmt.Printf("Failed to write updated deploy file %s: %v\n", fileName, err)
+		if err := os.WriteFile(fileName, data, 0644); err != nil {
+			fmt.Printf("Failed to write deploy file %s: %v\n", fileName, err)
 		}
 	}
 }
 
 func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config) error {
-	if err := os.WriteFile(fileName, []byte("[]"), 0644); err != nil {
-		fmt.Printf("Failed to create daily file %s: %v\n", fileName, err)
-		return err
-	}
-	data, err := os.ReadFile(fileName)
-	if err != nil {
-		fmt.Printf("Failed to read daily file %s: %v\n", fileName, err)
-		return err
-	}
 	var infos []DeploymentInfo
-	if err := json.Unmarshal(data, &infos); err != nil {
-		fmt.Printf("Failed to unmarshal daily file %s: %v\n", fileName, err)
-		return err
-	}
 	for env, namespace := range cfg.Environments {
 		deployments, err := client.Resource(schema.GroupVersionResource{
 			Group:    "apps",
@@ -210,7 +196,7 @@ func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config
 			Resource: "deployments",
 		}).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
 		if err != nil {
-			fmt.Printf("Failed to list deployments for namespace %s: %v\n", namespace, err)
+			fmt.Printf("Failed to list deployments for env %s namespace %s: %v\n", env, namespace, err)
 			continue
 		}
 		for _, dep := range deployments.Items {
@@ -231,7 +217,7 @@ func InitDailyFile(fileName string, client dynamic.Interface, cfg *config.Config
 			})
 		}
 	}
-	data, err = json.MarshalIndent(infos, "", "  ")
+	data, err := json.MarshalIndent(infos, "", "  ")
 	if err != nil {
 		fmt.Printf("Failed to marshal daily file %s: %v\n", fileName, err)
 		return err

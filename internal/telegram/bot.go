@@ -1,3 +1,4 @@
+// internal/telegram/bot.go
 package telegram
 
 import (
@@ -163,146 +164,118 @@ func handleBot(bot *tgbotapi.BotAPI, cfg *config.Config, service string) {
 			}
 
 			triggerList := strings.Join(cfg.TriggerKeywords, ", ")
-			response := fmt.Sprintf("请使用触发关键字（如 %s）开始部署。\nPlease use a trigger keyword (e.g., %s) to start a deployment.", triggerList, triggerList)
-			if len(cfg.InvalidResponses) > 0 {
-				response = cfg.InvalidResponses[rand.Intn(len(cfg.InvalidResponses))]
-			}
-			log.Printf("Invalid input from user %d in chat %d: %s, responding with: %s", userID, chatID, text, response)
-			if err := sendMessage(bot, chatID, response); err != nil {
-				log.Printf("Failed to send message to chat %d: %v", chatID, err)
-			}
+			response := fmt.Sprintf("请使用触发关键字（如 %s）开始部署。\nPlease use a trigger keyword (e.g., %s) to start deployment.", triggerList, triggerList)
+			sendMessage(bot, chatID, response)
 		} else if update.CallbackQuery != nil {
+			callbackData := update.CallbackQuery.Data
 			chatID := update.CallbackQuery.Message.Chat.ID
+			messageID := update.CallbackQuery.Message.MessageID
 			userID := update.CallbackQuery.From.ID
-			data := update.CallbackQuery.Data
 
-			log.Printf("Received callback query from user %d in chat %d: %s", userID, chatID, data)
-
-			if cfg.TelegramChats[service] != chatID {
-				log.Printf("Ignoring callback from chat %d: not in allowed chats for service %s", chatID, service)
-				continue
-			}
-
-			if strings.HasPrefix(data, "confirm_api:") {
-				id := strings.TrimPrefix(data, "confirm_api:")
+			if strings.HasPrefix(callbackData, "confirm_api:") {
+				id := strings.TrimPrefix(callbackData, "confirm_api:")
 				if tasks, ok := dialog.PendingConfirmations.Load(id); ok {
-					taskList := tasks.([]types.DeployRequest)
-					for _, task := range taskList {
-						task.Status = "pending"
-						taskKey := queue.ComputeTaskKey(task)
-						log.Printf("Enqueued task %s for key %s (service=%s, env=%s, version=%s)", taskKey, taskKey, task.Service, task.Env, task.Version)
-						dialog.GlobalTaskQueue.Enqueue(queue.Task{DeployRequest: task})
+					for _, t := range tasks.([]types.DeployRequest) {
+						queue.GlobalTaskQueue.ConfirmTask(t)
 					}
 					dialog.PendingConfirmations.Delete(id)
-					if err := sendMessage(bot, chatID, "Deployment confirmed via API."); err != nil {
-						log.Printf("Failed to send confirmation message to chat %d: %v", chatID, err)
-					}
-				} else {
-					if err := sendMessage(bot, chatID, "Confirmation ID not found or already processed."); err != nil {
-						log.Printf("Failed to send message to chat %d: %v", chatID, err)
-					}
+					edit := tgbotapi.NewEditMessageText(chatID, messageID, update.CallbackQuery.Message.Text+"\n\n已确认 / Confirmed")
+					bot.Send(edit)
 				}
-			} else if strings.HasPrefix(data, "cancel_api:") {
-				id := strings.TrimPrefix(data, "cancel_api:")
+			} else if strings.HasPrefix(callbackData, "cancel_api:") {
+				id := strings.TrimPrefix(callbackData, "cancel_api:")
 				dialog.PendingConfirmations.Delete(id)
-				if err := sendMessage(bot, chatID, "Deployment cancelled via API."); err != nil {
-					log.Printf("Failed to send cancellation message to chat %d: %v", chatID, err)
-				}
+				edit := tgbotapi.NewEditMessageText(chatID, messageID, update.CallbackQuery.Message.Text+"\n\n已取消 / Cancelled")
+				bot.Send(edit)
 			} else if dialog.IsDialogActive(userID) {
-				log.Printf("Processing callback for user %d in chat %d: %s", userID, chatID, data)
-				dialog.ProcessDialog(userID, chatID, data, cfg)
-			} else {
-				log.Printf("No active dialog for user %d in chat %d, ignoring callback: %s", userID, chatID, data)
-			}
-
-			callback := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
-			if _, err := bot.Request(callback); err != nil {
-				log.Printf("Failed to answer callback query for user %d in chat %d: %v", userID, chatID, err)
-			} else {
-				log.Printf("Successfully answered callback query for user %d in chat %d", userID, chatID)
+				// 处理对话回调
+				if strings.HasPrefix(callbackData, "service:") {
+					service := strings.TrimPrefix(callbackData, "service:")
+					dialog.ProcessDialog(userID, chatID, service, cfg)
+				} else if strings.HasPrefix(callbackData, "env:") {
+					env := strings.TrimPrefix(callbackData, "env:")
+					dialog.ProcessDialog(userID, chatID, env, cfg)
+				} else {
+					dialog.ProcessDialog(userID, chatID, callbackData, cfg)
+				}
 			}
 		}
 	}
-}
-
-func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) error {
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "HTML"
-	_, err := bot.Send(msg)
-	if err != nil {
-		// Check for Telegram-specific errors
-		if apiErr, ok := err.(tgbotapi.APIError); ok {
-			log.Printf("Telegram API error: Code=%d, Description=%s", apiErr.ErrorCode, apiErr.Message)
-			return fmt.Errorf("telegram API error: code=%d, message=%s", apiErr.ErrorCode, apiErr.Message)
-		}
-		log.Printf("Failed to send message to chat %d: %v", chatID, err)
-		return err
-	}
-	return nil
 }
 
 func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) error {
-	category := classifyService(result.Request.Service, cfg.ServiceKeywords)
+	category := ClassifyService(result.Request.Service, cfg.ServiceKeywords)
 	chatID, ok := cfg.TelegramChats[category]
 	if !ok {
-		log.Printf("No chat configured for category %s, trying default chat", category)
+		log.Printf("No chat configured for category %s, using default 'other'", category)
 		if defaultChatID, ok := cfg.TelegramChats["other"]; ok {
 			chatID = defaultChatID
-			category = "other"
 		} else {
 			log.Printf("No default chat configured for category %s", category)
-			return logToFile("No chat configured for notification", result)
+			return fmt.Errorf("no chat configured for category %s", category)
 		}
 	}
-	bot, err := GetBot(category)
+	token, ok := cfg.TelegramBots[category]
+	if !ok {
+		log.Printf("No bot configured for category %s, using default 'other'", category)
+		if defaultToken, ok := cfg.TelegramBots["other"]; ok {
+			token = defaultToken
+		} else {
+			log.Printf("No default bot configured for category %s", category)
+			return fmt.Errorf("no bot configured for category %s", category)
+		}
+	}
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSHandshakeTimeout:   10 * time.Second,
+			IdleConnTimeout:       30 * time.Second,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			ForceAttemptHTTP2:     true,
+		},
+	}
+	bot, err := tgbotapi.NewBotAPIWithClient(token, tgbotapi.APIEndpoint, httpClient)
 	if err != nil {
-		log.Printf("Failed to get bot for category %s: %v", category, err)
-		return logToFile(fmt.Sprintf("Failed to get bot for category %s: %v", category, err), result)
+		log.Printf("Failed to create bot for category %s: %v", category, err)
+		return logToFile(fmt.Sprintf("Failed to create bot for category %s: %v", category, err), result)
 	}
 
 	var md strings.Builder
 	if result.Success {
 		md.WriteString(fmt.Sprintf("<b>✅ 部署成功 / Deployment Succeeded</b>\n\n"))
-		md.WriteString(fmt.Sprintf("服务 / Service: <b>%s</b>\n", result.Request.Service))
-		md.WriteString(fmt.Sprintf("环境 / Environment: <b>%s</b>\n", result.Request.Env))
-		md.WriteString(fmt.Sprintf("版本 / Version: <b>%s</b>\n", result.Request.Version))
-		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: <b>%s</b>\n", result.Request.UserName))
-		md.WriteString(fmt.Sprintf("\n<b>部署时间 / Deployed at</b>: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
 	} else {
 		md.WriteString(fmt.Sprintf("<b>❌ 部署失败 / Deployment Failed</b>\n\n"))
-		md.WriteString(fmt.Sprintf("服务 / Service: <b>%s</b>\n", result.Request.Service))
-		md.WriteString(fmt.Sprintf("环境 / Environment: <b>%s</b>\n", result.Request.Env))
-		md.WriteString(fmt.Sprintf("失败版本 / Failed Version: <b>%s</b>\n", result.Request.Version))
-		md.WriteString(fmt.Sprintf("回滚版本 / Rollback Version: <b>%s</b>\n", getVersionFromImage(result.OldImage)))
-		md.WriteString(fmt.Sprintf("错误 / Error: <b>%s</b>\n", result.ErrorMsg))
-		md.WriteString(fmt.Sprintf("提交用户 / Submitted by: <b>%s</b>\n", result.Request.UserName))
-		md.WriteString("\n<b>🔍 诊断信息 / Diagnostics</b>\n\n")
-		md.WriteString(fmt.Sprintf("事件 / Events:\n%s\n", result.Events))
-		md.WriteString("环境变量 / Environment Variables:\n")
-		for k, v := range result.Envs {
-			md.WriteString(fmt.Sprintf("- %s: <b>%s</b>\n", k, v))
-		}
-		md.WriteString(fmt.Sprintf("\n日志 / Logs: <b>%s</b>\n", result.Logs))
-		md.WriteString(fmt.Sprintf("\n<b>失败时间 / Failed at</b>: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
 	}
+	md.WriteString(fmt.Sprintf("服务 / Service: <b>%s</b>\n", result.Request.Service))
+	md.WriteString(fmt.Sprintf("环境 / Environment: <b>%s</b>\n", result.Request.Env))
+	md.WriteString(fmt.Sprintf("版本 / Version: <b>%s</b>\n", result.Request.Version))
+	if !result.Success {
+		md.WriteString(fmt.Sprintf("错误 / Error: <b>%s</b>\n", result.ErrorMsg))
+		md.WriteString(fmt.Sprintf("旧版本 / Old Version: <b>%s</b>\n", getVersionFromImage(result.OldImage)))
+		md.WriteString(fmt.Sprintf("\n事件 / Events:\n<pre>%s</pre>\n", result.Events))
+		md.WriteString(fmt.Sprintf("\n日志 / Logs:\n<pre>%s</pre>\n", result.Logs))
+	}
+	md.WriteString(fmt.Sprintf("\n<b>由用户 / By user</b>: %s\n", result.Request.UserName))
+	md.WriteString(fmt.Sprintf("<b>时间 / Time</b>: %s\n", result.Request.Timestamp.Format("2006-01-02 15:04:05")))
 
 	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		err := sendMessage(bot, chatID, md.String())
 		if err == nil {
-			log.Printf("Successfully sent notification for service %s in env %s with success %t", result.Request.Service, result.Request.Env, result.Success)
+			log.Printf("Successfully sent notification for deployment of service %s in env %s", result.Request.Service, result.Request.Env)
 			return nil
 		}
 		if apiErr, ok := err.(tgbotapi.APIError); ok && apiErr.ErrorCode == 429 {
-			retryAfter := 1 * time.Second // Default retry delay
+			retryAfter := 1 * time.Second
 			if apiErr.RetryAfter > 0 {
 				retryAfter = time.Duration(apiErr.RetryAfter) * time.Second
 			}
-			log.Printf("Rate limit hit for chat %d (attempt %d/%d), retrying after %v", chatID, attempt, maxRetries, retryAfter)
+			log.Printf("Rate limit hit for notification to chat %d (attempt %d/%d), retrying after %v", chatID, attempt, maxRetries, retryAfter)
 			time.Sleep(retryAfter)
 			continue
 		}
-		log.Printf("Failed to send notification to chat %d for service %s (attempt %d/%d): %v", chatID, result.Request.Service, attempt, maxRetries, err)
+		log.Printf("Failed to send notification to chat %d (attempt %d/%d): %v", chatID, attempt, maxRetries, err)
 		if attempt == maxRetries {
 			return logToFile(fmt.Sprintf("Failed to send notification after %d attempts: %v", maxRetries, err), result)
 		}
@@ -311,21 +284,27 @@ func SendTelegramNotification(cfg *config.Config, result *storage.DeployResult) 
 	return fmt.Errorf("failed to send notification after %d attempts", maxRetries)
 }
 
+func sendMessage(bot *tgbotapi.BotAPI, chatID int64, text string) error {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "HTML"
+	_, err := bot.Send(msg)
+	return err
+}
+
 func NotifyDeployTeam(cfg *config.Config, result *storage.DeployResult) error {
-	category := cfg.DeployCategory
-	if category == "" {
-		log.Printf("No deploy category configured, trying default chat")
-		category = "other"
+	if result.Success {
+		return nil // Only notify on failure
 	}
+	category := cfg.DeployCategory
 	chatID, ok := cfg.TelegramChats[category]
 	if !ok {
-		log.Printf("No chat configured for category %s, skipping deploy notification", category)
-		return logToFile(fmt.Sprintf("No chat configured for deploy category %s", category), result)
+		log.Printf("No chat configured for deploy category %s", category)
+		return fmt.Errorf("no chat configured for deploy category %s", category)
 	}
 	token, ok := cfg.TelegramBots[category]
 	if !ok {
-		log.Printf("No bot configured for category %s, skipping deploy notification", category)
-		return logToFile(fmt.Sprintf("No bot configured for deploy category %s", category), result)
+		log.Printf("No bot configured for deploy category %s", category)
+		return fmt.Errorf("no bot configured for deploy category %s", category)
 	}
 	httpClient := &http.Client{
 		Timeout: 30 * time.Second,
@@ -435,7 +414,7 @@ func getVersionFromImage(image string) string {
 	return "unknown"
 }
 
-func classifyService(service string, keywords map[string][]string) string {
+func ClassifyService(service string, keywords map[string][]string) string {
 	keywordsMu.Lock()
 	defer keywordsMu.Unlock()
 
