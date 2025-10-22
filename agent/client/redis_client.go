@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s-cicd/agent/config"
@@ -125,13 +126,13 @@ func (r *RedisClient) UpdateTaskStatus(service, version, environment, user, stat
 	pendingKey := fmt.Sprintf("deploy:pending:%s:%s:%s", service, environment, user)
 	r.client.Del(ctx, pendingKey)
 
+	// 步骤4：删除去重key
+	dedupKey := fmt.Sprintf("deploy:dedup:%s:%s:%s:%s:%s", 
+		service, environment, version, user, "pending")
+	r.client.Del(ctx, dedupKey)
+
 	logrus.Infof("任务状态更新成功: %s -> %s", service, status)
 	return nil
-}
-
-// Close 关闭Redis连接
-func (r *RedisClient) Close() error {
-	return r.client.Close()
 }
 
 // CheckDuplicateTask 检查任务是否已存在（严格全字段匹配）
@@ -139,7 +140,7 @@ func (r *RedisClient) CheckDuplicateTask(deploy models.DeployRequest) (bool, err
 	ctx := context.Background()
 	
 	// 生成唯一Key（所有字段组合）
-	key := fmt.Sprintf("deploy:dedup:%s:%s:%s:%v:%s", 
+	key := fmt.Sprintf("deploy:dedup:%s:%s:%s:%s:%s", 
 		deploy.Service, 
 		strings.Join(deploy.Environments, ","),
 		deploy.Version, 
@@ -153,8 +154,8 @@ func (r *RedisClient) CheckDuplicateTask(deploy models.DeployRequest) (bool, err
 	}
 	
 	if exists > 0 {
-		logrus.Warnf("⚠️ 任务去重: 已存在相同任务 %s v%s [%s/%s]", 
-			deploy.Service, deploy.Version, deploy.Environments[0], deploy.User)
+		logrus.Warnf("⚠️ 任务去重: 已存在相同任务 %s v%s [%s/%s/%s]", 
+			deploy.Service, deploy.Version, deploy.Environments[0], deploy.User, deploy.Status)
 		return true, nil
 	}
 	
@@ -176,4 +177,9 @@ func (r *RedisClient) StoreTaskWithDeduplication(deploy models.DeployRequest) er
 	
 	// 步骤2：正常存储
 	return r.PushDeployments([]models.DeployRequest{deploy})
+}
+
+// Close 关闭Redis连接
+func (r *RedisClient) Close() error {
+	return r.client.Close()
 }

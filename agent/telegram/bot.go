@@ -62,7 +62,6 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 		return err
 	}
 
-	// ✅ 修复：只声明一次 green
 	green := color.New(color.FgGreen)
 	green.Printf("使用机器人 [%s] 发送通知\n", bot.Name)
 
@@ -93,7 +92,6 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 		return fmt.Errorf("发送失败，状态码: %d", resp.StatusCode)
 	}
 
-	// ✅ 修复：使用已声明的 green，不用 :=
 	green.Printf("✅ Telegram通知发送成功: %s\n", service)
 
 	return nil

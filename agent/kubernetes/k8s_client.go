@@ -363,10 +363,13 @@ func (k *K8sClient) BuildPushRequest(cfg *config.Config) (models.PushRequest, er
 			continue
 		}
 		
-		// 2.2 添加到环境列表
+		// 2.2 添加到总服务列表
+		services = append(services, nsServices...)
+		
+		// 2.3 添加到环境列表
 		environments = append(environments, env)
 		
-		// 2.3 为每个服务创建部署记录
+		// 2.4 为每个服务创建部署记录
 		for _, serviceWithVersion := range nsServices {
 			parts := strings.Split(serviceWithVersion, ":")
 			serviceName := parts[0]

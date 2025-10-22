@@ -103,7 +103,8 @@ func (c *APIClient) QueryTasks(req models.QueryRequest) ([]models.DeployRequest,
 // UpdateStatus POST /status - 更新部署状态
 func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 	logrus.Infof("📤 === POST /status ===")
-	logrus.Infof("请求: %s %s %s %s", req.Status, req.Service, req.Environment, req.User)
+	logrus.Infof("请求: status=%s service=%s version=%s environment=%s user=%s", 
+		req.Status, req.Service, req.Version, req.Environment, req.User)
 
 	jsonData, err := json.Marshal(req)
 	if err != nil {

@@ -40,13 +40,13 @@ func NewTaskQueue(workers int) *TaskQueue {
 }
 
 // StartWorkers 启动所有任务worker
-func (q *TaskQueue) StartWorkers(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiPusher *api.APIPusher) {
+func (q *TaskQueue) StartWorkers(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient) {
 	green := color.New(color.FgGreen).SprintFunc()
 	logrus.Infof("%s 启动 %d 个任务worker", green("👷"), q.workers)
 
 	q.wg.Add(q.workers)
 	for i := 0; i < q.workers; i++ {
-		go q.worker(cfg, redis, k8s, botMgr, apiPusher, i+1)
+		go q.worker(cfg, redis, k8s, botMgr, apiClient, i+1)
 	}
 
 	q.wg.Wait()
@@ -54,7 +54,7 @@ func (q *TaskQueue) StartWorkers(cfg *config.Config, redis *client.RedisClient, 
 }
 
 // worker 单个任务worker（无限循环执行任务）
-func (q *TaskQueue) worker(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiPusher *api.APIPusher, workerID int) {
+func (q *TaskQueue) worker(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, workerID int) {
 	defer q.wg.Done()
 
 	yellow := color.New(color.FgYellow).SprintFunc()
@@ -78,7 +78,7 @@ func (q *TaskQueue) worker(cfg *config.Config, redis *client.RedisClient, k8s *k
 		cyan := color.New(color.FgCyan).SprintFunc()
 		logrus.Infof("%s Worker-%d 执行任务: %s", cyan("🔨"), workerID, task.ID)
 
-		err := executeTask(cfg, redis, k8s, apiPusher, task, botMgr)
+		err := executeTask(cfg, redis, k8s, apiClient, task, botMgr)
 		if err != nil {
 			red := color.New(color.FgRed).SprintFunc()
 			logrus.Errorf("%s Worker-%d 任务执行失败: %v", red("💥"), workerID, err)
@@ -158,7 +158,7 @@ func (q *TaskQueue) IsEmpty() bool {
 }
 
 // executeTask 执行单个部署任务
-func executeTask(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, apiPusher *api.APIPusher, task models.Task, botMgr *telegram.BotManager) error {
+func executeTask(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task models.Task, botMgr *telegram.BotManager) error {
 	green := color.New(color.FgGreen).SprintFunc()
 	yellow := color.New(color.FgYellow).SprintFunc()
 	red := color.New(color.FgRed).SprintFunc()
@@ -167,7 +167,7 @@ func executeTask(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.
 	// ================================
 	// 步骤1：记录任务开始
 	// ================================
-	logrus.Infof("%s 开始执行执行部署任务:\n"+
+	logrus.Infof("%s 开始执行部署任务:\n"+
 		"  服务: %s\n"+
 		"  环境: %s\n"+
 		"  版本: %s\n"+
@@ -248,15 +248,22 @@ func executeTask(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.
 	}
 
 	// ================================
-	// 步骤7：推送API
+	// 步骤7：推送 /status 接口
 	// ================================
-	deployStatus := models.DeploymentStatus{
-		OldVersion: oldVersion,
-		NewVersion: task.Version,
-		IsSuccess:  success,
-		Message:    fmt.Sprintf("部署%s，耗时%v", map[bool]string{true: "成功", false: "失败"}[success], time.Since(startTime)),
+	statusReq := models.StatusRequest{
+		Service:     task.Service,
+		Version:     task.Version,
+		Environment: task.Environments[0],
+		User:        task.User,
+		Status:      status,
 	}
-	go apiPusher.PushDeployments([]models.DeploymentStatus{deployStatus})  // ✅ 修复：PushDeployments
+	err = apiClient.UpdateStatus(statusReq)
+	if err != nil {
+		logrus.Errorf("❌ /status 推送失败: %v", err)
+		// 可重试逻辑
+	} else {
+		logrus.Infof("✅ /status 推送成功: %s", status)
+	}
 
 	// ================================
 	// 步骤8：任务总结
