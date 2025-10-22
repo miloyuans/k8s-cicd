@@ -33,7 +33,6 @@ type BotManager struct {
 
 // NewBotManager 创建多机器人管理器
 func NewBotManager(bots []config.TelegramBot) *BotManager {
-	// 步骤1：初始化bots映射
 	m := &BotManager{Bots: make(map[string]*TelegramBot)}
 	
 	for i := range bots {
@@ -105,14 +104,12 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 	for _, bot := range bm.Bots {
 		for _, serviceList := range bot.Services {
 			for _, pattern := range serviceList {
-				// 正则匹配
 				if bot.RegexMatch {
 					matched, err := regexp.MatchString(pattern, service)
 					if err == nil && matched {
 						return bot, nil
 					}
 				} else {
-					// 前缀匹配
 					if strings.HasPrefix(strings.ToUpper(service), strings.ToUpper(pattern)) {
 						return bot, nil
 					}
@@ -125,9 +122,7 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 
 // escapeMarkdownV2 转义MarkdownV2特殊字符
 func (bm *BotManager) escapeMarkdownV2(text string) string {
-	escapeChars := []string{
-		"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!",
-	}
+	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	
 	for _, char := range escapeChars {
 		text = strings.ReplaceAll(text, char, "\\"+char)
@@ -135,76 +130,87 @@ func (bm *BotManager) escapeMarkdownV2(text string) string {
 	return text
 }
 
-// generateMarkdownMessage 生成美观的Markdown通知消息
+// generateMarkdownMessage 生成美观的Markdown通知消息（完全重写，无模板）
 func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
-	// 步骤1：定义消息模板（修复：使用raw string literal，避免转义问题）
-	tmpl := `*🚀 ` + service + ` 部署 {{.Status}}*\n\n` +
-		`**服务**: \`{{.Service}}\`\n` +
-		`**环境**: \`{{.Environment}}\`\n` +
-		`**操作人**: \`{{.User}}\`\n` +
-		`**旧版本**: \`{{.OldVersion}}\`\n` +
-		`**新版本**: \`{{.NewVersion}}\`\n` +
-		`**状态**: {{.StatusEmoji}} *{{.StatusText}}*\n` +
-		`**时间**: \`{{.Time}}\`\n\n`
-
-	if !success {
-		tmpl += `*🔄 自动回滚已完成*\n\n`
-	}
-
-	tmpl += `---\n*由 K8s-CICD Agent 自动发送*`
-
-	// 步骤2：解析模板
-	t, err := template.New("notification").Parse(tmpl)
-	if err != nil {
-		logrus.Error("模板解析失败: ", err)
-		return "部署通知"
-	}
-
-	// 步骤3：准备模板数据
-	data := struct {
-		Service      string
-		Environment  string
-		User         string
-		OldVersion   string
-		NewVersion   string
-		Success      bool
-		StatusEmoji  string
-		StatusText   string
-		Time         string
-	}{
-		Service:     service,
-		Environment: env,
-		User:        user,
-		OldVersion:  oldVersion,
-		NewVersion:  newVersion,
-		Success:     success,
-		Time:        time.Now().Format("2006-01-02 15:04:05"),
-	}
-
-	// 步骤4：设置状态信息
-	if success {
-		data.StatusEmoji = "✅"
-		data.StatusText = "部署成功"
-	} else {
-		data.StatusEmoji = "❌"
-		data.StatusText = "部署失败-已回滚"
-	}
-
-	// 步骤5：执行模板
-	var buf bytes.Buffer
-	err = t.Execute(&buf, data)
-	if err != nil {
-		logrus.Error("模板执行失败: ", err)
-		return "部署通知"
-	}
-
-	// 步骤6：转义Markdown特殊字符（仅转义非代码块内容）
-	message := buf.String()
+	// 步骤1：构建基础消息（完全使用字符串拼接，避免模板语法）
+	var message strings.Builder
 	
-	// 分离代码块和普通文本
-	lines := strings.Split(message, "\n")
+	// 标题
+	message.WriteString("*")
+	message.WriteString("🚀 ")
+	message.WriteString(service)
+	message.WriteString(" 部署 ")
+	if success {
+		message.WriteString("成功")
+	} else {
+		message.WriteString("失败")
+	}
+	message.WriteString("*")
+	message.WriteString("\n\n")
+	
+	// 服务信息
+	message.WriteString("**服务**: `")
+	message.WriteString(service)
+	message.WriteString("`")
+	message.WriteString("\n")
+	
+	// 环境信息
+	message.WriteString("**环境**: `")
+	message.WriteString(env)
+	message.WriteString("`")
+	message.WriteString("\n")
+	
+	// 操作人
+	message.WriteString("**操作人**: `")
+	message.WriteString(user)
+	message.WriteString("`")
+	message.WriteString("\n")
+	
+	// 旧版本
+	message.WriteString("**旧版本**: `")
+	message.WriteString(oldVersion)
+	message.WriteString("`")
+	message.WriteString("\n")
+	
+	// 新版本
+	message.WriteString("**新版本**: `")
+	message.WriteString(newVersion)
+	message.WriteString("`")
+	message.WriteString("\n")
+	
+	// 状态
+	message.WriteString("**状态**: ")
+	if success {
+		message.WriteString("✅ *部署成功*")
+	} else {
+		message.WriteString("❌ *部署失败-已回滚*")
+	}
+	message.WriteString("\n")
+	
+	// 时间
+	message.WriteString("**时间**: `")
+	message.WriteString(time.Now().Format("2006-01-02 15:04:05"))
+	message.WriteString("`")
+	message.WriteString("\n\n")
+	
+	// 回滚信息
+	if !success {
+		message.WriteString("*🔄 自动回滚已完成*")
+		message.WriteString("\n\n")
+	}
+	
+	// 分隔线和签名
+	message.WriteString("---")
+	message.WriteString("\n")
+	message.WriteString("*由 K8s-CICD Agent 自动发送*")
+
+	// 步骤2：获取完整消息
+	fullMessage := message.String()
+	
+	// 步骤3：转义非代码块的特殊字符
+	lines := strings.Split(fullMessage, "\n")
 	for i, line := range lines {
-		// 如果是代码块行（包含反引号），不转义
+		// 如果行包含代码块标记 `，跳过转义
 		if strings.Contains(line, "`") {
 			lines[i] = line
 		} else {
