@@ -210,3 +210,71 @@ deploy_category: "other"
   - 确认服务列表（`services/*.svc.list`）和 `environments.json` 正确更新。
   - 检查部署日志和通知，验证包含详细诊断信息。
   - 确保 Kubernetes 部署的 `revisionHistoryLimit` ≥ 2 以支持回滚。
+
+### Jenkins Pipeline 示例
+```yaml
+pipeline {
+    agent any
+    stages {
+        stage('Push Services') {
+            steps {
+                sh '''
+                curl -X POST http://k8s-cicd:8080/push -H "Content-Type: application/json" -d "{
+                  \"services\": [\"API\", \"USER\"],
+                  \"environments\": [\"PROD\", \"STAGING\"]
+                }"
+                '''
+            }
+        }
+        stage('Submit Deploy') {
+            steps {
+                sh '''
+                curl -X POST http://k8s-cicd:8080/deploy -H "Content-Type: application/json" -d "{
+                  \"service\": \"API\",
+                  \"environments\": [\"PROD\"],
+                  \"version\": \"${BUILD_NUMBER}\",
+                  \"user\": \"jenkins\",
+                  \"status\": \"pending\"
+                }"
+                '''
+            }
+        }
+        stage('Wait Approval') {
+            steps {
+                script {
+                    timeout(time: 10, unit: 'MINUTES') {
+                        waitUntil {
+                            script {
+                                def response = sh(
+                                    script: 'curl -s -X POST http://k8s-cicd:8080/query -H "Content-Type: application/json" -d "{\"environment\":\"PROD\",\"user\":\"jenkins\"}"',
+                                    returnStdout: true
+                                ).trim()
+                                return response != '{"message":"暂无任务，请继续等待"}'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stage('Deploy') {
+            steps {
+                echo '执行 K8s 部署...'
+                // 实际部署命令
+            }
+        }
+        stage('Update Status') {
+            steps {
+                sh '''
+                curl -X POST http://k8s-cicd:8080/status -H "Content-Type: application/json" -d "{
+                  \"service\": \"API\",
+                  \"version\": \"${BUILD_NUMBER}\",
+                  \"environment\": \"PROD\",
+                  \"user\": \"jenkins\",
+                  \"status\": \"success\"
+                }"
+                '''
+            }
+        }
+    }
+}
+```
