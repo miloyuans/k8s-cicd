@@ -92,11 +92,13 @@ func (a *Agent) pushInitialData() {
 	// 步骤2：执行推送
 	err := a.redis.PushDeployments(deploys)
 	if err != nil {
+		// ✅ 修复第96行：使用 .Sprint()
 		red := color.New(color.FgRed)
-		logrus.Errorf("%s 初始数据推送失败: %v", red("❌"), err)
+		logrus.Errorf("%s 初始数据推送失败: %v", red.Sprint("❌"), err)
 	} else {
+		// ✅ 修复第99行：使用 .Sprint()
 		green := color.New(color.FgGreen)
-		logrus.Infof("%s 初始数据推送成功", green("✅"))
+		logrus.Infof("%s 初始数据推送成功", green.Sprint("✅"))
 	}
 }
 
@@ -125,8 +127,9 @@ func (a *Agent) pollTasks() {
 				}
 				a.taskQ.Enqueue(taskModel)
 				
+				// ✅ 修复第129行：使用 .Sprint()
 				green := color.New(color.FgGreen)
-				logrus.Infof("%s 任务已加入队列: %s", green("📥"), taskModel.ID)
+				logrus.Infof("%s 任务已加入队列: %s", green.Sprint("📥"), taskModel.ID)
 			}
 		}
 	}
