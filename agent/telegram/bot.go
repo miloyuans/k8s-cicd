@@ -137,21 +137,21 @@ func (bm *BotManager) escapeMarkdownV2(text string) string {
 
 // generateMarkdownMessage 生成美观的Markdown通知消息
 func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
-	// 步骤1：定义消息模板
-	tmpl := `*🚀 {{.Service}} 部署 {{.Status}}*
+	// 步骤1：定义消息模板（修复：使用raw string literal，避免转义问题）
+	tmpl := `*🚀 ` + service + ` 部署 {{.Status}}*\n\n` +
+		`**服务**: \`{{.Service}}\`\n` +
+		`**环境**: \`{{.Environment}}\`\n` +
+		`**操作人**: \`{{.User}}\`\n` +
+		`**旧版本**: \`{{.OldVersion}}\`\n` +
+		`**新版本**: \`{{.NewVersion}}\`\n` +
+		`**状态**: {{.StatusEmoji}} *{{.StatusText}}*\n` +
+		`**时间**: \`{{.Time}}\`\n\n`
 
-**服务**: \`{{.Service}}\`
-**环境**: \`{{.Environment}}\`
-**操作人**: \`{{.User}}\`
-**旧版本**: \`{{.OldVersion}}\`
-**新版本**: \`{{.NewVersion}}\`
-**状态**: {{.StatusEmoji}} *{{.StatusText}}*
-**时间**: \`{{.Time}}\`
+	if !success {
+		tmpl += `*🔄 自动回滚已完成*\n\n`
+	}
 
-{{if not .Success}}*🔄 自动回滚已完成*{{end}}
-
----
-*由 K8s-CICD Agent 自动发送*`
+	tmpl += `---\n*由 K8s-CICD Agent 自动发送*`
 
 	// 步骤2：解析模板
 	t, err := template.New("notification").Parse(tmpl)
@@ -204,7 +204,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 	// 分离代码块和普通文本
 	lines := strings.Split(message, "\n")
 	for i, line := range lines {
-		// 如果是代码块行（包含 \`），不转义
+		// 如果是代码块行（包含反引号），不转义
 		if strings.Contains(line, "`") {
 			lines[i] = line
 		} else {
