@@ -36,11 +36,11 @@ func NewAgent(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8s
 	apiPusher := api.NewAPIPusher(&cfg.API)
 	
 	return &Agent{
-		config:   cfg,
-		redis:    redis,
-		k8s:      k8s,
-		taskQ:    taskQ,
-		botMgr:   botMgr,
+		config:  cfg,
+		redis:   redis,
+		k8s:     k8s,
+		taskQ:   taskQ,
+		botMgr:  botMgr,
 		apiPusher: apiPusher,
 	}
 }

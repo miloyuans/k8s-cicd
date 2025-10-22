@@ -148,9 +148,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 **状态**: {{.StatusEmoji}} *{{.StatusText}}*
 **时间**: \`{{.Time}}\`
 
-{{if not .Success}}
-*🔄 自动回滚已完成*
-{{end}}
+{{if not .Success}}*🔄 自动回滚已完成*{{end}}
 
 ---
 *由 K8s-CICD Agent 自动发送*`

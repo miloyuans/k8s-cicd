@@ -122,7 +122,7 @@ func (k *K8sClient) UpdateDeploymentImage(deploymentName, newImage string) error
 // ensureRollingUpdateStrategy 确保使用滚动更新策略
 func (k *K8sClient) ensureRollingUpdateStrategy(deploy *appsv1.Deployment) {
 	if deploy.Spec.Strategy.Type == "" {
-		deploy.Spec.Strategy.Type = appsv1.DeploymentStrategyTypeRollingUpdate
+		deploy.Spec.Strategy.Type = appsv1.RollingUpdateDeploymentStrategyType
 	}
 	
 	if deploy.Spec.Strategy.RollingUpdate == nil {
@@ -231,25 +231,42 @@ func (k *K8sClient) allContainersReady(pod *corev1.Pod) bool {
 	return true
 }
 
-// RollbackDeployment 使用官方Rollback API执行回滚（使用配置超时）
-func (k *K8sClient) RollbackDeployment(deploymentName string) error {
-	// 步骤1：创建回滚请求
-	rollback := &appsv1.DeploymentRollback{
-		Name: deploymentName,
-		RollbackTo: &appsv1.RollbackTo{
-			Revision: 1, // 回滚到上一个版本
-		},
+// RollbackDeployment 执行Deployment回滚（使用更新镜像方式模拟回滚）
+func (k *K8sClient) RollbackDeployment(deploymentName, oldImage string) error {
+	// 步骤1：获取当前Deployment
+	deploy, err := k.Clientset.AppsV1().Deployments(k.Namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("获取Deployment失败: %v", err)
 	}
 
-	// 步骤2：执行回滚
-	err := k.Clientset.AppsV1().Deployments(k.Namespace).Rollback(rollback)
+	// 步骤2：更新镜像回旧版本
+	for i := range deploy.Spec.Template.Spec.Containers {
+		deploy.Spec.Template.Spec.Containers[i].Image = oldImage
+	}
+
+	// 步骤3：更新注解
+	if deploy.Annotations == nil {
+		deploy.Annotations = make(map[string]string)
+	}
+	deploy.Annotations["deployment.cicd.k8s/version"] = oldImage
+	deploy.Annotations["deployment.cicd.k8s/updated-at"] = time.Now().Format(time.RFC3339)
+	deploy.Annotations["kubernetes.io/change-cause"] = "rollback to " + oldImage
+
+	// 步骤4：使用重试机制更新Deployment
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		result, err := k.Clientset.AppsV1().Deployments(k.Namespace).Update(context.TODO(), deploy, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+		*deploy = *result
+		return nil
+	})
+
 	if err != nil {
 		return fmt.Errorf("回滚Deployment失败: %v", err)
 	}
 
-	logrus.Infof("🔄 已触发回滚: %s 到上一个版本", deploymentName)
-
-	// 步骤3：等待回滚完成（使用配置的回滚超时）
+	// 步骤5：等待回滚完成（使用配置的回滚超时）
 	err = wait.Poll(k.cfg.PollInterval, k.cfg.RollbackTimeout, func() (bool, error) {
 		// 检查回滚后Deployment状态
 		deploy, err := k.Clientset.AppsV1().Deployments(k.Namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
