@@ -25,7 +25,9 @@ type TelegramConfig struct {
 
 // APIConfig API服务配置
 type APIConfig struct {
-	BaseURL string `yaml:"base_url"`
+	BaseURL      string        `yaml:"base_url"`        // API基础地址
+	PushInterval time.Duration `yaml:"push_interval"`   // 推送间隔，默认5s
+	MaxRetries   int           `yaml:"max_retries"`     // 最大重试次数，0=无限重试
 }
 
 // K8sAuthConfig K8s认证方式配置（支持kubeconfig和ServiceAccount双重认证）
@@ -55,6 +57,13 @@ type TaskConfig struct {
 	MaxQueueSize   int `yaml:"max_queue_size"`
 }
 
+// DeployConfig 部署相关配置
+type DeployConfig struct {
+	WaitTimeout     time.Duration `yaml:"wait_timeout"`        // 等待Deployment就绪超时，默认5分钟
+	RollbackTimeout time.Duration `yaml:"rollback_timeout"`    // 回滚等待超时，默认3分钟
+	PollInterval    time.Duration `yaml:"poll_interval"`       // 健康检查轮询间隔，默认5秒
+}
+
 // Config 全局配置结构
 type Config struct {
 	Telegram    TelegramConfig    `yaml:"telegram"`
@@ -62,6 +71,7 @@ type Config struct {
 	Kubernetes  K8sAuthConfig     `yaml:"kubernetes"`
 	Redis       RedisConfig       `yaml:"redis"`
 	Task        TaskConfig        `yaml:"task"`
+	Deploy      DeployConfig      `yaml:"deploy"`
 	LogLevel    string            `yaml:"log_level"`
 }
 
@@ -101,6 +111,25 @@ func LoadConfig(filePath string) (*Config, error) {
 
 // setDefaults 设置配置默认值
 func (c *Config) setDefaults() {
+	// API推送默认配置
+	if c.API.PushInterval == 0 {
+		c.API.PushInterval = 5 * time.Second
+	}
+	if c.API.MaxRetries == 0 {
+		c.API.MaxRetries = 0 // 无限重试
+	}
+
+	// 部署配置默认值
+	if c.Deploy.WaitTimeout == 0 {
+		c.Deploy.WaitTimeout = 5 * time.Minute
+	}
+	if c.Deploy.RollbackTimeout == 0 {
+		c.Deploy.RollbackTimeout = 3 * time.Minute
+	}
+	if c.Deploy.PollInterval == 0 {
+		c.Deploy.PollInterval = 5 * time.Second
+	}
+
 	// Redis默认TTL为24小时
 	if c.Redis.TTL == 0 {
 		c.Redis.TTL = 24 * time.Hour

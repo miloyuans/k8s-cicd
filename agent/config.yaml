@@ -1,45 +1,45 @@
-telegram:
-  bots:
-    # 机器人1：负责A系列服务
-    - name: "a-bot"
-      token: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-      group_id: "-1001234567890"
-      services:
-        a_services: ["API", "a1", "a2"]
-      regex_match: false
-      enabled: true
-      
-    # 机器人2：负责B系列服务（支持正则）
-    - name: "b-bot"
-      token: "654321:XYZ-ABC9876defGhi-jkl98U9v2w432rf33"
-      group_id: "-1000987654321"
-      services:
-        b_services: ["USER-\\d+", "ORDER-\\d+"]
-      regex_match: true
-      enabled: true
-
+# API配置
 api:
-  base_url: "http://localhost:8080"
+  base_url: "http://api.example.com"
+  push_interval: 5s
+  max_retries: 0  # 无限重试
 
+# K8s配置
 kubernetes:
-  auth_type: "serviceaccount"  # 或 "kubeconfig"
+  auth_type: "kubeconfig"
   kubeconfig: "~/.kube/config"
   namespace: "default"
-  service_name: "cicd-sa"
 
+# 部署配置
+deploy:
+  wait_timeout: 5m        # 等待新版本就绪超时
+  rollback_timeout: 3m    # 回滚等待超时
+  poll_interval: 5s       # 健康检查轮询间隔
+
+# Redis配置
 redis:
   addr: "localhost:6379"
-  password: ""
   db: 0
-  ttl: 24h                    # 数据过期时间
+  ttl: 24h
   max_retries: 3
-  idle_timeout: 5m
 
+# 任务队列配置
 task:
-  max_retries: 3
-  retry_delay_seconds: 30
   queue_workers: 5
   poll_interval_seconds: 30
+  max_retries: 3
+  retry_delay_seconds: 30
   max_queue_size: 100
+
+# Telegram配置
+telegram:
+  bots:
+    - name: "prod-bot"
+      token: "${TELEGRAM_TOKEN}"
+      group_id: "${TELEGRAM_GROUP_ID}"
+      services:
+        "API": ["API-GATEWAY"]
+        "USER": ["USER-SERVICE"]
+      enabled: true
 
 log_level: "info"

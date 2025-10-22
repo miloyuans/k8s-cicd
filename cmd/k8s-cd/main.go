@@ -12,7 +12,7 @@ import (
 	"k8s-cicd/agent/client"
 	"k8s-cicd/agent/kubernetes"
 
-	"github.com/fatih/color" // 新增：彩色启动日志
+	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
 
@@ -38,7 +38,7 @@ func main() {
 	defer redisClient.Close()
 
 	// 步骤3：创建K8s客户端
-	k8sClient, err := kubernetes.NewK8sClient(&cfg.Kubernetes)
+	k8sClient, err := kubernetes.NewK8sClient(&cfg.Kubernetes, &cfg.Deploy)
 	if err != nil {
 		logrus.Fatalf("K8s连接失败: %v", err)
 	}

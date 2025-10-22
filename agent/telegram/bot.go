@@ -12,7 +12,7 @@ import (
 
 	"k8s-cicd/agent/config"
 
-	"github.com/fatih/color" // 新增：彩色调试输出
+	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
 
@@ -54,7 +54,7 @@ func NewBotManager(bots []config.TelegramBot) *BotManager {
 	return m
 }
 
-// SendNotification 发送部署通知（增加彩色调试日志）
+// SendNotification 发送部署通知
 func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
 	// 步骤1：选择机器人
 	bot, err := bm.getBotForService(service)
@@ -123,11 +123,22 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
 }
 
+// escapeMarkdownV2 转义MarkdownV2特殊字符
+func (bm *BotManager) escapeMarkdownV2(text string) string {
+	escapeChars := []string{
+		"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!",
+	}
+	
+	for _, char := range escapeChars {
+		text = strings.ReplaceAll(text, char, "\\"+char)
+	}
+	return text
+}
+
 // generateMarkdownMessage 生成美观的Markdown通知消息
 func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
 	// 步骤1：定义消息模板
-	tmpl := `
-*🚀 {{.Service}} 部署 {{.Status}}*
+	tmpl := `*🚀 {{.Service}} 部署 {{.Status}}*
 
 **服务**: \`{{.Service}}\`
 **环境**: \`{{.Environment}}\`
@@ -142,8 +153,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 {{end}}
 
 ---
-*由 K8s-CICD Agent 自动发送*
-`
+*由 K8s-CICD Agent 自动发送*`
 
 	// 步骤2：解析模板
 	t, err := template.New("notification").Parse(tmpl)
@@ -154,15 +164,15 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 
 	// 步骤3：准备模板数据
 	data := struct {
-		Service     string
-		Environment string
-		User        string
-		OldVersion  string
-		NewVersion  string
-		Success     bool
-		StatusEmoji string
-		StatusText  string
-		Time        string
+		Service      string
+		Environment  string
+		User         string
+		OldVersion   string
+		NewVersion   string
+		Success      bool
+		StatusEmoji  string
+		StatusText   string
+		Time         string
 	}{
 		Service:     service,
 		Environment: env,
@@ -190,12 +200,19 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 		return "部署通知"
 	}
 
-	// 步骤6：转义Markdown特殊字符
+	// 步骤6：转义Markdown特殊字符（仅转义非代码块内容）
 	message := buf.String()
-	message = strings.ReplaceAll(message, "_", "\\_")
-	message = strings.ReplaceAll(message, "*", "\\*")
-	message = strings.ReplaceAll(message, "[", "\\[")
-	message = strings.ReplaceAll(message, "]", "\\]")
-
-	return message
+	
+	// 分离代码块和普通文本
+	lines := strings.Split(message, "\n")
+	for i, line := range lines {
+		// 如果是代码块行（包含 \`），不转义
+		if strings.Contains(line, "`") {
+			lines[i] = line
+		} else {
+			lines[i] = bm.escapeMarkdownV2(line)
+		}
+	}
+	
+	return strings.Join(lines, "\n")
 }

@@ -25,9 +25,11 @@ func NewRedisClient(cfg *config.RedisConfig) (*RedisClient, error) {
 		Password:     cfg.Password,
 		DB:           cfg.DB,
 		MaxRetries:   cfg.MaxRetries,
-		IdleTimeout:  cfg.IdleTimeout,
 		PoolSize:     10,
 		MinIdleConns: 2,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
 	})
 
 	// 步骤2：测试连接

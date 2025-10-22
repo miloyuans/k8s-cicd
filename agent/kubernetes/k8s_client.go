@@ -9,31 +9,34 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/retry"
 
 	"k8s-cicd/agent/config"
 	"github.com/sirupsen/logrus"
 )
 
-// K8sClient K8s客户端封装，支持双重认证方式
 type K8sClient struct {
 	Clientset *kubernetes.Clientset
 	Namespace string
+	cfg       *config.DeployConfig
 }
 
-// NewK8sClient 根据配置创建K8s客户端（支持kubeconfig和ServiceAccount）
-func NewK8sClient(cfg *config.K8sAuthConfig) (*K8sClient, error) {
+// NewK8sClient 根据配置创建K8s客户端
+func NewK8sClient(k8sCfg *config.K8sAuthConfig, deployCfg *config.DeployConfig) (*K8sClient, error) {
 	var config *rest.Config
 	var err error
 
 	// 步骤1：根据认证类型选择配置方式
-	switch cfg.AuthType {
+	switch k8sCfg.AuthType {
 	case "kubeconfig":
 		// 使用kubeconfig文件认证
-		config, err = clientcmd.BuildConfigFromFlags("", cfg.Kubeconfig)
+		config, err = clientcmd.BuildConfigFromFlags("", k8sCfg.Kubeconfig)
 		if err != nil {
 			return nil, fmt.Errorf("kubeconfig认证失败: %v", err)
 		}
@@ -48,7 +51,7 @@ func NewK8sClient(cfg *config.K8sAuthConfig) (*K8sClient, error) {
 		logrus.Info("使用ServiceAccount认证成功")
 
 	default:
-		return nil, fmt.Errorf("不支持的认证类型: %s", cfg.AuthType)
+		return nil, fmt.Errorf("不支持的认证类型: %s", k8sCfg.AuthType)
 	}
 
 	// 步骤2：创建clientset
@@ -60,12 +63,13 @@ func NewK8sClient(cfg *config.K8sAuthConfig) (*K8sClient, error) {
 	// 步骤3：返回封装客户端
 	return &K8sClient{
 		Clientset: clientset,
-		Namespace: cfg.Namespace,
+		Namespace: k8sCfg.Namespace,
+		cfg:       deployCfg,
 	}, nil
 }
 
-// UpdateDeploymentImage 更新Deployment的镜像版本
-func (k *K8sClient) UpdateDeploymentImage(deploymentName, image string) error {
+// UpdateDeploymentImage 滚动更新Deployment镜像（确保滚动更新策略）
+func (k *K8sClient) UpdateDeploymentImage(deploymentName, newImage string) error {
 	// 步骤1：获取当前Deployment
 	deploy, err := k.Clientset.AppsV1().Deployments(k.Namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
 	if err != nil {
@@ -73,125 +77,217 @@ func (k *K8sClient) UpdateDeploymentImage(deploymentName, image string) error {
 	}
 
 	// 步骤2：记录旧镜像版本
-	oldImage := ""
+	oldImage := k.getCurrentImage(deploy)
+
+	// 步骤3：确保滚动更新策略
+	k.ensureRollingUpdateStrategy(deploy)
+
+	// 步骤4：更新所有容器的镜像
+	updated := false
 	for i := range deploy.Spec.Template.Spec.Containers {
 		if strings.Contains(deploy.Spec.Template.Spec.Containers[i].Image, ":") {
-			oldImage = deploy.Spec.Template.Spec.Containers[i].Image
+			deploy.Spec.Template.Spec.Containers[i].Image = newImage
+			updated = true
 		}
 	}
-
-	// 步骤3：更新所有容器的镜像
-	for i := range deploy.Spec.Template.Spec.Containers {
-		deploy.Spec.Template.Spec.Containers[i].Image = image
+	if !updated {
+		return fmt.Errorf("未找到可更新的容器镜像")
 	}
 
-	// 步骤4：添加版本追踪注解
+	// 步骤5：添加版本追踪注解
 	if deploy.Annotations == nil {
 		deploy.Annotations = make(map[string]string)
 	}
-	deploy.Annotations["deployment.cicd.k8s/version"] = image
+	deploy.Annotations["deployment.cicd.k8s/version"] = newImage
 	deploy.Annotations["deployment.cicd.k8s/updated-at"] = time.Now().Format(time.RFC3339)
 
-	// 步骤5：更新Deployment
-	_, err = k.Clientset.AppsV1().Deployments(k.Namespace).Update(context.TODO(), deploy, metav1.UpdateOptions{})
+	// 步骤6：使用重试机制更新Deployment
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		result, err := k.Clientset.AppsV1().Deployments(k.Namespace).Update(context.TODO(), deploy, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+		*deploy = *result
+		return nil
+	})
+
 	if err != nil {
 		return fmt.Errorf("更新Deployment镜像失败: %v", err)
 	}
 
-	logrus.Infof("Deployment %s 镜像更新成功: %s -> %s", deploymentName, oldImage, image)
+	logrus.Infof("✅ 滚动更新Deployment成功: %s -> %s", oldImage, newImage)
 	return nil
 }
 
-// GetCurrentImage 获取Deployment当前镜像版本
-func (k *K8sClient) GetCurrentImage(deploymentName string) (string, error) {
-	// 步骤1：获取Deployment
-	deploy, err := k.Clientset.AppsV1().Deployments(k.Namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
-	if err != nil {
-		return "", fmt.Errorf("获取Deployment失败: %v", err)
+// ensureRollingUpdateStrategy 确保使用滚动更新策略
+func (k *K8sClient) ensureRollingUpdateStrategy(deploy *appsv1.Deployment) {
+	if deploy.Spec.Strategy.Type == "" {
+		deploy.Spec.Strategy.Type = appsv1.DeploymentStrategyTypeRollingUpdate
 	}
-
-	// 步骤2：返回第一个容器的镜像
-	if len(deploy.Spec.Template.Spec.Containers) > 0 {
-		return deploy.Spec.Template.Spec.Containers[0].Image, nil
+	
+	if deploy.Spec.Strategy.RollingUpdate == nil {
+		deploy.Spec.Strategy.RollingUpdate = &appsv1.RollingUpdateDeployment{}
 	}
-	return "", fmt.Errorf("Deployment中没有容器")
+	
+	// 设置滚动更新参数
+	if deploy.Spec.Strategy.RollingUpdate.MaxUnavailable == nil {
+		deploy.Spec.Strategy.RollingUpdate.MaxUnavailable = &intstr.IntOrString{
+			Type:   intstr.String,
+			StrVal: "25%",
+		}
+	}
+	if deploy.Spec.Strategy.RollingUpdate.MaxSurge == nil {
+		deploy.Spec.Strategy.RollingUpdate.MaxSurge = &intstr.IntOrString{
+			Type:   intstr.String,
+			StrVal: "25%",
+		}
+	}
 }
 
-// WaitForDeploymentReady 等待Deployment就绪（超时检查）
-func (k *K8sClient) WaitForDeploymentReady(deploymentName string, timeout time.Duration) error {
-	// 步骤1：轮询等待Deployment就绪
-	return wait.Poll(5*time.Second, timeout, func() (bool, error) {
-		// 获取Deployment状态
+// getCurrentImage 从Deployment获取当前镜像
+func (k *K8sClient) getCurrentImage(deploy *appsv1.Deployment) string {
+	for _, container := range deploy.Spec.Template.Spec.Containers {
+		if strings.Contains(container.Image, ":") {
+			return container.Image
+		}
+	}
+	return "unknown"
+}
+
+// WaitForDeploymentReady 等待新版本Deployment就绪（使用配置超时）
+func (k *K8sClient) WaitForDeploymentReady(deploymentName, newImageTag string) error {
+	// 使用配置的超时时间和轮询间隔
+	return wait.Poll(k.cfg.PollInterval, k.cfg.WaitTimeout, func() (bool, error) {
+		// 步骤1：检查Deployment状态
 		deploy, err := k.Clientset.AppsV1().Deployments(k.Namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
 
-		// 检查ReadyReplicas
-		if deploy.Status.ReadyReplicas == *deploy.Spec.Replicas {
-			// 进一步检查所有Pod状态
-			return k.checkAllPodsRunning(deploy)
+		// 步骤2：检查ReadyReplicas
+		if deploy.Status.ReadyReplicas != *deploy.Spec.Replicas {
+			logrus.Infof("⏳ Deployment %s ReadyReplicas: %d/%d", 
+				deploymentName, deploy.Status.ReadyReplicas, *deploy.Spec.Replicas)
+			return false, nil
 		}
-		return false, nil
+
+		// 步骤3：检查新版本Pod状态
+		ready, err := k.checkNewVersionPodsReady(deploy, newImageTag)
+		if err != nil {
+			return false, err
+		}
+		return ready, nil
 	})
 }
 
-// checkAllPodsRunning 检查Deployment下所有Pod是否Running
-func (k *K8sClient) checkAllPodsRunning(deploy *appsv1.Deployment) (bool, error) {
-	// 步骤1：列出Pod列表
+// checkNewVersionPodsReady 检查新版本Pod是否全部就绪
+func (k *K8sClient) checkNewVersionPodsReady(deploy *appsv1.Deployment, newImageTag string) (bool, error) {
+	// 步骤1：构建标签选择器
+	selector := labels.SelectorFromSet(deploy.Spec.Selector.MatchLabels)
+
+	// 步骤2：列出所有Pod
 	pods, err := k.Clientset.CoreV1().Pods(k.Namespace).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: metav1.FormatLabelSelector(deploy.Spec.Selector),
+		LabelSelector: selector.String(),
 	})
 	if err != nil {
 		return false, err
 	}
 
-	// 步骤2：检查每个Pod状态
+	// 步骤3：统计新旧版本Pod
+	newVersionPods := 0
+	runningNewPods := 0
+
 	for _, pod := range pods.Items {
-		if pod.Status.Phase != corev1.PodRunning {
-			logrus.Warnf("Pod %s 状态异常: %s", pod.Name, pod.Status.Phase)
-			return false, nil
+		// 检查Pod是否使用新版本镜像
+		for _, container := range pod.Spec.Containers {
+			if strings.Contains(container.Image, newImageTag) {
+				newVersionPods++
+				if pod.Status.Phase == corev1.PodRunning && 
+				   k.allContainersReady(&pod) {
+					runningNewPods++
+				}
+				break
+			}
 		}
 	}
 
-	logrus.Info("所有Pod已就绪")
-	return true, nil
+	// 步骤4：验证所有新Pod都就绪
+	if newVersionPods > 0 && runningNewPods == newVersionPods {
+		logrus.Infof("✅ 新版本Pod全部就绪: %d/%d", runningNewPods, newVersionPods)
+		return true, nil
+	}
+
+	logrus.Infof("⏳ 等待新版本Pod就绪: %d/%d", runningNewPods, newVersionPods)
+	return false, nil
 }
 
-// RollbackDeployment 执行Deployment回滚
+// allContainersReady 检查Pod所有容器是否就绪
+func (k *K8sClient) allContainersReady(pod *corev1.Pod) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if !status.Ready {
+			return false
+		}
+	}
+	return true
+}
+
+// RollbackDeployment 使用官方Rollback API执行回滚（使用配置超时）
 func (k *K8sClient) RollbackDeployment(deploymentName string) error {
-	// 步骤1：执行回滚操作
-	err := k.Clientset.AppsV1().Deployments(k.Namespace).Rollback(&appsv1.Rollback{
+	// 步骤1：创建回滚请求
+	rollback := &appsv1.DeploymentRollback{
 		Name: deploymentName,
-	})
+		RollbackTo: &appsv1.RollbackTo{
+			Revision: 1, // 回滚到上一个版本
+		},
+	}
+
+	// 步骤2：执行回滚
+	err := k.Clientset.AppsV1().Deployments(k.Namespace).Rollback(rollback)
 	if err != nil {
 		return fmt.Errorf("回滚Deployment失败: %v", err)
 	}
 
-	// 步骤2：等待回滚完成
-	err = k.WaitForDeploymentReady(deploymentName, 3*time.Minute)
+	logrus.Infof("🔄 已触发回滚: %s 到上一个版本", deploymentName)
+
+	// 步骤3：等待回滚完成（使用配置的回滚超时）
+	err = wait.Poll(k.cfg.PollInterval, k.cfg.RollbackTimeout, func() (bool, error) {
+		// 检查回滚后Deployment状态
+		deploy, err := k.Clientset.AppsV1().Deployments(k.Namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		return deploy.Status.ReadyReplicas == *deploy.Spec.Replicas, nil
+	})
+
 	if err != nil {
 		logrus.Warnf("回滚后Deployment未完全就绪: %v", err)
+		return err
 	}
 
-	logrus.Info("Deployment回滚完成: ", deploymentName)
+	logrus.Infof("✅ Deployment回滚完成: %s", deploymentName)
 	return nil
+}
+
+// GetCurrentImage 获取Deployment当前镜像版本
+func (k *K8sClient) GetCurrentImage(deploymentName string) (string, error) {
+	deploy, err := k.Clientset.AppsV1().Deployments(k.Namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	return k.getCurrentImage(deploy), nil
 }
 
 // CheckDeploymentHealth 检查Deployment健康状态
 func (k *K8sClient) CheckDeploymentHealth(deploymentName string) bool {
-	// 步骤1：检查Deployment状态
 	deploy, err := k.Clientset.AppsV1().Deployments(k.Namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
 	if err != nil {
-		logrus.Error("检查Deployment健康状态失败: ", err)
 		return false
 	}
 
-	// 步骤2：检查ReadyReplicas
 	if deploy.Status.ReadyReplicas != *deploy.Spec.Replicas {
 		return false
 	}
 
-	// 步骤3：检查Pod状态
-	return k.checkAllPodsRunning(deploy) == true
+	ready, _ := k.checkNewVersionPodsReady(deploy, "unknown")
+	return ready
 }
