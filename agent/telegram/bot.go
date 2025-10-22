@@ -62,6 +62,7 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 		return err
 	}
 
+	// ✅ 修复：只声明一次 green
 	green := color.New(color.FgGreen)
 	green.Printf("使用机器人 [%s] 发送通知\n", bot.Name)
 
@@ -92,7 +93,7 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 		return fmt.Errorf("发送失败，状态码: %d", resp.StatusCode)
 	}
 
-	green := color.New(color.FgGreen)
+	// ✅ 修复：使用已声明的 green，不用 :=
 	green.Printf("✅ Telegram通知发送成功: %s\n", service)
 
 	return nil
@@ -204,9 +205,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 	message.WriteString("*由 K8s-CICD Agent 自动发送*")
 
 	// 步骤2：转义非代码块的特殊字符
-	fullMessage := message.String()
-	
-	lines := strings.Split(fullMessage, "\n")
+	lines := strings.Split(message.String(), "\n")
 	for i, line := range lines {
 		// 如果行包含代码块标记 `，跳过转义
 		if strings.Contains(line, "`") {
