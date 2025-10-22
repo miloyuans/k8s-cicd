@@ -10,14 +10,19 @@ import (
 	"k8s-cicd/agent"
 	"k8s-cicd/agent/config"
 	"k8s-cicd/client"
+	"k8s-cicd/kubernetes"
 
+	"github.com/fatih/color" // 新增：彩色启动日志
 	"github.com/sirupsen/logrus"
 )
 
 func main() {
-	// 命令行参数解析
+	// 命令行参数
 	configFile := flag.String("config", "config.yaml", "配置文件路径")
 	flag.Parse()
+
+	cyan := color.New(color.FgCyan).SprintFunc()
+	logrus.Infof("%s K8s-CICD Agent v1.0", cyan("🐳"))
 
 	// 步骤1：加载配置
 	cfg, err := config.LoadConfig(*configFile)
@@ -33,7 +38,7 @@ func main() {
 	defer redisClient.Close()
 
 	// 步骤3：创建K8s客户端
-	k8sClient, err := client.NewK8sClient(&cfg.Kubernetes)
+	k8sClient, err := kubernetes.NewK8sClient(&cfg.Kubernetes)
 	if err != nil {
 		logrus.Fatalf("K8s连接失败: %v", err)
 	}
@@ -46,11 +51,13 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	
-	logrus.Info("Agent启动成功，等待信号...")
 	<-c
 	
-	logrus.Info("开始关闭Agent...")
+	yellow := color.New(color.FgYellow)
+	yellow.Println("收到关闭信号，正在优雅关闭...")
 	ag.Stop()
 	time.Sleep(2 * time.Second)
-	logrus.Info("Agent关闭完成")
+	
+	green := color.New(color.FgGreen)
+	green.Println("Agent关闭完成 👋")
 }

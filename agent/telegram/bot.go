@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"k8s-cicd/agent/config"
+
+	"github.com/fatih/color" // 新增：彩色调试输出
 	"github.com/sirupsen/logrus"
 )
 
@@ -52,19 +54,23 @@ func NewBotManager(bots []config.TelegramBot) *BotManager {
 	return m
 }
 
-// SendNotification 发送部署通知（多机器人智能选择）
+// SendNotification 发送部署通知（增加彩色调试日志）
 func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
-	// 步骤1：根据服务名选择合适的机器人
+	// 步骤1：选择机器人
 	bot, err := bm.getBotForService(service)
 	if err != nil {
-		logrus.Warnf("未找到匹配的Telegram机器人: %v", err)
+		red := color.New(color.FgRed)
+		red.Printf("未找到匹配机器人: %s\n", service)
 		return err
 	}
 
-	// 步骤2：生成Markdown消息
+	green := color.New(color.FgGreen)
+	green.Printf("使用机器人 [%s] 发送通知\n", bot.Name)
+
+	// 步骤2：生成消息
 	message := bm.generateMarkdownMessage(service, env, user, oldVersion, newVersion, success)
 
-	// 步骤3：发送HTTP请求
+	// 步骤3：发送请求
 	payload := map[string]interface{}{
 		"chat_id":   bot.GroupID,
 		"text":      message,
@@ -76,16 +82,21 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token), 
 		"application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return fmt.Errorf("Telegram发送失败: %v", err)
+		red := color.New(color.FgRed)
+		red.Printf("Telegram发送失败: %v\n", err)
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		logrus.Errorf("Telegram API返回错误: %s", resp.Status)
+		red := color.New(color.FgRed)
+		red.Printf("Telegram API错误: %d\n", resp.StatusCode)
 		return fmt.Errorf("发送失败，状态码: %d", resp.StatusCode)
 	}
 
-	logrus.Infof("Telegram通知发送成功: %s -> %s (%s)", service, newVersion, success)
+	green := color.New(color.FgGreen)
+	green.Printf("✅ Telegram通知发送成功: %s\n", service)
+
 	return nil
 }
 
