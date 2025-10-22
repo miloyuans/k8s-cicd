@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	"k8s-cicd/agent/config"
+	"k8s-cicd/agent/models"  // ✅ 修复：添加models导入
 	"github.com/sirupsen/logrus"
 )
 
