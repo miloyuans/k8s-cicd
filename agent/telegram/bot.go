@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"text/template"
 	"time"
 
 	"k8s-cicd/agent/config"
@@ -204,10 +203,9 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 	message.WriteString("\n")
 	message.WriteString("*由 K8s-CICD Agent 自动发送*")
 
-	// 步骤2：获取完整消息
-	fullMessage := message.String()
+	// 步骤2：转义非代码块的特殊字符
+	fullMessage := message.String()  // ✅ 修复：使用 = 而不是 :=
 	
-	// 步骤3：转义非代码块的特殊字符
 	lines := strings.Split(fullMessage, "\n")
 	for i, line := range lines {
 		// 如果行包含代码块标记 `，跳过转义
