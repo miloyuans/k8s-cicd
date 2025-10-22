@@ -9,8 +9,8 @@ import (
 
 	"k8s-cicd/agent"
 	"k8s-cicd/agent/config"
-	"k8s-cicd/client"
-	"k8s-cicd/kubernetes"
+	"k8s-cicd/agent/client"
+	"k8s-cicd/agent/kubernetes"
 
 	"github.com/fatih/color" // 新增：彩色启动日志
 	"github.com/sirupsen/logrus"
