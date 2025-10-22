@@ -308,3 +308,92 @@ func (k *K8sClient) CheckDeploymentHealth(deploymentName string) bool {
 	ready, _ := k.checkNewVersionPodsReady(deploy, "unknown")
 	return ready
 }
+
+// DiscoverServicesFromNamespace 从指定命名空间发现所有Deployment服务
+func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, error) {
+	logrus.Infof("🔍 开始从命名空间 [%s] 发现服务", namespace)
+	
+	// 步骤1：列出所有Deployment
+	deploys, err := k.Clientset.AppsV1().Deployments(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("列出Deployment失败: %v", err)
+	}
+
+	// 步骤2：提取服务名（Deployment名称）
+	var services []string
+	for _, deploy := range deploys.Items {
+		services = append(services, deploy.Name)
+		logrus.Debugf("   📋 发现服务: %s", deploy.Name)
+	}
+
+	// 步骤3：获取当前运行的镜像版本
+	for i, service := range services {
+		version, err := k.GetCurrentImage(service)
+		if err != nil {
+			logrus.Warnf("⚠️ 获取服务 [%s] 版本失败: %v", service, err)
+			version = "unknown"
+		}
+		logrus.Infof("✅ 服务 [%s] 当前版本: %s", service, version)
+		services[i] = fmt.Sprintf("%s:%s", service, version) // 包含版本
+	}
+
+	logrus.Infof("✅ 命名空间 [%s] 发现 %d 个服务", namespace, len(services))
+	return services, nil
+}
+
+// BuildPushRequest 根据配置构建 /push 请求数据
+func (k *K8sClient) BuildPushRequest(cfg *config.Config) (models.PushRequest, error) {
+	logrus.Info("🏗️ 构建 /push 请求数据")
+	
+	var services []string
+	var environments []string
+	var deployments []models.DeployRequest
+	
+	user := cfg.User.Default
+	status := "running" // 当前运行状态
+	
+	// 步骤1：遍历环境映射
+	for env, namespace := range cfg.EnvMapping.Mappings {
+		logrus.Infof("🔄 处理环境 [%s] -> 命名空间 [%s]", env, namespace)
+		
+		// 2.1 获取该命名空间的服务列表
+		nsServices, err := k.DiscoverServicesFromNamespace(namespace)
+		if err != nil {
+			logrus.Errorf("❌ 环境 [%s] 服务发现失败: %v", env, err)
+			continue
+		}
+		
+		// 2.2 添加到环境列表
+		environments = append(environments, env)
+		
+		// 2.3 为每个服务创建部署记录
+		for _, serviceWithVersion := range nsServices {
+			parts := strings.Split(serviceWithVersion, ":")
+			serviceName := parts[0]
+			version := parts[1]
+			
+			deploy := models.DeployRequest{
+				Service:      serviceName,
+				Environments: []string{env},
+				Version:      version,
+				User:         user,
+				Status:       status,
+			}
+			
+			deployments = append(deployments, deploy)
+			logrus.Debugf("   📝 添加部署: %s v%s [%s/%s]", 
+				serviceName, version, env, user)
+		}
+	}
+
+	pushReq := models.PushRequest{
+		Services:     services,
+		Environments: environments,
+		Deployments:  deployments,
+	}
+	
+	logrus.Infof("✅ 构建完成 /push 数据: %d 服务, %d 环境, %d 部署", 
+		len(services), len(environments), len(deployments))
+	
+	return pushReq, nil
+}

@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -13,78 +15,114 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// APIPusher API推送器
-type APIPusher struct {
-	cfg     *config.APIConfig
-	client  *http.Client
+// APIClient 统一API客户端
+type APIClient struct {
+	cfg    *config.APIConfig
+	client *http.Client
 	baseURL string
 }
 
-// NewAPIPusher 创建API推送器
-func NewAPIPusher(cfg *config.APIConfig) *APIPusher {
-	return &APIPusher{
+// NewAPIClient 创建API客户端
+func NewAPIClient(cfg *config.APIConfig) *APIClient {
+	return &APIClient{
 		cfg:     cfg,
 		client:  &http.Client{Timeout: 10 * time.Second},
 		baseURL: cfg.BaseURL,
 	}
 }
 
-// Start 启动API推送循环
-func (p *APIPusher) Start(deployments []models.DeploymentStatus) {
-	green := color.New(color.FgGreen).SprintFunc()
-	logrus.Infof("%s API推送器启动，间隔: %v", green("📤"), p.cfg.PushInterval)
+// PushData POST /push - 推送K8s发现的数据
+func (c *APIClient) PushData(req models.PushRequest) error {
+	logrus.Infof("📤 === POST /push ===")
+	logrus.Infof("请求数据: %+v", req)
 
-	ticker := time.NewTicker(p.cfg.PushInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			p.PushDeployments(deployments)  // ✅ 改为导出方法
-		}
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("JSON序列化失败: %v", err)
 	}
+
+	resp, err := c.client.Post(c.baseURL+"/push", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		red := color.New(color.FgRed)
+		red.Printf("❌ /push 网络错误: %v\n", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	
+	green := color.New(color.FgGreen)
+	green.Printf("✅ /push 成功 [Status:%d]\n", resp.StatusCode)
+	green.Printf("响应: %s\n", string(body))
+	
+	return nil
 }
 
-// PushDeployments 推送部署状态（无限重试） - ✅ 改为导出方法（大写开头）
-func (p *APIPusher) PushDeployments(deployments []models.DeploymentStatus) {
-	var retries int
-	for {
-		// 步骤1：准备推送数据
-		payload := map[string]interface{}{
-			"deployments": deployments,
-			"timestamp":   time.Now().Unix(),
-		}
+// QueryTasks POST /query - 查询待处理任务
+func (c *APIClient) QueryTasks(req models.QueryRequest) ([]models.DeployRequest, error) {
+	logrus.Infof("🔍 === POST /query ===")
+	logrus.Infof("请求: environment=%s, user=%s", req.Environment, req.User)
 
-		// 步骤2：序列化JSON
-		jsonData, err := json.Marshal(payload)
-		if err != nil {
-			logrus.Errorf("JSON序列化失败: %v", err)
-			time.Sleep(p.cfg.PushInterval)
-			continue
-		}
-
-		// 步骤3：发送HTTP请求
-		resp, err := p.client.Post(p.baseURL+"/api/deployments/status", 
-			"application/json", bytes.NewBuffer(jsonData))
-		
-		if err == nil && resp.StatusCode == http.StatusOK {
-			// 推送成功
-			green := color.New(color.FgGreen)
-			green.Printf("✅ API推送成功: %d 条部署状态\n", len(deployments))
-			return
-		}
-
-		// 推送失败，重试
-		retries++
-		red := color.New(color.FgRed)
-		red.Printf("❌ API推送失败 [%d]: %v，%v后重试\n", 
-			retries, err, p.cfg.PushInterval)
-		
-		time.Sleep(p.cfg.PushInterval)
-		
-		// 如果MaxRetries > 0，达到上限则退出
-		if p.cfg.MaxRetries > 0 && retries >= p.cfg.MaxRetries {
-			logrus.Fatalf("API推送达到最大重试次数: %d", p.cfg.MaxRetries)
-		}
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("JSON序列化失败: %v", err)
 	}
+
+	resp, err := c.client.Post(c.baseURL+"/query", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		red := color.New(color.FgRed)
+		red.Printf("❌ /query 网络错误: %v\n", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	
+	if resp.StatusCode == http.StatusOK {
+		var tasks []models.DeployRequest
+		if err := json.Unmarshal(body, &tasks); err != nil {
+			// 可能是 {"message": "暂无任务"}
+			green := color.New(color.FgGreen)
+			green.Printf("✅ /query 无任务 [Status:%d]\n", resp.StatusCode)
+			green.Printf("响应: %s\n", string(body))
+			return []models.DeployRequest{}, nil
+		}
+		
+		green := color.New(color.FgGreen)
+		green.Printf("✅ /query 成功 [Status:%d] %d个任务\n", resp.StatusCode, len(tasks))
+		logrus.Infof("响应数据: %+v", tasks)
+		return tasks, nil
+	}
+
+	red := color.New(color.FgRed)
+	red.Printf("❌ /query HTTP错误 [Status:%d]\n", resp.StatusCode)
+	red.Printf("响应: %s\n", string(body))
+	return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+}
+
+// UpdateStatus POST /status - 更新部署状态
+func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
+	logrus.Infof("📤 === POST /status ===")
+	logrus.Infof("请求: %s %s %s %s", req.Status, req.Service, req.Environment, req.User)
+
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("JSON序列化失败: %v", err)
+	}
+
+	resp, err := c.client.Post(c.baseURL+"/status", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		red := color.New(color.FgRed)
+		red.Printf("❌ /status 网络错误: %v\n", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	
+	green := color.New(color.FgGreen)
+	green.Printf("✅ /status 成功 [Status:%d]\n", resp.StatusCode)
+	green.Printf("响应: %s\n", string(body))
+	
+	return nil
 }

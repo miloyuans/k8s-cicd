@@ -64,15 +64,27 @@ type DeployConfig struct {
 	PollInterval    time.Duration `yaml:"poll_interval"`       // 健康检查轮询间隔，默认5秒
 }
 
+// UserConfig 用户配置
+type UserConfig struct {
+	Default string `yaml:"default"`  // 默认用户
+}
+
+// EnvMappingConfig 环境到命名空间映射
+type EnvMappingConfig struct {
+	Mappings map[string]string `yaml:"mappings"`  // env -> namespace
+}
+
 // Config 全局配置结构
 type Config struct {
-	Telegram    TelegramConfig    `yaml:"telegram"`
-	API         APIConfig         `yaml:"api"`
-	Kubernetes  K8sAuthConfig     `yaml:"kubernetes"`
-	Redis       RedisConfig       `yaml:"redis"`
-	Task        TaskConfig        `yaml:"task"`
-	Deploy      DeployConfig      `yaml:"deploy"`
-	LogLevel    string            `yaml:"log_level"`
+	Telegram   TelegramConfig   `yaml:"telegram"`
+	API        APIConfig        `yaml:"api"`
+	Kubernetes K8sAuthConfig    `yaml:"kubernetes"`
+	Redis      RedisConfig      `yaml:"redis"`
+	Task       TaskConfig       `yaml:"task"`
+	Deploy     DeployConfig     `yaml:"deploy"`
+	EnvMapping EnvMappingConfig `yaml:"env_mapping"`
+	User       UserConfig       `yaml:"user"`
+	LogLevel   string           `yaml:"log_level"`
 }
 
 // LoadConfig 从YAML文件加载配置，并合并环境变量
@@ -109,8 +121,26 @@ func LoadConfig(filePath string) (*Config, error) {
 	return &cfg, nil
 }
 
-// setDefaults 设置配置默认值
+// setDefaults 设置默认值
 func (c *Config) setDefaults() {
+	// API默认配置
+	if c.API.PushInterval == 0 {
+		c.API.PushInterval = 5 * time.Second
+	}
+	
+	// 环境映射默认配置
+	if len(c.EnvMapping.Mappings) == 0 {
+		c.EnvMapping.Mappings = map[string]string{
+			"eks":     "ns",
+			"eks-test": "bs",
+		}
+	}
+	
+	// 默认用户
+	if c.User.Default == "" {
+		c.User.Default = "deployer"
+	}
+
 	// API推送默认配置
 	if c.API.PushInterval == 0 {
 		c.API.PushInterval = 5 * time.Second

@@ -1,22 +1,4 @@
 # k8s-cicd API 接口文档
-
-## 1. 环境变量配置（外部服务调用前准备）
-
-```bash
-# 必须配置
-export TELEGRAM_TOKEN="your_bot_token"
-export TELEGRAM_GROUP_ID="your_group_id"
-
-# 可选（IP 白名单，逗号分隔，支持 CIDR）
-export WHITELIST_IPS="192.168.1.0/24,10.0.0.1"
-
-# Redis（默认 localhost:6379）
-export REDIS_ADDR="localhost:6379"
-
-# 服务端口（默认 8080）
-export PORT=8080
-```
-
 ## 2. API 基础信息
 
 - **Base URL**: `http://your-server:8080`

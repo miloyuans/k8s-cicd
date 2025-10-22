@@ -133,3 +133,47 @@ func (r *RedisClient) UpdateTaskStatus(service, version, environment, user, stat
 func (r *RedisClient) Close() error {
 	return r.client.Close()
 }
+
+// CheckDuplicateTask 检查任务是否已存在（严格全字段匹配）
+func (r *RedisClient) CheckDuplicateTask(deploy models.DeployRequest) (bool, error) {
+	ctx := context.Background()
+	
+	// 生成唯一Key（所有字段组合）
+	key := fmt.Sprintf("deploy:dedup:%s:%s:%s:%v:%s", 
+		deploy.Service, 
+		strings.Join(deploy.Environments, ","),
+		deploy.Version, 
+		deploy.User, 
+		deploy.Status)
+	
+	// 检查是否存在
+	exists, err := r.client.Exists(ctx, key).Result()
+	if err != nil {
+		return false, err
+	}
+	
+	if exists > 0 {
+		logrus.Warnf("⚠️ 任务去重: 已存在相同任务 %s v%s [%s/%s]", 
+			deploy.Service, deploy.Version, deploy.Environments[0], deploy.User)
+		return true, nil
+	}
+	
+	// 设置去重标记（TTL同任务）
+	err = r.client.Set(ctx, key, "1", r.cfg.TTL).Err()
+	return false, err
+}
+
+// StoreTaskWithDeduplication 存储任务（带去重）
+func (r *RedisClient) StoreTaskWithDeduplication(deploy models.DeployRequest) error {
+	// 步骤1：检查重复
+	isDuplicate, err := r.CheckDuplicateTask(deploy)
+	if err != nil {
+		return err
+	}
+	if isDuplicate {
+		return fmt.Errorf("任务已存在，忽略")
+	}
+	
+	// 步骤2：正常存储
+	return r.PushDeployments([]models.DeployRequest{deploy})
+}
