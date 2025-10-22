@@ -204,7 +204,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 	message.WriteString("*由 K8s-CICD Agent 自动发送*")
 
 	// 步骤2：转义非代码块的特殊字符
-	fullMessage := message.String()  // ✅ 修复：使用 = 而不是 :=
+	fullMessage := message.String()
 	
 	lines := strings.Split(fullMessage, "\n")
 	for i, line := range lines {
