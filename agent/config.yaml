@@ -1,0 +1,45 @@
+telegram:
+  bots:
+    # 机器人1：负责A系列服务
+    - name: "a-bot"
+      token: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+      group_id: "-1001234567890"
+      services:
+        a_services: ["API", "a1", "a2"]
+      regex_match: false
+      enabled: true
+      
+    # 机器人2：负责B系列服务（支持正则）
+    - name: "b-bot"
+      token: "654321:XYZ-ABC9876defGhi-jkl98U9v2w432rf33"
+      group_id: "-1000987654321"
+      services:
+        b_services: ["USER-\\d+", "ORDER-\\d+"]
+      regex_match: true
+      enabled: true
+
+api:
+  base_url: "http://localhost:8080"
+
+kubernetes:
+  auth_type: "serviceaccount"  # 或 "kubeconfig"
+  kubeconfig: "~/.kube/config"
+  namespace: "default"
+  service_name: "cicd-sa"
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+  ttl: 24h                    # 数据过期时间
+  max_retries: 3
+  idle_timeout: 5m
+
+task:
+  max_retries: 3
+  retry_delay_seconds: 30
+  queue_workers: 5
+  poll_interval_seconds: 30
+  max_queue_size: 100
+
+log_level: "info"
