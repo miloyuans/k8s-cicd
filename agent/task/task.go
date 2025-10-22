@@ -256,7 +256,7 @@ func executeTask(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.
 		IsSuccess:  success,
 		Message:    fmt.Sprintf("部署%s，耗时%v", map[bool]string{true: "成功", false: "失败"}[success], time.Since(startTime)),
 	}
-	go apiPusher.pushDeployments([]models.DeploymentStatus{deployStatus})
+	go apiPusher.PushDeployments([]models.DeploymentStatus{deployStatus})  // ✅ 修复：PushDeployments
 
 	// ================================
 	// 步骤8：任务总结

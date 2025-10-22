@@ -40,13 +40,13 @@ func (p *APIPusher) Start(deployments []models.DeploymentStatus) {
 	for {
 		select {
 		case <-ticker.C:
-			p.pushDeployments(deployments)
+			p.PushDeployments(deployments)  // ✅ 改为导出方法
 		}
 	}
 }
 
-// pushDeployments 推送部署状态（无限重试）
-func (p *APIPusher) pushDeployments(deployments []models.DeploymentStatus) {
+// PushDeployments 推送部署状态（无限重试） - ✅ 改为导出方法（大写开头）
+func (p *APIPusher) PushDeployments(deployments []models.DeploymentStatus) {
 	var retries int
 	for {
 		// 步骤1：准备推送数据
