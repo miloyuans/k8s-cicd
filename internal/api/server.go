@@ -1,3 +1,4 @@
+// 文件: internal/api/server.go
 package api
 
 import (
@@ -16,7 +17,8 @@ import (
 )
 
 // *** 修复：api 包统一管理 globalStorage ***
-var globalStorage *storage.RedisStorage
+// 全局存储实例，使用 MongoDB 存储
+var globalStorage *storage.MongoStorage
 
 // *** 全局锁，确保 WorkerPool 安全初始化 ***
 var workerPoolOnce sync.Once
@@ -25,7 +27,7 @@ var globalWorkerPool *WorkerPool
 // Server 封装 HTTP 服务
 type Server struct {
 	Router          *http.ServeMux
-	storage         *storage.RedisStorage
+	storage         *storage.MongoStorage
 	logger          *logrus.Logger
 	whitelistIPs    []string
 	config          *config.Config
@@ -34,24 +36,24 @@ type Server struct {
 
 // Task 异步任务接口
 type Task interface {
-	Execute(*storage.RedisStorage) error
+	Execute(*storage.MongoStorage) error
 	GetID() string
 }
 
-// PushTask 推送任务
+// PushTask 推送任务，用于更新 services 和 environments
 type PushTask struct {
 	Services     []string
 	Environments []string
 	ID           string
 }
 
-// DeployTask 部署任务
+// DeployTask 部署任务，用于插入部署请求到 deploy_queue
 type DeployTask struct {
 	Req DeployRequest
 	ID  string
 }
 
-// WorkerPool 工作池
+// WorkerPool 工作池，用于处理异步任务
 type WorkerPool struct {
 	workers int
 	jobs    chan Task
@@ -142,15 +144,15 @@ type StatusRequest struct {
 	Status      string `json:"status"`
 }
 
-// *** 修复：NewServer 接收 Redis 实例 ***
-func NewServer(redisStorage *storage.RedisStorage, cfg *config.Config) *Server {
+// *** 修复：NewServer 接收 Mongo 实例 ***
+func NewServer(mongoStorage *storage.MongoStorage, cfg *config.Config) *Server {
 	startTime := time.Now()
 	defer func() {
 		logrus.WithField("init_duration_ms", time.Since(startTime).Milliseconds()).Info("Server 初始化完成")
 	}()
 
 	// *** 修复：设置全局存储 ***
-	globalStorage = redisStorage
+	globalStorage = mongoStorage
 	logrus.Info("✅ globalStorage 设置完成")
 
 	// 初始化日志
@@ -167,7 +169,7 @@ func NewServer(redisStorage *storage.RedisStorage, cfg *config.Config) *Server {
 
 	server := &Server{
 		Router:       http.NewServeMux(),
-		storage:      redisStorage,
+		storage:      mongoStorage,
 		logger:       logger,
 		whitelistIPs: whitelistIPs,
 		config:       cfg,
@@ -234,7 +236,7 @@ func (s *Server) ipWhitelistMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// handlePush
+// handlePush 处理推送请求，异步更新 services 和 environments 集合
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -277,7 +279,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleDeploy
+// handleDeploy 处理部署请求，异步插入到 deploy_queue 集合
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -306,7 +308,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		req.Status = "pending"
 	}
 
-	// 验证服务和环境
+	// 验证服务和环境（从独立集合查询）
 	services, _ := s.storage.GetServices()
 	environments, _ := s.storage.GetEnvironments()
 
@@ -340,7 +342,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleQuery
+// handleQuery 查询 deploy_queue 集合中的待处理任务
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -363,23 +365,10 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, err := s.storage.List("deploy_queue")
+	results, err := s.storage.QueryDeployQueue(req.Environment, req.User)
 	if err != nil {
 		http.Error(w, "查询失败", http.StatusInternalServerError)
 		return
-	}
-
-	var results []DeployRequest
-	for _, item := range items {
-		var deployReq DeployRequest
-		if err := json.Unmarshal([]byte(item), &deployReq); err != nil {
-			continue
-		}
-		if contains(deployReq.Environments, req.Environment) &&
-			deployReq.User == req.User &&
-			deployReq.Status != "success" && deployReq.Status != "failure" {
-			results = append(results, deployReq)
-		}
 	}
 
 	if len(results) == 0 {
@@ -390,7 +379,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
-// handleStatus
+// handleStatus 更新 deploy_queue 集合中的任务状态
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -419,7 +408,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := s.updateStatus(req)
+	updated, err := s.storage.UpdateStatus(req)
 	if err != nil {
 		http.Error(w, "更新状态失败", http.StatusInternalServerError)
 		return
@@ -432,60 +421,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// updateStatus
-func (s *Server) updateStatus(req StatusRequest) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	items, err := s.storage.List("deploy_queue")
-	if err != nil {
-		return false, err
-	}
-
-	updated := false
-	newItems := []string{}
-	for _, item := range items {
-		var deployReq DeployRequest
-		if err := json.Unmarshal([]byte(item), &deployReq); err != nil {
-			newItems = append(newItems, item)
-			continue
-		}
-
-		if deployReq.Service == req.Service &&
-			deployReq.Version == req.Version &&
-			deployReq.User == req.User &&
-			contains(deployReq.Environments, req.Environment) {
-			deployReq.Status = req.Status
-			updated = true
-		}
-
-		data, _ := json.Marshal(deployReq)
-		newItems = append(newItems, string(data))
-	}
-
-	if updated {
-		s.storage.Delete("deploy_queue")
-		for _, item := range newItems {
-			s.storage.Push("deploy_queue", item)
-		}
-	}
-
-	return updated, nil
-}
-
-// PushTask Execute
-// PushTask Execute
-func (t *PushTask) Execute(storage *storage.RedisStorage) error {
+// PushTask Execute 执行推送任务，更新 services 和 environments 集合
+func (t *PushTask) Execute(storage *storage.MongoStorage) error {
 	if storage == nil {
 		return fmt.Errorf("storage 为 nil")
 	}
 	
 	start := time.Now()
 	
-	if err := storage.AsyncStoreServices(t.Services); err != nil {
+	if err := storage.StoreServices(t.Services); err != nil {
 		return err
 	}
-	if err := storage.AsyncStoreEnvironments(t.Environments); err != nil {
+	if err := storage.StoreEnvironments(t.Environments); err != nil {
 		return err
 	}
 
@@ -522,16 +469,15 @@ func (t *PushTask) Execute(storage *storage.RedisStorage) error {
 
 func (t *PushTask) GetID() string { return t.ID }
 
-// DeployTask Execute
-func (t *DeployTask) Execute(storage *storage.RedisStorage) error {
+// DeployTask Execute 执行部署任务，插入到 deploy_queue 集合
+func (t *DeployTask) Execute(storage *storage.MongoStorage) error {
 	if storage == nil {
 		return fmt.Errorf("storage 为 nil")
 	}
 	
 	start := time.Now()
 	
-	data, _ := json.Marshal(t.Req)
-	err := storage.Push("deploy_queue", string(data))
+	err := storage.InsertDeployRequest(t.Req)
 	
 	logrus.WithFields(logrus.Fields{
 		"task_id":     t.ID,
@@ -545,7 +491,7 @@ func (t *DeployTask) Execute(storage *storage.RedisStorage) error {
 
 func (t *DeployTask) GetID() string { return t.ID }
 
-// contains
+// contains 检查切片是否包含元素
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {

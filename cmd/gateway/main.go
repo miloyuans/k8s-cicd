@@ -1,3 +1,4 @@
+// 文件: main.go
 package main
 
 import (
@@ -17,17 +18,17 @@ func main() {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	// 2. 初始化全局 Redis（传递给 api 包）
-	redisStorage, err := storage.NewRedisStorage(cfg.RedisAddr)
+	// 2. 初始化全局 MongoDB（传递给 api 包）
+	mongoStorage, err := storage.NewMongoStorage(cfg.MongoURI)
 	if err != nil {
-		log.Fatalf("初始化 Redis 失败: %v", err)
+		log.Fatalf("初始化 MongoDB 失败: %v", err)
 	}
 	
 	// *** 修复：显式传递给 api 初始化 ***
-	log.Println("✅ 全局 Redis 初始化完成")
+	log.Println("✅ 全局 MongoDB 初始化完成")
 
-	// 3. 初始化 API 服务（传入 Redis 实例）
-	apiServer := api.NewServer(redisStorage, cfg)
+	// 3. 初始化 API 服务（传入 MongoDB 实例）
+	apiServer := api.NewServer(mongoStorage, cfg)
 
 	// 4. 启动 HTTP 服务
 	addr := fmt.Sprintf(":%d", cfg.Port)
