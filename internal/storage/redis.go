@@ -1,4 +1,3 @@
-// 文件: internal/storage/redis.go
 package storage
 
 import (
@@ -91,8 +90,8 @@ func (s *RedisStorage) GetEnvironments() ([]string, error) {
 	return envs, nil
 }
 
-// *** 新增：asyncStoreServices 异步存储服务列表（保留原始大小写） ***
-func (s *RedisStorage) asyncStoreServices(services []string) error {
+// *** 修复：导出异步方法（大写首字母） ***
+func (s *RedisStorage) AsyncStoreServices(services []string) error {
 	if len(services) == 0 {
 		return nil
 	}
@@ -104,8 +103,8 @@ func (s *RedisStorage) asyncStoreServices(services []string) error {
 	return s.Set("services", string(data))
 }
 
-// *** 新增：asyncStoreEnvironments 异步存储环境列表（保留原始大小写） ***
-func (s *RedisStorage) asyncStoreEnvironments(environments []string) error {
+// *** 修复：导出异步方法（大写首字母） ***
+func (s *RedisStorage) AsyncStoreEnvironments(environments []string) error {
 	if len(environments) == 0 {
 		return nil
 	}

@@ -57,7 +57,7 @@ type WorkerPool struct {
 func NewWorkerPool(workers int) *WorkerPool {
 	pool := &WorkerPool{
 		workers: workers,
-		jobs:    make(chan Task, 1000), // 增大队列容量
+		jobs:    make(chan Task, 1000),
 	}
 	for i := 0; i < workers; i++ {
 		go pool.worker()
@@ -69,7 +69,16 @@ func NewWorkerPool(workers int) *WorkerPool {
 func (wp *WorkerPool) worker() {
 	for job := range wp.jobs {
 		// 执行任务（传入 storage）
+		start := time.Now()
 		err := job.Execute(globalStorage)
+		duration := time.Since(start).Milliseconds()
+		
+		logrus.WithFields(logrus.Fields{
+			"task_id":     job.GetID(),
+			"duration_ms": duration,
+			"success":     err == nil,
+		}).Info("异步任务执行完成")
+		
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"task_id": job.GetID(),
@@ -114,7 +123,7 @@ type StatusRequest struct {
 	Status      string `json:"status"` // 必填：success/failure/no_action
 }
 
-// NewServer 初始化 HTTP 服务（***修复：删除未使用变量***）
+// NewServer 初始化 HTTP 服务
 func NewServer(redisAddr string, cfg *config.Config) *Server {
 	startTime := time.Now()
 	defer func() {
@@ -132,7 +141,7 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 	logger.SetFormatter(&logrus.JSONFormatter{})
 	logger.SetLevel(logrus.InfoLevel)
 
-	// *** 修复：删除未使用的 whitelistInit 变量 ***
+	// 解析白名单 IP
 	whitelist := os.Getenv("WHITELIST_IPS")
 	whitelistIPs := []string{}
 	if whitelist != "" {
@@ -140,7 +149,7 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 	}
 	logrus.WithField("whitelist_count", len(whitelistIPs)).Info("IP 白名单加载完成")
 
-	// *** 修复：删除未使用的 workerPoolInit 变量 ***
+	// 初始化工作池
 	workerPool := NewWorkerPool(20)
 	logrus.WithField("worker_count", 20).Info("工作池启动完成")
 
@@ -255,24 +264,24 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	response := map[string]interface{}{
-		"message":   "数据推送成功",
-		"task_id":   taskID,
+		"message": "数据推送成功",
+		"task_id": taskID,
 	}
 	json.NewEncoder(w).Encode(response)
 }
 
-// *** 修复：Execute 方法接收 storage 参数 ***
+// *** 修复：调用导出的方法 AsyncStoreServices ***
 func (t *PushTask) Execute(storage *storage.RedisStorage) error {
 	start := time.Now()
 	
 	storeServicesStart := time.Now()
-	if err := storage.asyncStoreServices(t.Services); err != nil {
+	if err := storage.AsyncStoreServices(t.Services); err != nil {
 		return fmt.Errorf("存储服务列表失败: %v", err)
 	}
 	storeServicesDuration := time.Since(storeServicesStart)
 
 	storeEnvsStart := time.Now()
-	if err := storage.asyncStoreEnvironments(t.Environments); err != nil {
+	if err := storage.AsyncStoreEnvironments(t.Environments); err != nil {
 		return fmt.Errorf("存储环境列表失败: %v", err)
 	}
 	storeEnvsDuration := time.Since(storeEnvsStart)
@@ -369,7 +378,6 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// *** 修复：Execute 方法接收 storage 参数 ***
 func (t *DeployTask) Execute(storage *storage.RedisStorage) error {
 	start := time.Now()
 	
@@ -480,7 +488,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	validStatuses := map[string]bool{"success": true, "failure": true, "no_action": true}
 	if !validStatuses[req.Status] {
-		http.Error(w, "无效的状态值", http.StatusBadRequest)
+		http.Error(w, "无效的状态值，仅支持：success, failure, no_action", http.StatusBadRequest)
 		return
 	}
 
