@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-co-op/gocron/v2"  // ✅ 仅核心包
+	"github.com/go-co-op/gocron/v2"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -67,45 +67,40 @@ func main() {
 
 // initScheduler 初始化任务调度
 func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int64) {
+	// *** 修复1：正确创建 Scheduler ***
 	s, err := gocron.NewScheduler(
-		gocron.WithLocation(time.UTC),
-		gocron.WithLogger(gocron.VerboseLogger), // ✅ 内置详细日志
+		time.UTC,
 	)
 	if err != nil {
 		log.Fatalf("初始化调度器失败: %v", err)
 	}
 
-	// 每日报告：每天 00:00
-	dailyJob, err := s.NewJob(
-		gocron.DailyAt("00:00"),
-		gocron.NewTask(func() {
-			log.Println("🔄 开始执行每日报告...")
-			sendDailyReport(stats, bot, chatID)
-			log.Println("✅ 每日报告执行完成")
-		}),
-	)
+	// *** 修复2：正确创建每日任务 - 每天 00:00 ***
+	_, err = s.Every(1).Day().At("00:00").Do(func() {
+		log.Println("🔄 开始执行每日报告...")
+		sendDailyReport(stats, bot, chatID)
+		log.Println("✅ 每日报告执行完成")
+	})
 	if err != nil {
 		log.Printf("⚠️ 每日报告调度失败: %v", err)
 	} else {
-		log.Printf("✅ 每日报告任务已调度: %s", dailyJob.ID())
+		log.Println("✅ 每日报告任务已调度")
 	}
 
-	// 每月报告：每月3号 00:00
-	monthlyJob, err := s.NewJob(
-		gocron.MonthlyAt(gocron.Day(3), "00:00"),
-		gocron.NewTask(func() {
-			log.Println("🔄 开始执行月报...")
-			sendMonthlyReport(stats, bot, chatID, s)
-			log.Println("✅ 月报执行完成")
-		}),
-	)
+	// *** 修复3：正确创建每月任务 - 每月3号 00:00 ***
+	_, err = s.Every(1).Month().Day(3).At("00:00").Do(func() {
+		log.Println("🔄 开始执行月报...")
+		sendMonthlyReport(stats, bot, chatID, s)
+		log.Println("✅ 月报执行完成")
+	})
 	if err != nil {
 		log.Printf("⚠️ 每月报告调度失败: %v", err)
 	} else {
-		log.Printf("✅ 月报任务已调度: %s", monthlyJob.ID())
+		log.Println("✅ 月报任务已调度")
 	}
 
-	s.Start()
+	// *** 修复4：启动调度器 ***
+	s.StartAsync() // 非阻塞启动
 	log.Println("✅ 任务调度器启动")
 }
 
@@ -161,21 +156,15 @@ func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID
 
 	sendTelegramMessage(bot, chatID, text, "MarkdownV2")
 
-	// 7天后删除上月数据
-	_, err = scheduler.NewJob(
-		gocron.DurationJob(7*24*time.Hour),
-		gocron.NewTask(func() {
-			log.Println("🔄 开始清理上月数据...")
-			if err := stats.DeleteMonthData(prevMonthFirst, nextMonthFirst); err != nil {
-				log.Printf("删除上月数据失败: %v", err)
-			} else {
-				log.Printf("✅ 上月数据删除成功: %s", prevMonthFirst.Format("Jan 2006"))
-			}
-		}),
-	)
-	if err != nil {
-		log.Printf("⚠️ 调度删除任务失败: %v", err)
-	}
+	// *** 修复5：7天后删除上月数据 ***
+	scheduler.Every(1).Day().After(7*24*time.Hour).Do(func() {
+		log.Println("🔄 开始清理上月数据...")
+		if err := stats.DeleteMonthData(prevMonthFirst, nextMonthFirst); err != nil {
+			log.Printf("删除上月数据失败: %v", err)
+		} else {
+			log.Printf("✅ 上月数据删除成功: %s", prevMonthFirst.Format("Jan 2006"))
+		}
+	})
 }
 
 // sendTelegramMessage 发送 Telegram 消息
