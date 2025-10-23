@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/storage"
-	"k8s-cicd/internal/telegram"
 	"net"
 	"net/http"
 	"os"
@@ -22,21 +21,19 @@ type Server struct {
 	Router          *http.ServeMux
 	storage         *storage.RedisStorage
 	logger          *logrus.Logger
-	bot             *telegram.Bot
 	whitelistIPs    []string // IP 白名单
 	config          *config.Config
-	asyncQueue      chan interface{} // 异步处理队列
 	workerPool      *WorkerPool      // 工作池
 	mu              sync.RWMutex     // 并发锁
 }
 
-// PushRequest 定义推送请求结构（优化：只保留 services 和 environments）
+// PushRequest 定义推送请求结构（只保留 services 和 environments）
 type PushRequest struct {
 	Services     []string `json:"services"`     // 服务列表（保留原始大小写）
 	Environments []string `json:"environments"` // 环境列表（保留原始大小写）
 }
 
-// DeployRequest 定义部署请求结构（优化：status 可选，默认 pending）
+// DeployRequest 定义部署请求结构（status 可选，默认 pending）
 type DeployRequest struct {
 	Service      string   `json:"service"`
 	Environments []string `json:"environments"`
@@ -89,7 +86,7 @@ func (wp *WorkerPool) Submit(job interface{}) {
 	wp.jobs <- job
 }
 
-// NewServer 初始化 HTTP 服务（优化：支持异步并发）
+// NewServer 初始化 HTTP 服务（删除 Telegram 依赖）
 func NewServer(redisAddr string, cfg *config.Config) *Server {
 	// 初始化 Redis
 	storage, err := storage.NewRedisStorage(redisAddr)
@@ -101,12 +98,6 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{}) // 结构化日志
 	logger.SetLevel(logrus.InfoLevel)
-
-	// 初始化 Telegram 机器人
-	bot, err := telegram.NewBot(cfg.TelegramToken, cfg.TelegramGroupID)
-	if err != nil {
-		logrus.Fatalf("初始化 Telegram 机器人失败: %v", err)
-	}
 
 	// 解析白名单 IP
 	whitelist := os.Getenv("WHITELIST_IPS")
@@ -122,7 +113,6 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 		Router:       http.NewServeMux(),
 		storage:      storage,
 		logger:       logger,
-		bot:          bot,
 		whitelistIPs: whitelistIPs,
 		config:       cfg,
 		workerPool:   workerPool,
@@ -134,9 +124,6 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 	server.Router.HandleFunc("/status", server.ipWhitelistMiddleware(server.handleStatus))
 	server.Router.HandleFunc("/deploy", server.ipWhitelistMiddleware(server.handleDeploy))
 
-	// 启动异步处理协程
-	go server.processAsyncQueue()
-
 	return server
 }
 
@@ -146,6 +133,7 @@ func (s *Server) ipWhitelistMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		s.logger.WithFields(logrus.Fields{
 			"client_ip": r.RemoteAddr,
 			"path":      r.URL.Path,
+			"method":    r.Method,
 		}).Info("收到 HTTP 请求")
 
 		if len(s.whitelistIPs) == 0 {
@@ -205,8 +193,8 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"services":     req.Services,
-		"environments": req.Environments,
+		"services_count":     len(req.Services),
+		"environments_count": len(req.Environments),
 	}).Info("收到推送请求")
 
 	// 异步存储（保留原始大小写，不转换）
@@ -217,6 +205,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		if err := s.asyncStoreEnvironments(req.Environments); err != nil {
 			s.logger.WithError(err).Error("异步存储环境列表失败")
 		}
+		s.logger.Info("推送数据异步处理完成")
 	}()
 
 	w.WriteHeader(http.StatusOK)
@@ -228,7 +217,7 @@ func (s *Server) asyncStoreServices(services []string) error {
 	if len(services) == 0 {
 		return nil
 	}
-	s.logger.WithFields(logrus.Fields{"services": services}).Info("异步存储服务列表")
+	s.logger.WithFields(logrus.Fields{"services_count": len(services)}).Info("异步存储服务列表")
 	data, err := json.Marshal(services)
 	if err != nil {
 		return err
@@ -241,7 +230,7 @@ func (s *Server) asyncStoreEnvironments(environments []string) error {
 	if len(environments) == 0 {
 		return nil
 	}
-	s.logger.WithFields(logrus.Fields{"environments": environments}).Info("异步存储环境列表")
+	s.logger.WithFields(logrus.Fields{"environments_count": len(environments)}).Info("异步存储环境列表")
 	data, err := json.Marshal(environments)
 	if err != nil {
 		return err
@@ -249,7 +238,7 @@ func (s *Server) asyncStoreEnvironments(environments []string) error {
 	return s.storage.Set("environments", string(data))
 }
 
-// handleDeploy 处理部署请求（优化：验证服务/环境存在，保留大小写）
+// handleDeploy 处理部署请求（优化：验证服务/环境存在，直接入队，无 Telegram 确认）
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 	defer func() {
@@ -292,15 +281,28 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}).Info("收到部署请求")
 
 	// 验证服务和环境是否存在（线程安全）
-	services, _ := s.storage.GetServices()
-	environments, _ := s.storage.GetEnvironments()
+	services, err := s.storage.GetServices()
+	if err != nil {
+		s.logger.WithError(err).Error("获取服务列表失败")
+		http.Error(w, "服务验证失败", http.StatusInternalServerError)
+		return
+	}
 
+	environments, err := s.storage.GetEnvironments()
+	if err != nil {
+		s.logger.WithError(err).Error("获取环境列表失败")
+		http.Error(w, "环境验证失败", http.StatusInternalServerError)
+		return
+	}
+
+	// 验证服务是否存在
 	if !contains(services, req.Service) {
 		s.logger.WithField("service", req.Service).Warn("服务不存在")
 		http.Error(w, fmt.Sprintf("服务 %s 不存在", req.Service), http.StatusBadRequest)
 		return
 	}
 
+	// 验证所有环境是否存在
 	for _, env := range req.Environments {
 		if !contains(environments, env) {
 			s.logger.WithField("environment", env).Warn("环境不存在")
@@ -309,16 +311,18 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 异步入队（保留原始数据）
+	// 直接异步入队（保留原始数据，无需 Telegram 确认）
 	go func() {
-		s.logger.Info("异步将部署请求入队")
+		s.logger.WithField("task_id", fmt.Sprintf("%s-%s-%s", req.Service, req.Version, req.User)).Info("异步将部署请求入队")
 		if err := s.asyncEnqueueDeploy(req); err != nil {
 			s.logger.WithError(err).Error("部署请求入队失败")
+		} else {
+			s.logger.Info("部署请求入队成功")
 		}
 	}()
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "部署请求已提交"})
+	json.NewEncoder(w).Encode(map[string]string{"message": "部署请求已入队"})
 }
 
 // asyncEnqueueDeploy 异步入队部署请求
@@ -351,6 +355,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Environment == "" || req.User == "" {
+		s.logger.Warn("查询请求缺少必填字段")
+		http.Error(w, "缺少必填字段：environment, user", http.StatusBadRequest)
+		return
+	}
+
 	s.logger.WithFields(logrus.Fields{
 		"environment": req.Environment,
 		"user":        req.User,
@@ -378,13 +388,13 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"user":        req.User,
-		"environment": req.Environment,
-		"task_count":  len(results),
+		"user":           req.User,
+		"environment":    req.Environment,
+		"pending_tasks":  len(results),
 	}).Info("查询任务结果")
 
 	if len(results) == 0 {
-		json.NewEncoder(w).Encode(map[string]string{"message": "暂无任务，请继续等待"})
+		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
 		return
 	}
 
@@ -444,12 +454,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	if updated {
 		s.logger.Info("任务状态更新成功")
+		json.NewEncoder(w).Encode(map[string]string{"message": "状态更新成功"})
 	} else {
 		s.logger.Warn("未找到匹配的任务")
+		json.NewEncoder(w).Encode(map[string]string{"message": "未找到匹配任务"})
 	}
-
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "状态更新成功"})
 }
 
 // updateStatus 线程安全更新状态
@@ -478,6 +487,12 @@ func (s *Server) updateStatus(req StatusRequest) (bool, error) {
 			contains(deployReq.Environments, req.Environment) {
 			deployReq.Status = req.Status
 			updated = true
+			s.logger.WithFields(logrus.Fields{
+				"service":     deployReq.Service,
+				"version":     deployReq.Version,
+				"status_from": "pending",
+				"status_to":   req.Status,
+			}).Info("更新任务状态")
 		}
 
 		data, _ := json.Marshal(deployReq)
@@ -493,14 +508,6 @@ func (s *Server) updateStatus(req StatusRequest) (bool, error) {
 	}
 
 	return updated, nil
-}
-
-// processAsyncQueue 处理异步队列
-func (s *Server) processAsyncQueue() {
-	for {
-		s.workerPool.Submit(nil) // 保持工作池活跃
-		time.Sleep(100 * time.Millisecond)
-	}
 }
 
 // contains 检查字符串是否在切片中（区分大小写）

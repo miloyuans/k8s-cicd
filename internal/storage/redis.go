@@ -3,6 +3,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"  // 添加此导入修复编译错误
 	"sync"
 
 	"github.com/redis/go-redis/v9"
