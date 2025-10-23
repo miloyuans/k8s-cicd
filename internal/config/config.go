@@ -2,9 +2,7 @@
 package config
 
 import (
-	"fmt"
 	"os"
-	"strconv"
 )
 
 // Config 定义程序的配置结构（删除 Telegram 配置）
