@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-co-op/gocron/v2"
+	"github.com/go-co-op/gocron/v2/events"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -72,18 +73,18 @@ func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int
 		log.Fatalf("初始化调度器失败: %v", err)
 	}
 
-	// 每日报告：每天 00:00
+	// *** 修复1：每日报告 - 每天 00:00 ***
 	_, err = s.NewJob(
-		gocron.DailyJob(1, gocron.NewAtTimes(gocron.NewAtTime(0, 0, 0))),
+		gocron.DailyAt("00:00"),
 		gocron.NewTask(func() { sendDailyReport(stats, bot, chatID) }),
 	)
 	if err != nil {
 		log.Printf("⚠️ 每日报告调度失败: %v", err)
 	}
 
-	// 每月报告：每月3号 00:00
+	// *** 修复2：每月报告 - 每月3号 00:00 ***
 	_, err = s.NewJob(
-		gocron.MonthlyJob(1, []int{3}, gocron.NewAtTimes(gocron.NewAtTime(0, 0, 0))),
+		gocron.MonthlyAt(gocron.Day(3), "00:00"), // ✅ 使用 gocron.Day(3)
 		gocron.NewTask(func() { sendMonthlyReport(stats, bot, chatID, s) }),
 	)
 	if err != nil {
@@ -120,7 +121,7 @@ func sendDailyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID i
 }
 
 // sendMonthlyReport 发送每月报告
-func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int64, scheduler gocron.Scheduler) {
+func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int64, scheduler *gocron.Scheduler) {
 	now := time.Now().UTC()
 	prevMonthFirst := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
 	nextMonthFirst := prevMonthFirst.AddDate(0, 1, 0)
@@ -146,9 +147,9 @@ func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID
 
 	sendTelegramMessage(bot, chatID, text, "MarkdownV2")
 
-	// 7天后删除上月数据
-	scheduler.NewJob(
-		gocron.OneTimeJob(gocron.OneTimeJobAfter(7*24*time.Hour)),
+	// *** 修复3：7天后删除上月数据 - 使用 DurationJob ***
+	_, err = scheduler.NewJob(
+		gocron.DurationJob(7*24*time.Hour), // ✅ 7天后执行
 		gocron.NewTask(func() {
 			if err := stats.DeleteMonthData(prevMonthFirst, nextMonthFirst); err != nil {
 				log.Printf("删除上月数据失败: %v", err)
@@ -157,6 +158,9 @@ func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID
 			}
 		}),
 	)
+	if err != nil {
+		log.Printf("⚠️ 调度删除任务失败: %v", err)
+	}
 }
 
 // sendTelegramMessage 发送 Telegram 消息
