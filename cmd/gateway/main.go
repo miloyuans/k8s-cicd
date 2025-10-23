@@ -18,7 +18,7 @@ func main() {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	// 初始化全局 Redis 存储
+	// *** 修复：初始化全局 Redis 存储 ***
 	globalStorage, err = storage.NewRedisStorage(cfg.RedisAddr)
 	if err != nil {
 		log.Fatalf("初始化 Redis 失败: %v", err)

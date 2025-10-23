@@ -3,7 +3,7 @@ package storage
 
 import (
 	"context"
-	"encoding/json"  // 添加此导入修复编译错误
+	"encoding/json"
 	"sync"
 
 	"github.com/redis/go-redis/v9"
@@ -51,7 +51,7 @@ func (s *RedisStorage) Delete(key string) error {
 	return s.client.Del(s.ctx, key).Err()
 }
 
-// Push 推入队列（线程安全，异步）
+// Push 推入队列（线程安全）
 func (s *RedisStorage) Push(queue, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -89,4 +89,30 @@ func (s *RedisStorage) GetEnvironments() ([]string, error) {
 		return nil, err
 	}
 	return envs, nil
+}
+
+// *** 新增：asyncStoreServices 异步存储服务列表（保留原始大小写） ***
+func (s *RedisStorage) asyncStoreServices(services []string) error {
+	if len(services) == 0 {
+		return nil
+	}
+	
+	data, err := json.Marshal(services)
+	if err != nil {
+		return err
+	}
+	return s.Set("services", string(data))
+}
+
+// *** 新增：asyncStoreEnvironments 异步存储环境列表（保留原始大小写） ***
+func (s *RedisStorage) asyncStoreEnvironments(environments []string) error {
+	if len(environments) == 0 {
+		return nil
+	}
+	
+	data, err := json.Marshal(environments)
+	if err != nil {
+		return err
+	}
+	return s.Set("environments", string(data))
 }

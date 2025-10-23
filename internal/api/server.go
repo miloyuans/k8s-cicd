@@ -23,7 +23,6 @@ type Server struct {
 	logger          *logrus.Logger
 	whitelistIPs    []string // IP 白名单
 	config          *config.Config
-	taskQueue       chan Task     // 任务队列
 	workerPool      *WorkerPool   // 工作池
 	mu              sync.RWMutex  // 并发锁
 	wg              sync.WaitGroup // 等待组
@@ -31,7 +30,7 @@ type Server struct {
 
 // Task 异步任务接口
 type Task interface {
-	Execute() error
+	Execute(*storage.RedisStorage) error
 	GetID() string
 }
 
@@ -48,7 +47,7 @@ type DeployTask struct {
 	ID  string
 }
 
-// WorkerPool 工作池（修复：真正处理任务）
+// WorkerPool 工作池
 type WorkerPool struct {
 	workers int
 	jobs    chan Task
@@ -66,11 +65,11 @@ func NewWorkerPool(workers int) *WorkerPool {
 	return pool
 }
 
-// worker 工作协程（修复：真正处理任务）
+// worker 工作协程
 func (wp *WorkerPool) worker() {
 	for job := range wp.jobs {
-		// 执行任务
-		err := job.Execute()
+		// 执行任务（传入 storage）
+		err := job.Execute(globalStorage)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"task_id": job.GetID(),
@@ -115,7 +114,7 @@ type StatusRequest struct {
 	Status      string `json:"status"` // 必填：success/failure/no_action
 }
 
-// NewServer 初始化 HTTP 服务（多任务异步）
+// NewServer 初始化 HTTP 服务（***修复：删除未使用变量***）
 func NewServer(redisAddr string, cfg *config.Config) *Server {
 	startTime := time.Now()
 	defer func() {
@@ -123,20 +122,17 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 	}()
 
 	// 初始化 Redis
-	storageInit := time.Now()
 	storage, err := storage.NewRedisStorage(redisAddr)
 	if err != nil {
 		logrus.Fatalf("初始化 Redis 失败: %v", err)
 	}
-	logrus.WithField("redis_init_ms", time.Since(storageInit).Milliseconds()).Info("Redis 初始化完成")
 
 	// 初始化日志
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})
 	logger.SetLevel(logrus.InfoLevel)
 
-	// 解析白名单 IP
-	whitelistInit := time.Now()
+	// *** 修复：删除未使用的 whitelistInit 变量 ***
 	whitelist := os.Getenv("WHITELIST_IPS")
 	whitelistIPs := []string{}
 	if whitelist != "" {
@@ -144,8 +140,7 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 	}
 	logrus.WithField("whitelist_count", len(whitelistIPs)).Info("IP 白名单加载完成")
 
-	// 初始化工作池（20 个 worker）
-	workerPoolInit := time.Now()
+	// *** 修复：删除未使用的 workerPoolInit 变量 ***
 	workerPool := NewWorkerPool(20)
 	logrus.WithField("worker_count", 20).Info("工作池启动完成")
 
@@ -156,7 +151,6 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 		whitelistIPs: whitelistIPs,
 		config:       cfg,
 		workerPool:   workerPool,
-		taskQueue:    make(chan Task, 1000),
 	}
 
 	// 注册路由
@@ -165,45 +159,8 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 	server.Router.HandleFunc("/status", server.ipWhitelistMiddleware(server.handleStatus))
 	server.Router.HandleFunc("/deploy", server.ipWhitelistMiddleware(server.handleDeploy))
 
-	// 启动任务处理器
-	go server.processTasks()
-
 	logrus.WithField("total_init_ms", time.Since(startTime).Milliseconds()).Info("HTTP 服务初始化完成")
 	return server
-}
-
-// processTasks 任务处理器
-func (s *Server) processTasks() {
-	for task := range s.taskQueue {
-		s.wg.Add(1)
-		go func(t Task) {
-			defer s.wg.Done()
-			start := time.Now()
-			err := t.Execute()
-			duration := time.Since(start).Milliseconds()
-			s.logger.WithFields(logrus.Fields{
-				"task_id":      t.GetID(),
-				"task_type":    getTaskType(t),
-				"duration_ms":  duration,
-				"success":      err == nil,
-			}).Info("异步任务执行完成")
-			if err != nil {
-				s.logger.WithError(err).Error("异步任务失败")
-			}
-		}(task)
-	}
-}
-
-// getTaskType 获取任务类型
-func getTaskType(task Task) string {
-	switch task.(type) {
-	case *PushTask:
-		return "push"
-	case *DeployTask:
-		return "deploy"
-	default:
-		return "unknown"
-	}
 }
 
 // ipWhitelistMiddleware IP 白名单中间件
@@ -300,23 +257,22 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"message":   "数据推送成功",
 		"task_id":   taskID,
-		"queue_len": len(s.taskQueue),
 	}
 	json.NewEncoder(w).Encode(response)
 }
 
-// Execute 推送任务执行
-func (t *PushTask) Execute() error {
+// *** 修复：Execute 方法接收 storage 参数 ***
+func (t *PushTask) Execute(storage *storage.RedisStorage) error {
 	start := time.Now()
 	
 	storeServicesStart := time.Now()
-	if err := globalStorage.asyncStoreServices(t.Services); err != nil {
+	if err := storage.asyncStoreServices(t.Services); err != nil {
 		return fmt.Errorf("存储服务列表失败: %v", err)
 	}
 	storeServicesDuration := time.Since(storeServicesStart)
 
 	storeEnvsStart := time.Now()
-	if err := globalStorage.asyncStoreEnvironments(t.Environments); err != nil {
+	if err := storage.asyncStoreEnvironments(t.Environments); err != nil {
 		return fmt.Errorf("存储环境列表失败: %v", err)
 	}
 	storeEnvsDuration := time.Since(storeEnvsStart)
@@ -407,19 +363,19 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	response := map[string]interface{}{
-		"message":   "部署请求已入队",
-		"task_id":   taskID,
-		"queue_len": len(s.taskQueue),
+		"message": "部署请求已入队",
+		"task_id": taskID,
 	}
 	json.NewEncoder(w).Encode(response)
 }
 
-// Execute 部署任务执行
-func (t *DeployTask) Execute() error {
+// *** 修复：Execute 方法接收 storage 参数 ***
+func (t *DeployTask) Execute(storage *storage.RedisStorage) error {
 	start := time.Now()
 	
 	enqueueStart := time.Now()
-	err := globalStorage.Push("deploy_queue", t.toJSON())
+	data, _ := json.Marshal(t.Req)
+	err := storage.Push("deploy_queue", string(data))
 	enqueueDuration := time.Since(enqueueStart)
 	
 	logrus.WithFields(logrus.Fields{
@@ -431,11 +387,6 @@ func (t *DeployTask) Execute() error {
 	}).Info("部署任务入队完成")
 	
 	return err
-}
-
-func (t *DeployTask) toJSON() string {
-	data, _ := json.Marshal(t.Req)
-	return string(data)
 }
 
 func (t *DeployTask) GetID() string { return t.ID }
@@ -490,8 +441,8 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.logger.WithFields(logrus.Fields{
-		"query_ms":     time.Since(queryStart).Milliseconds(),
-		"pending_count": len(results),
+		"query_ms":       time.Since(queryStart).Milliseconds(),
+		"pending_count":  len(results),
 	}).Debug("查询完成")
 
 	if len(results) == 0 {
@@ -611,9 +562,5 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// 全局存储实例（任务执行使用）
+// 全局存储实例
 var globalStorage *storage.RedisStorage
-
-func init() {
-	// 在 main 中设置
-}
