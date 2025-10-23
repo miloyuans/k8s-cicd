@@ -9,27 +9,29 @@ import (
 	"net/http"
 )
 
-var globalStorage *storage.RedisStorage // 全局存储
+// *** 修复：全局存储实例 ***
+var globalStorage *storage.RedisStorage
 
 func main() {
-	// 初始化配置
+	// 1. 初始化配置
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	// *** 修复：初始化全局 Redis 存储 ***
+	// 2. *** 修复：先初始化全局 Redis ***
 	globalStorage, err = storage.NewRedisStorage(cfg.RedisAddr)
 	if err != nil {
 		log.Fatalf("初始化 Redis 失败: %v", err)
 	}
+	log.Println("✅ 全局 Redis 初始化完成")
 
-	// 初始化 API 服务
+	// 3. *** 修复：再初始化 API 服务（现在 globalStorage 已就绪）***
 	apiServer := api.NewServer(cfg.RedisAddr, cfg)
 
-	// 启动 HTTP 服务
+	// 4. 启动 HTTP 服务
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	log.Printf("启动 HTTP 服务于 %s", addr)
+	log.Printf("🚀 启动 HTTP 服务于 %s", addr)
 	if err := http.ListenAndServe(addr, apiServer.Router); err != nil {
 		log.Fatalf("HTTP 服务启动失败: %v", err)
 	}

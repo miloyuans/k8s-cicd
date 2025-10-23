@@ -1,4 +1,3 @@
-// 文件: internal/api/server.go
 package api
 
 import (
@@ -15,6 +14,10 @@ import (
 
 	"github.com/sirupsen/logrus"
 )
+
+// *** 修复：添加全局锁，确保 WorkerPool 安全初始化 ***
+var workerPoolOnce sync.Once
+var globalWorkerPool *WorkerPool
 
 // Server 封装 HTTP 服务（支持高并发多任务异步处理）
 type Server struct {
@@ -53,22 +56,48 @@ type WorkerPool struct {
 	jobs    chan Task
 }
 
-// NewWorkerPool 创建工作池（支持 20 个 worker）
+// *** 修复：添加 Nil 检查 ***
+func getGlobalWorkerPool() *WorkerPool {
+	workerPoolOnce.Do(func() {
+		globalWorkerPool = NewWorkerPool(20)
+		logrus.Info("✅ 全局工作池初始化完成 (20 workers)")
+	})
+	return globalWorkerPool
+}
+
+// NewWorkerPool 创建工作池
 func NewWorkerPool(workers int) *WorkerPool {
 	pool := &WorkerPool{
 		workers: workers,
 		jobs:    make(chan Task, 1000),
 	}
+	
+	// *** 修复：确保 globalStorage 已初始化 ***
+	if globalStorage == nil {
+		logrus.Fatal("❌ FATAL: globalStorage 未初始化，无法启动 WorkerPool")
+	}
+	
 	for i := 0; i < workers; i++ {
 		go pool.worker()
 	}
+	logrus.WithField("workers", workers).Info("WorkerPool 启动完成")
 	return pool
 }
 
-// worker 工作协程
+// *** 修复：添加 Nil 检查 ***
 func (wp *WorkerPool) worker() {
 	for job := range wp.jobs {
-		// 执行任务（传入 storage）
+		if job == nil {
+			logrus.Warn("收到空任务，跳过")
+			continue
+		}
+		
+		// *** 修复：双重 Nil 检查 ***
+		if globalStorage == nil {
+			logrus.Error("❌ globalStorage 为 nil，任务执行失败")
+			continue
+		}
+		
 		start := time.Now()
 		err := job.Execute(globalStorage)
 		duration := time.Since(start).Milliseconds()
@@ -90,6 +119,10 @@ func (wp *WorkerPool) worker() {
 
 // Submit 提交任务
 func (wp *WorkerPool) Submit(job Task) {
+	if wp.jobs == nil {
+		logrus.Error("❌ WorkerPool 未初始化")
+		return
+	}
 	wp.jobs <- job
 }
 
@@ -130,7 +163,12 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 		logrus.WithField("init_duration_ms", time.Since(startTime).Milliseconds()).Info("Server 初始化完成")
 	}()
 
-	// 初始化 Redis
+	// *** 修复：验证 globalStorage 已初始化 ***
+	if globalStorage == nil {
+		logrus.Fatal("❌ FATAL: globalStorage 未初始化")
+	}
+
+	// 初始化本地 Redis（用于同步操作）
 	storage, err := storage.NewRedisStorage(redisAddr)
 	if err != nil {
 		logrus.Fatalf("初始化 Redis 失败: %v", err)
@@ -147,11 +185,6 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 	if whitelist != "" {
 		whitelistIPs = strings.Split(whitelist, ",")
 	}
-	logrus.WithField("whitelist_count", len(whitelistIPs)).Info("IP 白名单加载完成")
-
-	// 初始化工作池
-	workerPool := NewWorkerPool(20)
-	logrus.WithField("worker_count", 20).Info("工作池启动完成")
 
 	server := &Server{
 		Router:       http.NewServeMux(),
@@ -159,7 +192,6 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 		logger:       logger,
 		whitelistIPs: whitelistIPs,
 		config:       cfg,
-		workerPool:   workerPool,
 	}
 
 	// 注册路由
@@ -170,6 +202,50 @@ func NewServer(redisAddr string, cfg *config.Config) *Server {
 
 	logrus.WithField("total_init_ms", time.Since(startTime).Milliseconds()).Info("HTTP 服务初始化完成")
 	return server
+}
+
+// *** 修复：handlePush 使用全局工作池 ***
+func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func() {
+		s.logger.WithField("total_duration_ms", time.Since(start).Milliseconds()).Info("handlePush 执行完成")
+	}()
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "仅支持 POST 方法", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req PushRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.WithError(err).Error("解析推送请求失败")
+		http.Error(w, "无效的请求数据", http.StatusBadRequest)
+		return
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"services_count":     len(req.Services),
+		"environments_count": len(req.Environments),
+	}).Info("收到推送请求")
+
+	// *** 修复：使用全局工作池 ***
+	wp := getGlobalWorkerPool()
+	
+	taskID := fmt.Sprintf("push-%d", time.Now().UnixNano())
+	pushTask := &PushTask{
+		Services:     req.Services,
+		Environments: req.Environments,
+		ID:           taskID,
+	}
+
+	wp.Submit(pushTask)
+
+	w.WriteHeader(http.StatusOK)
+	response := map[string]interface{}{
+		"message": "数据推送成功",
+		"task_id": taskID,
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 // ipWhitelistMiddleware IP 白名单中间件
@@ -272,6 +348,10 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 // *** 修复：调用导出的方法 AsyncStoreServices ***
 func (t *PushTask) Execute(storage *storage.RedisStorage) error {
+	if storage == nil {
+		return fmt.Errorf("storage 为 nil")
+	}
+	
 	start := time.Now()
 	
 	storeServicesStart := time.Now()
@@ -301,6 +381,7 @@ func (t *PushTask) Execute(storage *storage.RedisStorage) error {
 func (t *PushTask) GetID() string { return t.ID }
 
 // handleDeploy 处理部署请求（多任务异步）
+// *** 修复：handleDeploy 使用全局工作池 ***
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -312,18 +393,15 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	decodeStart := time.Now()
 	var req DeployRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.WithError(err).Error("解析部署请求失败")
 		http.Error(w, "无效的请求数据", http.StatusBadRequest)
 		return
 	}
-	s.logger.WithField("decode_ms", time.Since(decodeStart).Milliseconds()).Debug("JSON 解析完成")
 
 	// 必填字段验证
 	if req.Service == "" || len(req.Environments) == 0 || req.Version == "" || req.User == "" {
-		s.logger.Warn("部署请求缺少必填字段")
 		http.Error(w, "缺少必填字段", http.StatusBadRequest)
 		return
 	}
@@ -333,42 +411,32 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		req.Status = "pending"
 	}
 
-	s.logger.WithFields(logrus.Fields{
-		"service":      req.Service,
-		"version":      req.Version,
-		"user":         req.User,
-		"environments": req.Environments,
-	}).Info("收到部署请求")
-
-	// 验证服务和环境（同步验证，快速返回）
-	validateStart := time.Now()
+	// 验证服务和环境
 	services, _ := s.storage.GetServices()
 	environments, _ := s.storage.GetEnvironments()
 
 	if !contains(services, req.Service) {
-		s.logger.WithField("service", req.Service).Warn("服务不存在")
 		http.Error(w, fmt.Sprintf("服务 %s 不存在", req.Service), http.StatusBadRequest)
 		return
 	}
 
 	for _, env := range req.Environments {
 		if !contains(environments, env) {
-			s.logger.WithField("environment", env).Warn("环境不存在")
 			http.Error(w, fmt.Sprintf("环境 %s 不存在", env), http.StatusBadRequest)
 			return
 		}
 	}
-	s.logger.WithField("validate_ms", time.Since(validateStart).Milliseconds()).Debug("验证完成")
 
-	// 创建异步部署任务
+	// *** 修复：使用全局工作池 ***
+	wp := getGlobalWorkerPool()
+	
 	taskID := fmt.Sprintf("deploy-%s-%s", req.Service, req.Version)
 	deployTask := &DeployTask{
 		Req: req,
 		ID:  taskID,
 	}
 
-	// 提交到工作池
-	s.workerPool.Submit(deployTask)
+	wp.Submit(deployTask)
 
 	w.WriteHeader(http.StatusOK)
 	response := map[string]interface{}{
@@ -379,6 +447,10 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (t *DeployTask) Execute(storage *storage.RedisStorage) error {
+	if storage == nil {
+		return fmt.Errorf("storage 为 nil")
+	}
+	
 	start := time.Now()
 	
 	enqueueStart := time.Now()
@@ -561,6 +633,7 @@ func (s *Server) updateStatus(req StatusRequest) (bool, error) {
 }
 
 // contains 检查字符串是否在切片中
+
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
