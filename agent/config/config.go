@@ -18,23 +18,19 @@ type TelegramBot struct {
 	IsEnabled   bool                `yaml:"enabled"`       // 是否启用该机器人
 }
 
-// TelegramConfig 扩展配置
+// TelegramConfig Telegram多机器人配置（已合并扩展配置）
 type TelegramConfig struct {
-	Bots          []TelegramBot `yaml:"bots"`
-	AllowedUsers  []int64       `yaml:"allowed_users"`    // 有效用户ID列表
-	ConfirmTimeout time.Duration `yaml:"confirm_timeout"`  // 弹窗超时时间
-}
-
-// TelegramConfig Telegram多机器人配置
-type TelegramConfig struct {
-	Bots []TelegramBot `yaml:"bots"`
+	Bots           []TelegramBot    `yaml:"bots"`
+	AllowedUsers   []int64          `yaml:"allowed_users"`    // 有效用户ID列表
+	ConfirmTimeout time.Duration    `yaml:"confirm_timeout"`  // 弹窗超时时间，默认24小时
 }
 
 // APIConfig API服务配置
 type APIConfig struct {
-	BaseURL      string        `yaml:"base_url"`        // API基础地址
-	PushInterval time.Duration `yaml:"push_interval"`   // 推送间隔，默认5s
-	MaxRetries   int           `yaml:"max_retries"`     // 最大重试次数，0=无限重试
+	BaseURL        string        `yaml:"base_url"`          // API基础地址
+	PushInterval   time.Duration `yaml:"push_interval"`     // 推送间隔，默认30秒
+	QueryInterval  time.Duration `yaml:"query_interval"`    // 查询间隔，默认15秒
+	MaxRetries     int           `yaml:"max_retries"`       // 最大重试次数，0=无限重试
 }
 
 // QueryConfig /query 弹窗过滤配置
@@ -86,19 +82,18 @@ type EnvMappingConfig struct {
 	Mappings map[string]string `yaml:"mappings"`  // env -> namespace
 }
 
-// Config 全局配置结构
 // Config 完整配置结构
 type Config struct {
-	Telegram    TelegramConfig `yaml:"telegram"`
-	API         APIConfig      `yaml:"api"`
-	Query       QueryConfig    `yaml:"query"`       
-	Kubernetes  K8sAuthConfig  `yaml:"kubernetes"`
-	Redis       RedisConfig    `yaml:"redis"`
-	Task        TaskConfig     `yaml:"task"`
-	Deploy      DeployConfig   `yaml:"deploy"`
-	User        UserConfig     `yaml:"user"`
-	EnvMapping  EnvMappingConfig `yaml:"env_mapping"`
-	LogLevel    string         `yaml:"log_level"`
+	Telegram    TelegramConfig      `yaml:"telegram"`
+	API         APIConfig           `yaml:"api"`
+	Query       QueryConfig         `yaml:"query"`       
+	Kubernetes  K8sAuthConfig       `yaml:"kubernetes"`
+	Redis       RedisConfig         `yaml:"redis"`
+	Task        TaskConfig          `yaml:"task"`
+	Deploy      DeployConfig        `yaml:"deploy"`
+	User        UserConfig          `yaml:"user"`
+	EnvMapping  EnvMappingConfig    `yaml:"env_mapping"`
+	LogLevel    string              `yaml:"log_level"`
 }
 
 // LoadConfig 从YAML文件加载配置，并合并环境变量
@@ -137,32 +132,31 @@ func LoadConfig(filePath string) (*Config, error) {
 
 // setDefaults 设置配置默认值
 func (c *Config) setDefaults() {
-	// API间隔
+	// API推送间隔 - 默认30秒
 	if c.API.PushInterval == 0 {
-		c.API.PushInterval = 30 * time.Second  // 默认30s
+		c.API.PushInterval = 30 * time.Second
 	}
+	
+	// API查询间隔 - 默认15秒
 	if c.API.QueryInterval == 0 {
-		c.API.QueryInterval = 15 * time.Second // 默认15s
+		c.API.QueryInterval = 15 * time.Second
 	}
 	
-	// Telegram弹窗超时
-	if c.Telegram.ConfirmTimeout == 0 {
-		c.Telegram.ConfirmTimeout = 24 * time.Hour
-	}
-	
-	// /query 弹窗环境 - 默认所有环境
-	if len(c.Query.ConfirmEnvs) == 0 {
-		c.Query.ConfirmEnvs = []string{"eks", "eks-pro"}
-	}
-	
-	// API推送默认配置
-	if c.API.PushInterval == 0 {
-		c.API.PushInterval = 5 * time.Second
-	}
+	// API最大重试次数
 	if c.API.MaxRetries == 0 {
 		c.API.MaxRetries = 0 // 无限重试
 	}
 
+	// Telegram弹窗超时 - 默认24小时
+	if c.Telegram.ConfirmTimeout == 0 {
+		c.Telegram.ConfirmTimeout = 24 * time.Hour
+	}
+	
+	// /query 弹窗环境 - 默认需要弹窗的环境
+	if len(c.Query.ConfirmEnvs) == 0 {
+		c.Query.ConfirmEnvs = []string{"eks", "eks-pro"}
+	}
+	
 	// 部署配置默认值
 	if c.Deploy.WaitTimeout == 0 {
 		c.Deploy.WaitTimeout = 5 * time.Minute
@@ -186,6 +180,7 @@ func (c *Config) setDefaults() {
 	if c.Redis.IdleTimeout == 0 {
 		c.Redis.IdleTimeout = 5 * time.Minute
 	}
+	
 	// 任务默认配置
 	if c.Task.MaxRetries == 0 {
 		c.Task.MaxRetries = 3
@@ -202,6 +197,7 @@ func (c *Config) setDefaults() {
 	if c.Task.MaxQueueSize == 0 {
 		c.Task.MaxQueueSize = 100
 	}
+	
 	// K8s默认认证方式
 	if c.Kubernetes.AuthType == "" {
 		c.Kubernetes.AuthType = "kubeconfig"
@@ -226,6 +222,7 @@ func (c *Config) setDefaults() {
 
 // mergeEnvVars 合并环境变量覆盖配置
 func (c *Config) mergeEnvVars() {
+	// Telegram配置
 	if token := os.Getenv("TELEGRAM_TOKEN"); token != "" {
 		for i := range c.Telegram.Bots {
 			c.Telegram.Bots[i].Token = token
@@ -236,7 +233,22 @@ func (c *Config) mergeEnvVars() {
 			c.Telegram.Bots[i].GroupID = groupID
 		}
 	}
+	
+	// Redis配置
 	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
 		c.Redis.Addr = redisAddr
+	}
+	if redisPass := os.Getenv("REDIS_PASSWORD"); redisPass != "" {
+		c.Redis.Password = redisPass
+	}
+	if redisDB := os.Getenv("REDIS_DB"); redisDB != "" {
+		if db, err := strconv.Atoi(redisDB); err == nil {
+			c.Redis.DB = db
+		}
+	}
+	
+	// API配置
+	if apiURL := os.Getenv("API_BASE_URL"); apiURL != "" {
+		c.API.BaseURL = apiURL
 	}
 }
