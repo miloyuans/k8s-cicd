@@ -2,7 +2,6 @@ package agent
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"k8s-cicd/agent/api"
