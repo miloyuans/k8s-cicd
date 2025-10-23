@@ -111,15 +111,21 @@ func (s *MongoStorage) StoreServiceEnvironments(services, environments []string)
 // GetServices 获取所有服务列表
 func (s *MongoStorage) GetServices() ([]string, error) {
 	coll := s.db.Collection("service_environments")
+	
+	// *** 修复：使用正确的 Distinct 返回类型处理 ***
 	cursor, err := coll.Distinct(s.ctx, "_id", bson.D{})
 	if err != nil {
 		return nil, err
 	}
 	
-	services := make([]string, len(cursor))
-	for i, v := range cursor {
-		services[i] = v.(string)
+	// *** 修复：正确转换 []interface{} 为 []string ***
+	services := make([]string, 0, len(cursor))
+	for _, v := range cursor {
+		if str, ok := v.(string); ok {
+			services = append(services, str)
+		}
 	}
+	
 	return services, nil
 }
 
