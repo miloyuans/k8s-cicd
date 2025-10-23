@@ -10,8 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-co-op/gocron/v2"
-	"github.com/go-co-op/gocron/v2/events"
+	"github.com/go-co-op/gocron/v2"        // ✅ 只保留核心包
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -73,7 +72,7 @@ func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int
 		log.Fatalf("初始化调度器失败: %v", err)
 	}
 
-	// *** 修复1：每日报告 - 每天 00:00 ***
+	// 每日报告：每天 00:00
 	_, err = s.NewJob(
 		gocron.DailyAt("00:00"),
 		gocron.NewTask(func() { sendDailyReport(stats, bot, chatID) }),
@@ -82,9 +81,9 @@ func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int
 		log.Printf("⚠️ 每日报告调度失败: %v", err)
 	}
 
-	// *** 修复2：每月报告 - 每月3号 00:00 ***
+	// 每月报告：每月3号 00:00
 	_, err = s.NewJob(
-		gocron.MonthlyAt(gocron.Day(3), "00:00"), // ✅ 使用 gocron.Day(3)
+		gocron.MonthlyAt(gocron.Day(3), "00:00"),
 		gocron.NewTask(func() { sendMonthlyReport(stats, bot, chatID, s) }),
 	)
 	if err != nil {
@@ -147,9 +146,9 @@ func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID
 
 	sendTelegramMessage(bot, chatID, text, "MarkdownV2")
 
-	// *** 修复3：7天后删除上月数据 - 使用 DurationJob ***
+	// 7天后删除上月数据
 	_, err = scheduler.NewJob(
-		gocron.DurationJob(7*24*time.Hour), // ✅ 7天后执行
+		gocron.DurationJob(7*24*time.Hour),
 		gocron.NewTask(func() {
 			if err := stats.DeleteMonthData(prevMonthFirst, nextMonthFirst); err != nil {
 				log.Printf("删除上月数据失败: %v", err)
