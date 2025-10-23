@@ -9,9 +9,7 @@ import (
 	"net/http"
 )
 
-// *** 修复：全局存储实例 ***
-var globalStorage *storage.RedisStorage
-
+// *** 修复：从 main 移除 globalStorage 定义，由 api 包统一管理 ***
 func main() {
 	// 1. 初始化配置
 	cfg, err := config.LoadConfig()
@@ -19,15 +17,17 @@ func main() {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	// 2. *** 修复：先初始化全局 Redis ***
-	globalStorage, err = storage.NewRedisStorage(cfg.RedisAddr)
+	// 2. 初始化全局 Redis（传递给 api 包）
+	redisStorage, err := storage.NewRedisStorage(cfg.RedisAddr)
 	if err != nil {
 		log.Fatalf("初始化 Redis 失败: %v", err)
 	}
+	
+	// *** 修复：显式传递给 api 初始化 ***
 	log.Println("✅ 全局 Redis 初始化完成")
 
-	// 3. *** 修复：再初始化 API 服务（现在 globalStorage 已就绪）***
-	apiServer := api.NewServer(cfg.RedisAddr, cfg)
+	// 3. 初始化 API 服务（传入 Redis 实例）
+	apiServer := api.NewServer(redisStorage, cfg)
 
 	// 4. 启动 HTTP 服务
 	addr := fmt.Sprintf(":%d", cfg.Port)
