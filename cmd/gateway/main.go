@@ -68,19 +68,19 @@ func main() {
 // initScheduler 初始化任务调度
 func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int64) {
 	// *** 修复1：正确创建 Scheduler ***
-	s, err := gocron.NewScheduler(
-		time.UTC,
+	s := gocron.NewScheduler(
+		gocron.WithLocation(time.UTC), // ✅ 正确选项
 	)
-	if err != nil {
-		log.Fatalf("初始化调度器失败: %v", err)
-	}
 
 	// *** 修复2：正确创建每日任务 - 每天 00:00 ***
-	_, err = s.Every(1).Day().At("00:00").Do(func() {
-		log.Println("🔄 开始执行每日报告...")
-		sendDailyReport(stats, bot, chatID)
-		log.Println("✅ 每日报告执行完成")
-	})
+	_, err := s.NewJob(
+		gocron.Daily(0, 0, 0), // 每天 00:00:00
+		gocron.NewTask(func() {
+			log.Println("🔄 开始执行每日报告...")
+			sendDailyReport(stats, bot, chatID)
+			log.Println("✅ 每日报告执行完成")
+		}),
+	)
 	if err != nil {
 		log.Printf("⚠️ 每日报告调度失败: %v", err)
 	} else {
@@ -88,19 +88,22 @@ func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int
 	}
 
 	// *** 修复3：正确创建每月任务 - 每月3号 00:00 ***
-	_, err = s.Every(1).Month().Day(3).At("00:00").Do(func() {
-		log.Println("🔄 开始执行月报...")
-		sendMonthlyReport(stats, bot, chatID, s)
-		log.Println("✅ 月报执行完成")
-	})
+	_, err = s.NewJob(
+		gocron.Monthly(0, 0, 0, 3), // 每月3日 00:00:00
+		gocron.NewTask(func() {
+			log.Println("🔄 开始执行月报...")
+			sendMonthlyReport(stats, bot, chatID)
+			log.Println("✅ 月报执行完成")
+		}),
+	)
 	if err != nil {
 		log.Printf("⚠️ 每月报告调度失败: %v", err)
 	} else {
 		log.Println("✅ 月报任务已调度")
 	}
 
-	// *** 修复4：启动调度器 ***
-	s.StartAsync() // 非阻塞启动
+	// *** 修复4：正确启动调度器 ***
+	s.StartBlocking() // ✅ 阻塞启动
 	log.Println("✅ 任务调度器启动")
 }
 
@@ -130,7 +133,7 @@ func sendDailyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID i
 }
 
 // sendMonthlyReport 发送每月报告
-func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int64, scheduler *gocron.Scheduler) {
+func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int64) {
 	now := time.Now().UTC()
 	prevMonthFirst := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
 	nextMonthFirst := prevMonthFirst.AddDate(0, 1, 0)
@@ -156,15 +159,16 @@ func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID
 
 	sendTelegramMessage(bot, chatID, text, "MarkdownV2")
 
-	// *** 修复5：7天后删除上月数据 ***
-	scheduler.Every(1).Day().After(7*24*time.Hour).Do(func() {
+	// *** 修复5：7天后删除上月数据 - 使用 goroutine ***
+	go func() {
+		time.Sleep(7 * 24 * time.Hour)
 		log.Println("🔄 开始清理上月数据...")
 		if err := stats.DeleteMonthData(prevMonthFirst, nextMonthFirst); err != nil {
 			log.Printf("删除上月数据失败: %v", err)
 		} else {
 			log.Printf("✅ 上月数据删除成功: %s", prevMonthFirst.Format("Jan 2006"))
 		}
-	})
+	}()
 }
 
 // sendTelegramMessage 发送 Telegram 消息
