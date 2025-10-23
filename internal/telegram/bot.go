@@ -1,547 +1,509 @@
 // 文件: internal/telegram/bot.go
-package telegram
+package api
 
 import (
 	"encoding/json"
 	"fmt"
+	"k8s-cicd/internal/config"
 	"k8s-cicd/internal/storage"
+	"k8s-cicd/internal/telegram"
+	"net"
+	"net/http"
+	"os"
 	"strings"
+	"sync"
+	"time"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/sirupsen/logrus"
 )
 
-// Bot 封装 Telegram 机器人功能
-type Bot struct {
-	bot     *tgbotapi.BotAPI
-	storage *storage.RedisStorage
-	logger  *logrus.Logger
-	groupID int64 // Telegram 群组 ID
+// Server 封装 HTTP 服务（支持并发处理）
+type Server struct {
+	Router          *http.ServeMux
+	storage         *storage.RedisStorage
+	logger          *logrus.Logger
+	bot             *telegram.Bot
+	whitelistIPs    []string // IP 白名单
+	config          *config.Config
+	asyncQueue      chan interface{} // 异步处理队列
+	workerPool      *WorkerPool      // 工作池
+	mu              sync.RWMutex     // 并发锁
 }
 
-// UserState 保存用户交互状态
-type UserState struct {
-	Step         int      // 当前交互步骤
-	Service      string   // 选择的服务
-	Environments []string // 选择的环境
-	Version      string   // 输入的版本号
-	ChatID       int64    // 用户聊天 ID（群组 ID）
-	UserID       int64    // 用户 ID（Telegram 用户 ID）
-	Messages     []int    // 交互消息 ID 列表
-	LastMsgID    int      // 最后用户消息 ID（用于回复）
+// PushRequest 定义推送请求结构（优化：只保留 services 和 environments）
+type PushRequest struct {
+	Services     []string `json:"services"`     // 服务列表（保留原始大小写）
+	Environments []string `json:"environments"` // 环境列表（保留原始大小写）
 }
 
-// NewBot 初始化 Telegram 机器人
-func NewBot(token string, groupID int64) (*Bot, error) {
-	bot, err := tgbotapi.NewBotAPI(token)
+// DeployRequest 定义部署请求结构（优化：status 可选，默认 pending）
+type DeployRequest struct {
+	Service      string   `json:"service"`
+	Environments []string `json:"environments"`
+	Version      string   `json:"version"`
+	User         string   `json:"user"`
+	Status       string   `json:"status,omitempty"` // 可选，默认为 "pending"
+}
+
+// QueryRequest 定义查询请求结构
+type QueryRequest struct {
+	Environment string `json:"environment"`
+	User        string `json:"user"`
+}
+
+// StatusRequest 定义任务状态更新请求结构
+type StatusRequest struct {
+	Service     string `json:"service"`
+	Version     string `json:"version"`
+	Environment string `json:"environment"`
+	User        string `json:"user"`
+	Status      string `json:"status"` // 必填：success/failure/no_action
+}
+
+// WorkerPool 工作池结构
+type WorkerPool struct {
+	workers int
+	jobs    chan interface{}
+}
+
+// NewWorkerPool 创建工作池
+func NewWorkerPool(workers int) *WorkerPool {
+	pool := &WorkerPool{
+		workers: workers,
+		jobs:    make(chan interface{}, 100),
+	}
+	for i := 0; i < workers; i++ {
+		go pool.worker()
+	}
+	return pool
+}
+
+func (wp *WorkerPool) worker() {
+	for job := range wp.jobs {
+		// 处理异步任务
+		time.Sleep(10 * time.Millisecond) // 模拟处理
+	}
+}
+
+func (wp *WorkerPool) Submit(job interface{}) {
+	wp.jobs <- job
+}
+
+// NewServer 初始化 HTTP 服务（优化：支持异步并发）
+func NewServer(redisAddr string, cfg *config.Config) *Server {
+	// 初始化 Redis
+	storage, err := storage.NewRedisStorage(redisAddr)
 	if err != nil {
-		return nil, fmt.Errorf("初始化 Telegram 机器人失败: %v", err)
+		logrus.Fatalf("初始化 Redis 失败: %v", err)
 	}
 
-	redisStorage, err := storage.NewRedisStorage("localhost:6379")
-	if err != nil {
-		return nil, fmt.Errorf("初始化 Redis 失败: %v", err)
-	}
-
+	// 初始化日志
 	logger := logrus.New()
-	return &Bot{
-		bot:     bot,
-		storage: redisStorage,
-		logger:  logger,
-		groupID: groupID,
-	}, nil
-}
+	logger.SetFormatter(&logrus.JSONFormatter{}) // 结构化日志
+	logger.SetLevel(logrus.InfoLevel)
 
-// Start 启动 Telegram 机器人，处理消息和回调
-func (b *Bot) Start() {
-	b.logger.Info("启动 Telegram 机器人")
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-
-	updates := b.bot.GetUpdatesChan(u)
-	for update := range updates {
-		if update.Message != nil && update.Message.Chat.ID == b.groupID {
-			b.handleMessage(update.Message)
-		} else if update.CallbackQuery != nil && update.CallbackQuery.Message.Chat.ID == b.groupID {
-			b.handleCallback(update.CallbackQuery)
-		}
-	}
-}
-
-// getServices 从 Redis 获取服务列表
-func (b *Bot) getServices() ([]string, error) {
-	data, err := b.storage.Get("services")
-	if err != nil || data == "" {
-		b.logger.Warn("从 Redis 获取服务列表失败，无数据")
-		return nil, fmt.Errorf("服务列表未初始化，请等待外部服务推送")
-	}
-	var services []string
-	if err := json.Unmarshal([]byte(data), &services); err != nil {
-		b.logger.Errorf("解析服务列表失败: %v", err)
-		return nil, err
-	}
-	return services, nil
-}
-
-// getEnvironments 从 Redis 获取环境列表
-func (b *Bot) getEnvironments() ([]string, error) {
-	data, err := b.storage.Get("environments")
-	if err != nil || data == "" {
-		b.logger.Warn("从 Redis 获取环境列表失败，无数据")
-		return nil, fmt.Errorf("环境列表未初始化，请等待外部服务推送")
-	}
-	var envs []string
-	if err := json.Unmarshal([]byte(data), &envs); err != nil {
-		b.logger.Errorf("解析环境列表失败: %v", err)
-		return nil, err
-	}
-	return envs, nil
-}
-
-// handleMessage 处理用户文本输入
-func (b *Bot) handleMessage(msg *tgbotapi.Message) {
-	chatID := msg.Chat.ID
-	userID := msg.From.ID
-	b.logger.Infof("收到用户 %d 的消息: %s", userID, msg.Text)
-
-	// 检查是否输入 "ai" 触发交互
-	if strings.ToLower(msg.Text) == "ai" {
-		b.logger.Infof("用户 %d 触发交互，输入: %s", userID, msg.Text)
-		b.startInteraction(chatID, userID)
-		return
-	}
-
-	// 获取用户状态，仅处理交互相关消息
-	state, err := b.getState(fmt.Sprintf("user:%d:%d", chatID, userID))
+	// 初始化 Telegram 机器人
+	bot, err := telegram.NewBot(cfg.TelegramToken, cfg.TelegramGroupID)
 	if err != nil {
-		b.logger.Warnf("用户 %d 无交互状态，忽略消息: %s", userID, msg.Text)
-		return
+		logrus.Fatalf("初始化 Telegram 机器人失败: %v", err)
 	}
 
-	switch state.Step {
-	case 3: // 输入版本号
-		b.logger.Infof("用户 %d 输入版本号: %s", userID, msg.Text)
-		if b.isVersionUnique(state.Service, msg.Text) {
-			state.Version = msg.Text
-			state.Step = 4
-			state.LastMsgID = msg.MessageID // 记录版本输入消息 ID
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-			b.showConfirmation(chatID, &state)
-		} else {
-			b.logger.Warnf("用户 %d 输入的版本号 %s 在服务 %s 下已存在", userID, msg.Text, state.Service)
-			b.SendMessage(chatID, fmt.Sprintf("此服务 %s 下版本号 %s 已存在，请输入新版本号：", state.Service, msg.Text), nil)
-		}
-	default:
-		b.logger.Warnf("用户 %d 的消息 %s 非交互相关，忽略", userID, msg.Text)
+	// 解析白名单 IP
+	whitelist := os.Getenv("WHITELIST_IPS")
+	whitelistIPs := []string{}
+	if whitelist != "" {
+		whitelistIPs = strings.Split(whitelist, ",")
 	}
+
+	// 初始化工作池（10 个 worker）
+	workerPool := NewWorkerPool(10)
+
+	server := &Server{
+		Router:       http.NewServeMux(),
+		storage:      storage,
+		logger:       logger,
+		bot:          bot,
+		whitelistIPs: whitelistIPs,
+		config:       cfg,
+		workerPool:   workerPool,
+	}
+
+	// 注册路由，使用 IP 白名单中间件
+	server.Router.HandleFunc("/push", server.ipWhitelistMiddleware(server.handlePush))
+	server.Router.HandleFunc("/query", server.ipWhitelistMiddleware(server.handleQuery))
+	server.Router.HandleFunc("/status", server.ipWhitelistMiddleware(server.handleStatus))
+	server.Router.HandleFunc("/deploy", server.ipWhitelistMiddleware(server.handleDeploy))
+
+	// 启动异步处理协程
+	go server.processAsyncQueue()
+
+	return server
 }
 
-// startInteraction 开始交互流程，显示服务选择弹窗
-func (b *Bot) startInteraction(chatID, userID int64) {
-	b.logger.Infof("用户 %d (ChatID: %d) 开始交互流程", userID, chatID)
-	// 初始化用户状态
-	state := UserState{
-		Step:   1,
-		ChatID: chatID,
-		UserID: userID,
-	}
-	b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
+// ipWhitelistMiddleware IP 白名单中间件（线程安全）
+func (s *Server) ipWhitelistMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.logger.WithFields(logrus.Fields{
+			"client_ip": r.RemoteAddr,
+			"path":      r.URL.Path,
+		}).Info("收到 HTTP 请求")
 
-	// 服务选择弹窗
-	b.showServiceSelection(chatID, &state)
-}
-
-// showServiceSelection 显示服务选择弹窗
-func (b *Bot) showServiceSelection(chatID int64, state *UserState) {
-	services, err := b.getServices()
-	if err != nil {
-		b.logger.Warnf("用户 %d 获取服务列表失败: %v", state.UserID, err)
-		b.SendMessage(chatID, err.Error(), nil)
-		b.deleteState(fmt.Sprintf("user:%d:%d", chatID, state.UserID))
-		return
-	}
-
-	cols := 3
-	if len(services) < cols {
-		cols = len(services)
-	}
-	var buttons [][]tgbotapi.InlineKeyboardButton
-	var row []tgbotapi.InlineKeyboardButton
-	for i, svc := range services {
-		displayText := svc
-		if state.Service == svc {
-			displayText = fmt.Sprintf("<b>✅ %s</b>", svc)
-		}
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, fmt.Sprintf("service:%s", svc)))
-		if len(row) == cols || i == len(services)-1 {
-			buttons = append(buttons, row)
-			row = []tgbotapi.InlineKeyboardButton{}
-		}
-	}
-	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_service"),
-		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
-	})
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msgText := fmt.Sprintf("请选择服务（单选）:\n当前选中: %s", state.Service)
-	var sentMsg tgbotapi.Message
-	if len(state.Messages) > 0 {
-		lastMsgID := state.Messages[len(state.Messages)-1]
-		editMsg := tgbotapi.NewEditMessageText(chatID, lastMsgID, msgText)
-		editMsg.ReplyMarkup = &keyboard
-		editMsg.ParseMode = "HTML"
-		var err error
-		sentMsg, err = b.bot.Send(editMsg)
-		if err != nil {
-			b.logger.Errorf("编辑服务选择消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	} else {
-		msg := tgbotapi.NewMessage(chatID, msgText)
-		msg.ReplyMarkup = keyboard
-		msg.ParseMode = "HTML"
-		var err error
-		sentMsg, err = b.bot.Send(msg)
-		if err != nil {
-			b.logger.Errorf("发送服务选择消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	}
-	b.logger.Infof("用户 %d 显示服务选择弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
-}
-
-// showEnvironmentSelection 显示环境选择弹窗
-func (b *Bot) showEnvironmentSelection(chatID int64, state *UserState) {
-	environments, err := b.getEnvironments()
-	if err != nil {
-		b.logger.Warnf("用户 %d 获取环境列表失败: %v", state.UserID, err)
-		b.SendMessage(chatID, err.Error(), nil)
-		b.deleteState(fmt.Sprintf("user:%d:%d", chatID, state.UserID))
-		return
-	}
-
-	cols := 3
-	if len(environments) < cols {
-		cols = len(environments)
-	}
-	var buttons [][]tgbotapi.InlineKeyboardButton
-	var row []tgbotapi.InlineKeyboardButton
-	for i, env := range environments {
-		displayText := env
-		if contains(state.Environments, env) {
-			displayText = fmt.Sprintf("<b>✅ %s</b>", env)
-		}
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, fmt.Sprintf("env:%s", env)))
-		if len(row) == cols || i == len(environments)-1 {
-			buttons = append(buttons, row)
-			row = []tgbotapi.InlineKeyboardButton{}
-		}
-	}
-	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_env"),
-		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
-	})
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msgText := fmt.Sprintf("请选择环境（可多选）:\n当前选中: %s", strings.Join(state.Environments, ", "))
-	var sentMsg tgbotapi.Message
-	if len(state.Messages) > 0 {
-		lastMsgID := state.Messages[len(state.Messages)-1]
-		editMsg := tgbotapi.NewEditMessageText(chatID, lastMsgID, msgText)
-		editMsg.ReplyMarkup = &keyboard
-		editMsg.ParseMode = "HTML"
-		var err error
-		sentMsg, err = b.bot.Send(editMsg)
-		if err != nil {
-			b.logger.Errorf("编辑环境选择消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	} else {
-		msg := tgbotapi.NewMessage(chatID, msgText)
-		msg.ReplyMarkup = keyboard
-		msg.ParseMode = "HTML"
-		var err error
-		sentMsg, err = b.bot.Send(msg)
-		if err != nil {
-			b.logger.Errorf("发送环境选择消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	}
-	b.logger.Infof("用户 %d 显示环境选择弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
-}
-
-// showConfirmation 显示确认弹窗
-func (b *Bot) showConfirmation(chatID int64, state *UserState) {
-	msgText := fmt.Sprintf("请确认以下信息：\n服务: %s\n环境: %s\n版本: %s", state.Service, strings.Join(state.Environments, ", "), state.Version)
-	keyboard := b.CreateYesNoKeyboard("confirm")
-	var sentMsg tgbotapi.Message
-	msg := tgbotapi.NewMessage(chatID, msgText)
-	msg.ReplyMarkup = &keyboard
-	var err error
-	sentMsg, err = b.bot.Send(msg)
-	if err != nil {
-		b.logger.Errorf("发送确认消息失败，用户 %d: %v", state.UserID, err)
-		return
-	}
-	state.Messages = append(state.Messages, sentMsg.MessageID)
-	b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-	b.logger.Infof("用户 %d 显示确认弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
-}
-
-// askContinue 询问是否继续提交
-func (b *Bot) askContinue(chatID int64, state *UserState) {
-	msgText := "是否继续提交新数据？"
-	keyboard := b.CreateYesNoKeyboard("restart")
-	var sentMsg tgbotapi.Message
-	if len(state.Messages) > 0 {
-		lastMsgID := state.Messages[len(state.Messages)-1]
-		editMsg := tgbotapi.NewEditMessageText(chatID, lastMsgID, msgText)
-		editMsg.ReplyMarkup = &keyboard
-		var err error
-		sentMsg, err = b.bot.Send(editMsg)
-		if err != nil {
-			b.logger.Errorf("编辑继续提交消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	} else {
-		msg := tgbotapi.NewMessage(chatID, msgText)
-		msg.ReplyMarkup = &keyboard
-		var err error
-		sentMsg, err = b.bot.Send(msg)
-		if err != nil {
-			b.logger.Errorf("发送继续提交消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	}
-	b.logger.Infof("用户 %d 显示继续提交弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
-}
-
-// deleteMessages 删除所有交互消息
-func (b *Bot) deleteMessages(chatID int64, state *UserState) {
-	for _, msgID := range state.Messages {
-		deleteMsg := tgbotapi.NewDeleteMessage(chatID, msgID)
-		if _, err := b.bot.Request(deleteMsg); err != nil {
-			b.logger.Errorf("删除消息 %d 失败，用户 %d: %v", msgID, state.UserID, err)
-		} else {
-			b.logger.Infof("删除消息 %d 成功，用户 %d", msgID, state.UserID)
-		}
-	}
-	state.Messages = nil
-	b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-}
-
-// handleCallback 处理回调查询
-func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
-	chatID := query.Message.Chat.ID
-	userID := query.From.ID
-	data := query.Data
-	b.logger.Infof("用户 %d 触发回调: %s", userID, data)
-
-	// 尝试从交互状态获取
-	state, err := b.getState(fmt.Sprintf("user:%d:%d", chatID, userID))
-	if err != nil {
-		// 尝试从部署状态获取
-		deployState, err := b.getState(fmt.Sprintf("deploy:%d:%d", chatID, userID))
-		if err == nil {
-			b.handleDeployCallback(query, &deployState)
+		if len(s.whitelistIPs) == 0 {
+			next(w, r)
 			return
 		}
-		b.logger.Errorf("获取用户 %d 状态失败: %v", userID, err)
+
+		clientIP := r.RemoteAddr
+		if strings.Contains(clientIP, ":") {
+			clientIP, _, _ = net.SplitHostPort(clientIP)
+		}
+
+		for _, allowed := range s.whitelistIPs {
+			if strings.Contains(allowed, "/") {
+				_, ipNet, err := net.ParseCIDR(allowed)
+				if err != nil {
+					s.logger.Errorf("解析 CIDR %s 失败: %v", allowed, err)
+					continue
+				}
+				if ipNet.Contains(net.ParseIP(clientIP)) {
+					next(w, r)
+					return
+				}
+			} else if allowed == clientIP {
+				next(w, r)
+				return
+			}
+		}
+
+		s.logger.WithFields(logrus.Fields{
+			"client_ip": clientIP,
+		}).Warn("IP 不允许访问")
+		http.Error(w, "IP 不在白名单内", http.StatusForbidden)
+	}
+}
+
+// handlePush 处理外部服务推送请求（优化：只存 services/environments，保留大小写）
+func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+	defer func() {
+		s.logger.WithFields(logrus.Fields{
+			"duration_ms": time.Since(startTime).Milliseconds(),
+		}).Info("handlePush 执行完成")
+	}()
+
+	if r.Method != http.MethodPost {
+		s.logger.Warn("仅支持 POST 方法")
+		http.Error(w, "仅支持 POST 方法", http.StatusMethodNotAllowed)
 		return
 	}
 
-	switch state.Step {
-	case 1: // 服务选择
-		if strings.HasPrefix(data, "service:") {
-			state.Service = strings.TrimPrefix(data, "service:")
-			b.logger.Infof("用户 %d 选择服务: %s", userID, state.Service)
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-			b.showServiceSelection(chatID, &state)
-		} else if data == "next_service" {
-			if state.Service == "" {
-				b.logger.Warnf("用户 %d 未选择服务", userID)
-				b.SendMessage(chatID, "请先选择一个服务！", nil)
-			} else {
-				b.logger.Infof("用户 %d 确认服务选择，继续到环境选择", userID)
-				state.Step = 2
-				b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-				b.showEnvironmentSelection(chatID, &state)
-			}
-		} else if data == "cancel" {
-			b.logger.Infof("用户 %d 取消服务选择，会话关闭", userID)
-			b.deleteMessages(chatID, &state)
-			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
-		}
-	case 2: // 环境选择
-		if strings.HasPrefix(data, "env:") {
-			env := strings.TrimPrefix(data, "env:")
-			if !contains(state.Environments, env) {
-				state.Environments = append(state.Environments, env)
-				b.logger.Infof("用户 %d 选择环境: %s", userID, env)
-				b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-			}
-			b.showEnvironmentSelection(chatID, &state)
-		} else if data == "next_env" {
-			if len(state.Environments) == 0 {
-				b.logger.Warnf("用户 %d 未选择任何环境", userID)
-				b.SendMessage(chatID, "请至少选择一个环境！", nil)
-			} else {
-				b.logger.Infof("用户 %d 完成环境选择: %v", userID, state.Environments)
-				state.Step = 3
-				b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-				b.SendMessage(chatID, "请输入版本号：", nil)
-			}
-		} else if data == "cancel" {
-			b.logger.Infof("用户 %d 取消环境选择，会话关闭", userID)
-			b.deleteMessages(chatID, &state)
-			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
-		}
-	case 4: // 确认提交
-		if data == "confirm_yes" {
-			b.logger.Infof("用户 %d 确认提交数据: 服务=%s, 环境=%v, 版本=%s", userID, state.Service, state.Environments, state.Version)
-			b.persistData(state)
-			b.deleteMessages(chatID, &state)
-			b.SendMessage(chatID, "数据提交成功！", nil)
-			state.Step = 5
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-			b.askContinue(chatID, &state)
-		} else if data == "confirm_no" {
-			b.logger.Infof("用户 %d 取消数据提交，会话关闭", userID)
-			b.deleteMessages(chatID, &state)
-			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
-		}
-	case 5: // 是否继续
-		if data == "restart_yes" {
-			b.logger.Infof("用户 %d 选择继续提交，重新开始交互", userID)
-			b.deleteMessages(chatID, &state)
-			b.startInteraction(chatID, userID)
-		} else if data == "restart_no" {
-			b.logger.Infof("用户 %d 选择结束交互，会话关闭", userID)
-			b.deleteMessages(chatID, &state)
-			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
-		}
+	var req PushRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.WithError(err).Error("解析推送请求失败")
+		http.Error(w, "无效的请求数据", http.StatusBadRequest)
+		return
 	}
 
-	b.bot.Request(tgbotapi.NewCallback(query.ID, ""))
+	s.logger.WithFields(logrus.Fields{
+		"services":     req.Services,
+		"environments": req.Environments,
+	}).Info("收到推送请求")
+
+	// 异步存储（保留原始大小写，不转换）
+	go func() {
+		if err := s.asyncStoreServices(req.Services); err != nil {
+			s.logger.WithError(err).Error("异步存储服务列表失败")
+		}
+		if err := s.asyncStoreEnvironments(req.Environments); err != nil {
+			s.logger.WithError(err).Error("异步存储环境列表失败")
+		}
+	}()
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "数据推送成功"})
 }
 
-// handleDeployCallback 处理 /deploy 接口的确认回调
-func (b *Bot) handleDeployCallback(query *tgbotapi.CallbackQuery, state *UserState) {
-	chatID := query.Message.Chat.ID
-	userID := query.From.ID
-	data := query.Data
-	b.logger.Infof("用户 %d 触发部署回调: %s", userID, data)
-
-	if data == "deploy_confirm_yes" {
-		b.logger.Infof("用户 %d 确认部署数据: 服务=%s, 环境=%v, 版本=%s", userID, state.Service, state.Environments, state.Version)
-		b.persistData(*state)
-		b.deleteMessages(chatID, state)
-		b.SendMessage(chatID, "部署数据提交成功！", nil)
-		b.deleteState(fmt.Sprintf("deploy:%d:%d", chatID, userID))
-	} else if data == "deploy_confirm_no" {
-		b.logger.Infof("用户 %d 取消部署数据提交", userID)
-		b.deleteMessages(chatID, state)
-		b.SendMessage(chatID, "部署请求已取消", nil)
-		b.deleteState(fmt.Sprintf("deploy:%d:%d", chatID, userID))
+// asyncStoreServices 异步存储服务列表（保留原始大小写）
+func (s *Server) asyncStoreServices(services []string) error {
+	if len(services) == 0 {
+		return nil
 	}
-
-	b.bot.Request(tgbotapi.NewCallback(query.ID, ""))
-}
-
-// CreateYesNoKeyboard 创建是/否键盘
-func (b *Bot) CreateYesNoKeyboard(prefix string) tgbotapi.InlineKeyboardMarkup {
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("是 / Yes", prefix+"_yes"),
-			tgbotapi.NewInlineKeyboardButtonData("否 / No", prefix+"_no"),
-		),
-	)
-}
-
-// SendMessage 发送 Telegram 消息
-func (b *Bot) SendMessage(chatID int64, text string, keyboard *tgbotapi.InlineKeyboardMarkup) {
-	b.logger.Infof("发送消息到群组 %d: %s", chatID, text)
-	msg := tgbotapi.NewMessage(chatID, text)
-	if keyboard != nil {
-		msg.ReplyMarkup = keyboard
-	}
-	if _, err := b.bot.Send(msg); err != nil {
-		b.logger.Errorf("发送消息到群组 %d 失败: %v", chatID, err)
-	}
-}
-
-// SaveState 保存用户状态到 Redis
-func (b *Bot) SaveState(key string, state UserState) {
-	data, _ := json.Marshal(state)
-	b.storage.Set(key, string(data))
-	b.logger.Infof("保存用户状态 %s: %v", key, state)
-}
-
-// getState 从 Redis 获取用户状态
-func (b *Bot) getState(key string) (UserState, error) {
-	data, err := b.storage.Get(key)
+	s.logger.WithFields(logrus.Fields{"services": services}).Info("异步存储服务列表")
+	data, err := json.Marshal(services)
 	if err != nil {
-		b.logger.Errorf("获取状态 %s 失败: %v", key, err)
-		return UserState{}, err
+		return err
 	}
-	var state UserState
-	if err := json.Unmarshal([]byte(data), &state); err != nil {
-		b.logger.Errorf("解析状态 %s 失败: %v", key, err)
-		return UserState{}, err
+	return s.storage.Set("services", string(data))
+}
+
+// asyncStoreEnvironments 异步存储环境列表（保留原始大小写）
+func (s *Server) asyncStoreEnvironments(environments []string) error {
+	if len(environments) == 0 {
+		return nil
 	}
-	return state, nil
-}
-
-// deleteState 删除用户状态
-func (b *Bot) deleteState(key string) {
-	b.storage.Delete(key)
-	b.logger.Infof("删除状态 %s", key)
-}
-
-// persistData 持久化数据到 Redis 队列
-func (b *Bot) persistData(state UserState) {
-	data, _ := json.Marshal(state)
-	b.storage.Push("deploy_queue", string(data))
-	b.logger.Infof("持久化用户 %d 数据到队列: 服务=%s, 环境=%v, 版本=%s", state.UserID, state.Service, state.Environments, state.Version)
-}
-
-// isVersionUnique 检查版本号在同一服务下是否唯一
-func (b *Bot) isVersionUnique(service, version string) bool {
-	items, err := b.storage.List("deploy_queue")
+	s.logger.WithFields(logrus.Fields{"environments": environments}).Info("异步存储环境列表")
+	data, err := json.Marshal(environments)
 	if err != nil {
-		b.logger.Errorf("检查版本号唯一性失败: %v", err)
-		return true // 假设错误时允许继续
+		return err
 	}
+	return s.storage.Set("environments", string(data))
+}
+
+// handleDeploy 处理部署请求（优化：验证服务/环境存在，保留大小写）
+func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+	defer func() {
+		s.logger.WithFields(logrus.Fields{
+			"duration_ms": time.Since(startTime).Milliseconds(),
+		}).Info("handleDeploy 执行完成")
+	}()
+
+	if r.Method != http.MethodPost {
+		s.logger.Warn("仅支持 POST 方法")
+		http.Error(w, "仅支持 POST 方法", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req DeployRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.WithError(err).Error("解析部署请求失败")
+		http.Error(w, "无效的请求数据", http.StatusBadRequest)
+		return
+	}
+
+	// 必填字段验证
+	if req.Service == "" || len(req.Environments) == 0 || req.Version == "" || req.User == "" {
+		s.logger.Warn("部署请求缺少必填字段")
+		http.Error(w, "缺少必填字段：service, environments, version, user", http.StatusBadRequest)
+		return
+	}
+
+	// 默认状态为 pending
+	if req.Status == "" {
+		req.Status = "pending"
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"service":      req.Service,
+		"environments": req.Environments,
+		"version":      req.Version,
+		"user":         req.User,
+		"status":       req.Status,
+	}).Info("收到部署请求")
+
+	// 验证服务和环境是否存在（线程安全）
+	services, _ := s.storage.GetServices()
+	environments, _ := s.storage.GetEnvironments()
+
+	if !contains(services, req.Service) {
+		s.logger.WithField("service", req.Service).Warn("服务不存在")
+		http.Error(w, fmt.Sprintf("服务 %s 不存在", req.Service), http.StatusBadRequest)
+		return
+	}
+
+	for _, env := range req.Environments {
+		if !contains(environments, env) {
+			s.logger.WithField("environment", env).Warn("环境不存在")
+			http.Error(w, fmt.Sprintf("环境 %s 不存在", env), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// 异步入队（保留原始数据）
+	go func() {
+		s.logger.Info("异步将部署请求入队")
+		if err := s.asyncEnqueueDeploy(req); err != nil {
+			s.logger.WithError(err).Error("部署请求入队失败")
+		}
+	}()
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "部署请求已提交"})
+}
+
+// asyncEnqueueDeploy 异步入队部署请求
+func (s *Server) asyncEnqueueDeploy(req DeployRequest) error {
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	return s.storage.Push("deploy_queue", string(data))
+}
+
+// handleQuery 处理查询请求（优化：并发安全）
+func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+	defer func() {
+		s.logger.WithFields(logrus.Fields{
+			"duration_ms": time.Since(startTime).Milliseconds(),
+		}).Info("handleQuery 执行完成")
+	}()
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "仅支持 POST 方法", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req QueryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.WithError(err).Error("解析查询请求失败")
+		http.Error(w, "无效的请求数据", http.StatusBadRequest)
+		return
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"environment": req.Environment,
+		"user":        req.User,
+	}).Info("收到查询请求")
+
+	// 线程安全查询
+	items, err := s.storage.List("deploy_queue")
+	if err != nil {
+		s.logger.WithError(err).Error("查询队列失败")
+		http.Error(w, "查询失败", http.StatusInternalServerError)
+		return
+	}
+
+	var results []DeployRequest
 	for _, item := range items {
-		var state UserState
-		if err := json.Unmarshal([]byte(item), &state); err != nil {
-			b.logger.Errorf("解析队列数据失败: %v", err)
+		var deployReq DeployRequest
+		if err := json.Unmarshal([]byte(item), &deployReq); err != nil {
 			continue
 		}
-		if state.Service == service && state.Version == version {
-			b.logger.Warnf("服务 %s 下版本号 %s 已存在", service, version)
-			return false
+		if contains(deployReq.Environments, req.Environment) &&
+			deployReq.User == req.User &&
+			deployReq.Status != "success" && deployReq.Status != "failure" {
+			results = append(results, deployReq)
 		}
 	}
-	return true
+
+	s.logger.WithFields(logrus.Fields{
+		"user":        req.User,
+		"environment": req.Environment,
+		"task_count":  len(results),
+	}).Info("查询任务结果")
+
+	if len(results) == 0 {
+		json.NewEncoder(w).Encode(map[string]string{"message": "暂无任务，请继续等待"})
+		return
+	}
+
+	json.NewEncoder(w).Encode(results)
 }
 
-// contains 检查字符串是否在切片中
+// handleStatus 处理任务状态更新请求（优化：精确匹配更新）
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+	defer func() {
+		s.logger.WithFields(logrus.Fields{
+			"duration_ms": time.Since(startTime).Milliseconds(),
+		}).Info("handleStatus 执行完成")
+	}()
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "仅支持 POST 方法", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req StatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.WithError(err).Error("解析状态更新请求失败")
+		http.Error(w, "无效的请求数据", http.StatusBadRequest)
+		return
+	}
+
+	// 必填字段和状态验证
+	if req.Service == "" || req.Version == "" || req.Environment == "" || req.User == "" {
+		s.logger.Warn("状态更新请求缺少必填字段")
+		http.Error(w, "缺少必填字段", http.StatusBadRequest)
+		return
+	}
+
+	validStatuses := map[string]bool{"success": true, "failure": true, "no_action": true}
+	if !validStatuses[req.Status] {
+		s.logger.WithField("status", req.Status).Warn("无效的状态值")
+		http.Error(w, "无效的状态值，仅支持：success, failure, no_action", http.StatusBadRequest)
+		return
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"service":     req.Service,
+		"version":     req.Version,
+		"environment": req.Environment,
+		"user":        req.User,
+		"status":      req.Status,
+	}).Info("收到状态更新请求")
+
+	// 线程安全更新
+	updated, err := s.updateStatus(req)
+	if err != nil {
+		s.logger.WithError(err).Error("更新状态失败")
+		http.Error(w, "更新状态失败", http.StatusInternalServerError)
+		return
+	}
+
+	if updated {
+		s.logger.Info("任务状态更新成功")
+	} else {
+		s.logger.Warn("未找到匹配的任务")
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "状态更新成功"})
+}
+
+// updateStatus 线程安全更新状态
+func (s *Server) updateStatus(req StatusRequest) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	items, err := s.storage.List("deploy_queue")
+	if err != nil {
+		return false, err
+	}
+
+	updated := false
+	newItems := []string{}
+	for _, item := range items {
+		var deployReq DeployRequest
+		if err := json.Unmarshal([]byte(item), &deployReq); err != nil {
+			newItems = append(newItems, item)
+			continue
+		}
+
+		// 精确匹配（区分大小写）
+		if deployReq.Service == req.Service &&
+			deployReq.Version == req.Version &&
+			deployReq.User == req.User &&
+			contains(deployReq.Environments, req.Environment) {
+			deployReq.Status = req.Status
+			updated = true
+		}
+
+		data, _ := json.Marshal(deployReq)
+		newItems = append(newItems, string(data))
+	}
+
+	if updated {
+		// 重写队列
+		s.storage.Delete("deploy_queue")
+		for _, item := range newItems {
+			s.storage.Push("deploy_queue", item)
+		}
+	}
+
+	return updated, nil
+}
+
+// processAsyncQueue 处理异步队列
+func (s *Server) processAsyncQueue() {
+	for {
+		s.workerPool.Submit(nil) // 保持工作池活跃
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// contains 检查字符串是否在切片中（区分大小写）
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {

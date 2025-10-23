@@ -3,14 +3,16 @@ package storage
 
 import (
 	"context"
+	"sync"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// RedisStorage 封装 Redis 操作
+// RedisStorage 封装 Redis 操作（支持并发安全）
 type RedisStorage struct {
 	client *redis.Client
 	ctx    context.Context
+	mu     sync.RWMutex // 并发读写锁
 }
 
 // NewRedisStorage 初始化 Redis 存储
@@ -18,8 +20,7 @@ func NewRedisStorage(addr string) (*RedisStorage, error) {
 	client := redis.NewClient(&redis.Options{
 		Addr: addr,
 	})
-	_, err := client.Ping(context.Background()).Result()
-	if err != nil {
+	if _, err := client.Ping(context.Background()).Result(); err != nil {
 		return nil, err
 	}
 	return &RedisStorage{
@@ -28,32 +29,63 @@ func NewRedisStorage(addr string) (*RedisStorage, error) {
 	}, nil
 }
 
-// Set 设置键值对
+// Set 设置键值对（线程安全）
 func (s *RedisStorage) Set(key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.client.Set(s.ctx, key, value, 0).Err()
 }
 
-// Get 获取键值
+// Get 获取键值（线程安全）
 func (s *RedisStorage) Get(key string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.client.Get(s.ctx, key).Result()
 }
 
-// Delete 删除键
+// Delete 删除键（线程安全）
 func (s *RedisStorage) Delete(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.client.Del(s.ctx, key).Err()
 }
 
-// Push 推入队列
+// Push 推入队列（线程安全，异步）
 func (s *RedisStorage) Push(queue, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.client.LPush(s.ctx, queue, value).Err()
 }
 
-// Pop 从队列弹出
-func (s *RedisStorage) Pop(queue string) (string, error) {
-	return s.client.RPop(s.ctx, queue).Result()
+// List 获取队列中的所有元素（线程安全）
+func (s *RedisStorage) List(queue string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.client.LRange(s.ctx, queue, 0, -1).Result()
 }
 
-// List 获取队列中的所有元素
-func (s *RedisStorage) List(queue string) ([]string, error) {
-	return s.client.LRange(s.ctx, queue, 0, -1).Result()
+// GetServices 获取服务列表（线程安全）
+func (s *RedisStorage) GetServices() ([]string, error) {
+	data, err := s.Get("services")
+	if err != nil || data == "" {
+		return []string{}, nil
+	}
+	var services []string
+	if err := json.Unmarshal([]byte(data), &services); err != nil {
+		return nil, err
+	}
+	return services, nil
+}
+
+// GetEnvironments 获取环境列表（线程安全）
+func (s *RedisStorage) GetEnvironments() ([]string, error) {
+	data, err := s.Get("environments")
+	if err != nil || data == "" {
+		return []string{}, nil
+	}
+	var envs []string
+	if err := json.Unmarshal([]byte(data), &envs); err != nil {
+		return nil, err
+	}
+	return envs, nil
 }

@@ -1,4 +1,3 @@
-// 文件: main.go
 package main
 
 import (
@@ -24,10 +23,14 @@ func main() {
 		log.Fatalf("初始化 Telegram 机器人失败: %v", err)
 	}
 
-	// 启动 Telegram 机器人处理
-	go bot.Start()
+	// 启动 Telegram 机器人处理（异步）
+	go func() {
+		if err := bot.Start(); err != nil {
+			log.Fatalf("Telegram 机器人启动失败: %v", err)
+		}
+	}()
 
-	// 初始化 API 服务
+	// 初始化 API 服务（支持并发）
 	apiServer := api.NewServer(cfg.RedisAddr, cfg)
 
 	// 启动 HTTP 服务
