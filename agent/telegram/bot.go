@@ -52,6 +52,101 @@ func NewBotManager(bots []config.TelegramBot) *BotManager {
 	return m
 }
 
+// SendConfirmation 发送确认弹窗
+func (bm *BotManager) SendConfirmation(bot *TelegramBot, service, env, user, version string, allowedUsers []int64) (string, error) {
+    // 生成@提醒
+    var mentions strings.Builder
+    for _, uid := range allowedUsers {
+        mentions.WriteString(fmt.Sprintf("@%d ", uid))
+    }
+
+    messageText := fmt.Sprintf("%s请确认部署: %s v%s 在 %s (by %s)", mentions.String(), service, env, version, user)
+    
+    // Inline Keyboard
+    keyboard := map[string]interface{}{
+        "inline_keyboard": [][]map[string]string{
+            {
+                {"text": "确认", "callback_data": fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, version, user)},
+                {"text": "拒绝", "callback_data": fmt.Sprintf("reject:%s:%s:%s:%s", service, env, version, user)},
+            },
+        },
+    }
+    jsonKeyboard, _ := json.Marshal(keyboard)
+    
+    payload := map[string]interface{}{
+        "chat_id":      bot.GroupID,
+        "text":         messageText,
+        "reply_markup": string(jsonKeyboard),
+    }
+
+    jsonData, _ := json.Marshal(payload)
+    resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token), "application/json", bytes.NewBuffer(jsonData))
+    // ... 处理响应，获取 message_id
+    if err != nil {
+        return "", err
+    }
+    var res map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&res)
+    messageID := res["result"].(map[string]interface{})["message_id"].(float64)
+    
+    // 定时删除提示（24h后）
+    go func() {
+        time.Sleep(24 * time.Hour)
+        bm.DeleteMessage(bot, bot.GroupID, int(messageID))
+    }()
+    
+    return fmt.Sprintf("%d", int(messageID)), nil  // 返回 message_id 用于后续删除
+}
+
+// DeleteMessage 删除消息
+func (bm *BotManager) DeleteMessage(bot *TelegramBot, chatID string, messageID int) error {
+    payload := map[string]interface{}{
+        "chat_id":    chatID,
+        "message_id": messageID,
+    }
+    jsonData, _ := json.Marshal(payload)
+    http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage", bot.Token), "application/json", bytes.NewBuffer(jsonData))
+    return nil
+}
+
+// HandleCallback 处理回调（需在单独goroutine polling updates）
+func (bm *BotManager) HandleCallback(update map[string]interface{}, allowedUsers []int64, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
+    callback := update["callback_query"].(map[string]interface{})
+    userID := callback["from"].(map[string]interface{})["id"].(float64)
+    data := callback["data"].(string)
+    
+    // 用户ID过滤
+    allowed := false
+    for _, uid := range allowedUsers {
+        if int64(userID) == uid {
+            allowed = true
+            break
+        }
+    }
+    if !allowed {
+        return  // 无效用户忽略
+    }
+    
+    parts := strings.Split(data, ":")
+    action := parts[0]
+    service, env, version, user := parts[1], parts[2], parts[3], parts[4]
+    
+    // 删除弹窗
+    messageID := int(callback["message"].(map[string]interface{})["message_id"].(float64))
+    chatID := callback["message"].(map[string]interface{})["chat"].(map[string]interface{})["id"].(string)
+    bm.DeleteMessage(bm.Bots["default"], chatID, messageID)  // 假设default bot
+    
+    // 反馈结果
+    resultText := fmt.Sprintf("用户 %d %s 部署: %s v%s 在 %s", userID, action, service, version, env)
+    bm.SendMessage(bm.Bots["default"], chatID, resultText)  // 新增 SendMessage 函数类似 SendNotification
+    
+    if action == "confirm" {
+        confirmChan <- models.DeployRequest{Service: service, Environments: []string{env}, Version: version, User: user, Status: "pending"}
+    } else if action == "reject" {
+        rejectChan <- models.StatusRequest{Service: service, Environment: env, Version: version, User: user, Status: "rejected"}
+    }
+}
+
 // SendNotification 发送部署通知
 func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
 	// 步骤1：选择机器人

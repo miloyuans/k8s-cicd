@@ -86,75 +86,108 @@ func (a *Agent) Start() {
 
 // periodicPushDiscovery 周期性K8s发现 + /push
 func (a *Agent) periodicPushDiscovery() {
-	ticker := time.NewTicker(5 * time.Minute)  // 5分钟一次
-	defer ticker.Stop()
+    // 立即执行一次
+    a.performPushDiscovery()
 
-	for range ticker.C {
-		logrus.Info("🌐 开始K8s服务发现")
-		
-		pushReq, err := a.k8s.BuildPushRequest(a.config)
-		if err != nil {
-			logrus.Error("服务发现失败:", err)
-			continue
-		}
-		
-		err = a.apiClient.PushData(pushReq)
-		if err != nil {
-			logrus.Error("推送 /push 失败:", err)
-		}
-	}
+    ticker := time.NewTicker(a.config.API.PushInterval)  // 使用配置间隔，默认30s
+    defer ticker.Stop()
+
+    for range ticker.C {
+        a.performPushDiscovery()
+    }
+}
+
+// performPushDiscovery 执行单次 /push
+func (a *Agent) performPushDiscovery() {
+    logrus.Info("🌐 开始K8s服务发现")
+    
+    fullReq, err := a.k8s.BuildPushRequest(a.config)
+    if err != nil {
+        logrus.Error("服务发现失败:", err)
+        return
+    }
+    
+    // 按服务拆分推送
+    for _, service := range fullReq.Services {
+        var serviceDeployments []models.DeployRequest
+        for _, dep := range fullReq.Deployments {
+            if dep.Service == service {
+                serviceDeployments = append(serviceDeployments, dep)
+            }
+        }
+        
+        pushReq := models.PushRequest{
+            Services:     []string{service},  // 只当前服务
+            Environments: fullReq.Environments,  // 保持所有环境（去重后）
+            Deployments:  serviceDeployments,
+        }
+        
+        err = a.apiClient.PushData(pushReq)
+        if err != nil {
+            logrus.Errorf("推送 /push 失败 [%s]: %v", service, err)
+            continue
+        }
+        logrus.Infof("✅ 推送 /push 成功 [%s]", service)
+    }
 }
 
 // periodicQueryTasks 周期性 /query + 校验 + Redis存储
 func (a *Agent) periodicQueryTasks() {
-	ticker := time.NewTicker(time.Duration(a.config.Task.PollInterval) * time.Second)
-	defer ticker.Stop()
+    ticker := time.NewTicker(time.Duration(a.config.Task.PollInterval) * time.Second)
+    defer ticker.Stop()
 
-	for range ticker.C {
-		logrus.Info("🔍 开始 /query 轮询")
+    confirmChan := make(chan models.DeployRequest)
+    rejectChan := make(chan models.StatusRequest)
+    
+    // 启动 Telegram updates polling（简化，使用 goroutine）
+    go a.botMgr.PollUpdates(a.config.Telegram.AllowedUsers, confirmChan, rejectChan)  // 新增 PollUpdates 函数实现 getUpdates API 循环
 
-		user := a.config.User.Default
-		
-		// 获取所有环境key
-		envs := []string{}
-		for env := range a.config.EnvMapping.Mappings {
-			envs = append(envs, env)
-		}
-		
-		for _, env := range envs {
-			queryReq := models.QueryRequest{
-				Environment: env,
-				User:        user,
-			}
-			
-			// 调用 /query
-			tasks, err := a.apiClient.QueryTasks(queryReq)
-			if err != nil {
-				logrus.Error(" /query 失败: ", err)
-				continue
-			}
-			
-			logrus.Infof("✅ /query 获取 %d 个任务 [%s/%s]", len(tasks), env, user)
-			
-			// 处理每个任务
-			for _, task := range tasks {
-				if err := a.validateAndStoreTask(task, env); err != nil {
-					logrus.Warn(err.Error())
-					continue
-				}
-				
-				// 加入队列
-				taskModel := models.Task{
-					DeployRequest: task,
-					ID:            fmt.Sprintf("%s-%s-%s", task.Service, task.Version, time.Now().Unix()),
-					CreatedAt:     time.Now(),
-					Retries:       0,
-				}
-				a.taskQ.Enqueue(taskModel)
-				logrus.Infof("📥 任务加入队列: %s v%s [%s]", task.Service, task.Version, env)
-			}
-		}
-	}
+    for range ticker.C {
+        // ... 现有 /query 逻辑
+        
+        for _, task := range tasks {
+            // 环境过滤：如果在 ConfirmEnvs 中，才弹窗
+            needConfirm := false
+            for _, confirmEnv := range a.config.Query.ConfirmEnvs {
+                if task.Environments[0] == confirmEnv {
+                    needConfirm = true
+                    break
+                }
+            }
+            
+            if !needConfirm {
+                // 不弹窗，直接校验存储入队列
+                if err := a.validateAndStoreTask(task, env); err != nil {
+                    continue
+                }
+                a.taskQ.Enqueue(models.Task{...})  // 现有
+                continue
+            }
+            
+            // 选择机器人并发送弹窗
+            bot, _ := a.botMgr.getBotForService(task.Service)
+            _, err := a.botMgr.SendConfirmation(bot, task.Service, env, task.User, task.Version, a.config.Telegram.AllowedUsers)
+            if err != nil {
+                logrus.Error("弹窗发送失败:", err)
+                continue
+            }
+        }
+    }
+    
+    // 处理渠道
+    go func() {
+        for {
+            select {
+            case confirmed := <-confirmChan:
+                // 确认：校验存储入队列
+                a.validateAndStoreTask(confirmed, confirmed.Environments[0])
+                a.taskQ.Enqueue(models.Task{DeployRequest: confirmed, ...})
+            case rejected := <-rejectChan:
+                // 拒绝：丢弃并更新 /status
+                a.apiClient.UpdateStatus(rejected)
+            }
+        }
+    }()
 }
 
 // validateAndStoreTask 严格校验 + Redis存储

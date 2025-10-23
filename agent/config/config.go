@@ -18,6 +18,13 @@ type TelegramBot struct {
 	IsEnabled   bool                `yaml:"enabled"`       // 是否启用该机器人
 }
 
+// TelegramConfig 扩展配置
+type TelegramConfig struct {
+	Bots          []TelegramBot `yaml:"bots"`
+	AllowedUsers  []int64       `yaml:"allowed_users"`    // 有效用户ID列表
+	ConfirmTimeout time.Duration `yaml:"confirm_timeout"`  // 弹窗超时时间
+}
+
 // TelegramConfig Telegram多机器人配置
 type TelegramConfig struct {
 	Bots []TelegramBot `yaml:"bots"`
@@ -28,6 +35,11 @@ type APIConfig struct {
 	BaseURL      string        `yaml:"base_url"`        // API基础地址
 	PushInterval time.Duration `yaml:"push_interval"`   // 推送间隔，默认5s
 	MaxRetries   int           `yaml:"max_retries"`     // 最大重试次数，0=无限重试
+}
+
+// QueryConfig /query 弹窗过滤配置
+type QueryConfig struct {
+	ConfirmEnvs []string `yaml:"confirm_envs"`  // 需要弹窗的环境
 }
 
 // K8sAuthConfig K8s认证方式配置（支持kubeconfig和ServiceAccount双重认证）
@@ -75,16 +87,18 @@ type EnvMappingConfig struct {
 }
 
 // Config 全局配置结构
+// Config 完整配置结构
 type Config struct {
-	Telegram    TelegramConfig    `yaml:"telegram"`
-	API         APIConfig         `yaml:"api"`
-	Kubernetes  K8sAuthConfig     `yaml:"kubernetes"`
-	Redis       RedisConfig       `yaml:"redis"`
-	Task        TaskConfig        `yaml:"task"`
-	Deploy      DeployConfig      `yaml:"deploy"`
-	User        UserConfig        `yaml:"user"`
-	EnvMapping  EnvMappingConfig  `yaml:"env_mapping"`
-	LogLevel    string            `yaml:"log_level"`
+	Telegram    TelegramConfig `yaml:"telegram"`
+	API         APIConfig      `yaml:"api"`
+	Query       QueryConfig    `yaml:"query"`       
+	Kubernetes  K8sAuthConfig  `yaml:"kubernetes"`
+	Redis       RedisConfig    `yaml:"redis"`
+	Task        TaskConfig     `yaml:"task"`
+	Deploy      DeployConfig   `yaml:"deploy"`
+	User        UserConfig     `yaml:"user"`
+	EnvMapping  EnvMappingConfig `yaml:"env_mapping"`
+	LogLevel    string         `yaml:"log_level"`
 }
 
 // LoadConfig 从YAML文件加载配置，并合并环境变量
@@ -123,6 +137,24 @@ func LoadConfig(filePath string) (*Config, error) {
 
 // setDefaults 设置配置默认值
 func (c *Config) setDefaults() {
+	// API间隔
+	if c.API.PushInterval == 0 {
+		c.API.PushInterval = 30 * time.Second  // 默认30s
+	}
+	if c.API.QueryInterval == 0 {
+		c.API.QueryInterval = 15 * time.Second // 默认15s
+	}
+	
+	// Telegram弹窗超时
+	if c.Telegram.ConfirmTimeout == 0 {
+		c.Telegram.ConfirmTimeout = 24 * time.Hour
+	}
+	
+	// /query 弹窗环境 - 默认所有环境
+	if len(c.Query.ConfirmEnvs) == 0 {
+		c.Query.ConfirmEnvs = []string{"eks", "eks-pro"}
+	}
+	
 	// API推送默认配置
 	if c.API.PushInterval == 0 {
 		c.API.PushInterval = 5 * time.Second

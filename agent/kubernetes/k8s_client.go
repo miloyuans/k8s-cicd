@@ -344,60 +344,79 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 
 // BuildPushRequest 根据配置构建 /push 请求数据
 func (k *K8sClient) BuildPushRequest(cfg *config.Config) (models.PushRequest, error) {
-	logrus.Info("🏗️ 构建 /push 请求数据")
-	
-	var services []string
-	var environments []string
-	var deployments []models.DeployRequest
-	
-	user := cfg.User.Default
-	status := "running" // 当前运行状态
-	
-	// 步骤1：遍历环境映射
-	for env, namespace := range cfg.EnvMapping.Mappings {
-		logrus.Infof("🔄 处理环境 [%s] -> 命名空间 [%s]", env, namespace)
-		
-		// 2.1 获取该命名空间的服务列表
-		nsServices, err := k.DiscoverServicesFromNamespace(namespace)
-		if err != nil {
-			logrus.Errorf("❌ 环境 [%s] 服务发现失败: %v", env, err)
-			continue
-		}
-		
-		// 2.2 添加到总服务列表
-		services = append(services, nsServices...)
-		
-		// 2.3 添加到环境列表
-		environments = append(environments, env)
-		
-		// 2.4 为每个服务创建部署记录
-		for _, serviceWithVersion := range nsServices {
-			parts := strings.Split(serviceWithVersion, ":")
-			serviceName := parts[0]
-			version := parts[1]
-			
-			deploy := models.DeployRequest{
-				Service:      serviceName,
-				Environments: []string{env},
-				Version:      version,
-				User:         user,
-				Status:       status,
-			}
-			
-			deployments = append(deployments, deploy)
-			logrus.Debugf("   📝 添加部署: %s v%s [%s/%s]", 
-				serviceName, version, env, user)
-		}
-	}
+    logrus.Info("🏗️ 构建 /push 请求数据")
+    
+    serviceSet := make(map[string]struct{})  // 用于去重服务名字
+    envSet := make(map[string]struct{})     // 用于去重环境名字
+    var deployments []models.DeployRequest
+    
+    user := cfg.User.Default
+    status := "running" // 当前运行状态
+    
+    // 步骤1：遍历环境映射
+    for env, namespace := range cfg.EnvMapping.Mappings {
+        logrus.Infof("🔄 处理环境 [%s] -> 命名空间 [%s]", env, namespace)
+        
+        // 2.1 获取该命名空间的服务列表
+        nsServices, err := k.DiscoverServicesFromNamespace(namespace)
+        if err != nil {
+            logrus.Errorf("❌ 环境 [%s] 服务发现失败: %v", env, err)
+            continue
+        }
+        
+        // 2.2 添加到环境集合（去重）
+        envSet[env] = struct{}{}
+        
+        // 2.3 为每个服务创建部署记录，并去重服务
+        for _, serviceWithVersion := range nsServices {
+            parts := strings.Split(serviceWithVersion, ":")
+            serviceName := parts[0]
+            version := ""  // 如果没有版本，设置为空
+            if len(parts) > 1 {
+                version = parts[1]
+            }
+            
+            // 去重服务名字
+            if _, exists := serviceSet[serviceName]; !exists {
+                serviceSet[serviceName] = struct{}{}
+            }
+            
+            deploy := models.DeployRequest{
+                Service:      serviceName,
+                Environments: []string{env},
+                Version:      version,  // 有就传，没有为空
+                User:         user,     // 有就传，没有为空（但默认有）
+                Status:       status,
+            }
+            
+            deployments = append(deployments, deploy)
+            logrus.Debugf("   📝 添加部署: %s v%s [%s/%s]", 
+                serviceName, version, env, user)
+        }
+    }
 
-	pushReq := models.PushRequest{
-		Services:     services,
-		Environments: environments,
-		Deployments:  deployments,
-	}
-	
-	logrus.Infof("✅ 构建完成 /push 数据: %d 服务, %d 环境, %d 部署", 
-		len(services), len(environments), len(deployments))
-	
-	return pushReq, nil
+    // 转换为切片（已去重）
+    var services []string
+    for s := range serviceSet {
+        services = append(services, s)
+    }
+    var environments []string
+    for e := range envSet {
+        environments = append(environments, e)
+    }
+
+    if len(services) == 0 || len(environments) == 0 {
+        return models.PushRequest{}, fmt.Errorf("❌ services 或 environments 不能为空")
+    }
+
+    pushReq := models.PushRequest{
+        Services:     services,
+        Environments: environments,
+        Deployments:  deployments,
+    }
+    
+    logrus.Infof("✅ 构建完成 /push 数据: %d 服务, %d 环境, %d 部署", 
+        len(services), len(environments), len(deployments))
+    
+    return pushReq, nil
 }
