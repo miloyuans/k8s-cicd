@@ -6,7 +6,8 @@ go 1.25
 require (
 	github.com/fatih/color v1.17.0
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
-	go.mongodb.org/mongo-driver v1.18.0
+	// *** 修复：使用正确的 MongoDB 版本 ***
+	go.mongodb.org/mongo-driver v1.17.1
 	github.com/sirupsen/logrus v1.9.3
 	golang.org/x/time v0.6.0
 	gopkg.in/yaml.v3 v3.0.1
