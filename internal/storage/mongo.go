@@ -3,22 +3,22 @@ package storage
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// *** 修复：定义独立的 DeployRequest 结构，避免导入 api 包 ***
 // DeployRequest 部署请求数据结构
 type DeployRequest struct {
-	Service      string   `json:"service" bson:"service"`
-	Environments []string `json:"environments" bson:"environments"`
-	Version      string   `json:"version" bson:"version"`
-	User         string   `json:"user" bson:"user"`
-	Status       string   `json:"status,omitempty" bson:"status"`
+	Service      string    `json:"service" bson:"service"`
+	Environments []string  `json:"environments" bson:"environments"`
+	Version      string    `json:"version" bson:"version"`
+	User         string    `json:"user" bson:"user"`
+	Status       string    `json:"status,omitempty" bson:"status"`
+	CreatedAt    time.Time `bson:"created_at"`
 }
 
 // StatusRequest 状态更新请求数据结构
@@ -30,19 +30,15 @@ type StatusRequest struct {
 	Status      string `json:"status" bson:"status"`
 }
 
-// MongoStorage 封装 MongoDB 操作，使用不同的集合隔离数据
-// - services 集合：存储服务列表，仅 /push 接口写入，其他可读
-// - environments 集合：存储环境列表，仅 /push 接口写入，其他可读
-// - deploy_queue 集合：存储部署请求，/deploy 插入，/status 更新，/query 查询
+// MongoStorage 封装主 MongoDB 操作
 type MongoStorage struct {
 	client *mongo.Client
 	db     *mongo.Database
 	ctx    context.Context
-	dbName string // 数据库名称
 }
 
-// NewMongoStorage 初始化 MongoDB 存储
-func NewMongoStorage(uri string) (*MongoStorage, error) {
+// NewMongoStorage 初始化主 MongoDB 存储
+func NewMongoStorage(uri string, ttlHours int) (*MongoStorage, error) {
 	ctx := context.Background()
 	clientOpts := options.Client().ApplyURI(uri)
 	client, err := mongo.Connect(ctx, clientOpts)
@@ -54,114 +50,112 @@ func NewMongoStorage(uri string) (*MongoStorage, error) {
 		return nil, err
 	}
 
-	dbName := "k8s_cicd" // 默认数据库名称
-	db := client.Database(dbName)
-
-	// 初始化集合索引（如果不存在会自动创建）
-	_, _ = db.Collection("services").Indexes().CreateOne(ctx, mongo.IndexModel{Keys: bson.D{{Key: "_id", Value: 1}}})
-	_, _ = db.Collection("environments").Indexes().CreateOne(ctx, mongo.IndexModel{Keys: bson.D{{Key: "_id", Value: 1}}})
-	_, _ = db.Collection("deploy_queue").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "service", Value: 1}, {Key: "version", Value: 1}, {Key: "user", Value: 1}},
-	})
-
-	return &MongoStorage{
+	db := client.Database("k8s_cicd")
+	s := &MongoStorage{
 		client: client,
 		db:     db,
 		ctx:    ctx,
-		dbName: dbName,
-	}, nil
+	}
+
+	err = s.createIndexes(ttlHours)
+	if err != nil {
+		return nil, err
+	}
+
+	return s, nil
 }
 
-// StoreServices 存储或更新 services 列表（仅 /push 使用）
-func (s *MongoStorage) StoreServices(services []string) error {
-	collection := s.db.Collection("services")
-	data, err := json.Marshal(services)
+// createIndexes 创建所有集合的索引
+func (s *MongoStorage) createIndexes(ttlHours int) error {
+	svcColl := s.db.Collection("service_environments")
+	_, err := svcColl.Indexes().CreateMany(s.ctx, []mongo.IndexModel{
+		{Keys: bson.D{{"_id", 1}}},
+		{Keys: bson.D{{"environments", 1}}},
+	})
 	if err != nil {
 		return err
 	}
 
-	// 使用 upsert 更新或插入
-	filter := bson.D{{Key: "_id", Value: "services"}}
-	update := bson.D{{Key: "$set", Value: bson.D{{Key: "list", Value: string(data)}}}}
-	opts := options.Update().SetUpsert(true)
-	_, err = collection.UpdateOne(s.ctx, filter, update, opts)
+	deployColl := s.db.Collection("deploy_queue")
+	ttlSeconds := int32(ttlHours * 3600)
+	_, err = deployColl.Indexes().CreateMany(s.ctx, []mongo.IndexModel{
+		{Keys: bson.D{{"service", 1}}},
+		{Keys: bson.D{{"version", 1}}},
+		{Keys: bson.D{{"status", 1}}},
+		{Keys: bson.D{{"user", 1}}},
+		{Keys: bson.D{{"environments", 1}}},
+		{Keys: bson.D{{"created_at", 1}}, Options: options.Index().SetExpireAfterSeconds(ttlSeconds)},
+	})
 	return err
 }
 
-// StoreEnvironments 存储或更新 environments 列表（仅 /push 使用）
-func (s *MongoStorage) StoreEnvironments(environments []string) error {
-	collection := s.db.Collection("environments")
-	data, err := json.Marshal(environments)
-	if err != nil {
-		return err
+// StoreServiceEnvironments 存储或合并服务环境
+func (s *MongoStorage) StoreServiceEnvironments(services, environments []string) error {
+	if len(services) == 0 || len(environments) == 0 {
+		return errors.New("服务名和环境必须存在")
 	}
 
-	// 使用 upsert 更新或插入
-	filter := bson.D{{Key: "_id", Value: "environments"}}
-	update := bson.D{{Key: "$set", Value: bson.D{{Key: "list", Value: string(data)}}}}
-	opts := options.Update().SetUpsert(true)
-	_, err = collection.UpdateOne(s.ctx, filter, update, opts)
-	return err
-}
-
-// GetServices 获取 services 列表
-func (s *MongoStorage) GetServices() ([]string, error) {
-	collection := s.db.Collection("services")
-	var result struct {
-		List string `bson:"list"`
-	}
-	filter := bson.D{{Key: "_id", Value: "services"}}
-	if err := collection.FindOne(s.ctx, filter).Decode(&result); err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return []string{}, nil
+	coll := s.db.Collection("service_environments")
+	for _, svc := range services {
+		filter := bson.D{{"_id", svc}}
+		update := bson.D{{"$addToSet", bson.D{{"environments", bson.D{{"$each", environments}}}}}}
+		opts := options.Update().SetUpsert(true)
+		_, err := coll.UpdateOne(s.ctx, filter, update, opts)
+		if err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+// GetServices 获取所有服务列表
+func (s *MongoStorage) GetServices() ([]string, error) {
+	coll := s.db.Collection("service_environments")
+	cursor, err := coll.Distinct(s.ctx, "_id", bson.D{})
+	if err != nil {
 		return nil, err
 	}
-
-	var services []string
-	if err := json.Unmarshal([]byte(result.List), &services); err != nil {
-		return nil, err
+	
+	services := make([]string, len(cursor))
+	for i, v := range cursor {
+		services[i] = v.(string)
 	}
 	return services, nil
 }
 
-// GetEnvironments 获取 environments 列表
-func (s *MongoStorage) GetEnvironments() ([]string, error) {
-	collection := s.db.Collection("environments")
+// GetServiceEnvironments 获取指定服务的环境列表
+func (s *MongoStorage) GetServiceEnvironments(service string) ([]string, error) {
+	coll := s.db.Collection("service_environments")
 	var result struct {
-		List string `bson:"list"`
+		Environments []string `bson:"environments"`
 	}
-	filter := bson.D{{Key: "_id", Value: "environments"}}
-	if err := collection.FindOne(s.ctx, filter).Decode(&result); err != nil {
+	filter := bson.D{{"_id", service}}
+	if err := coll.FindOne(s.ctx, filter).Decode(&result); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return []string{}, nil
+			return nil, nil
 		}
 		return nil, err
 	}
-
-	var envs []string
-	if err := json.Unmarshal([]byte(result.List), &envs); err != nil {
-		return nil, err
-	}
-	return envs, nil
+	return result.Environments, nil
 }
 
-// InsertDeployRequest 插入部署请求到 deploy_queue 集合
+// InsertDeployRequest 插入部署请求
 func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
-	collection := s.db.Collection("deploy_queue")
-	_, err := collection.InsertOne(s.ctx, req)
+	coll := s.db.Collection("deploy_queue")
+	req.CreatedAt = time.Now().UTC()
+	_, err := coll.InsertOne(s.ctx, req)
 	return err
 }
 
-// QueryDeployQueue 查询 deploy_queue 集合中的待处理任务
+// QueryDeployQueue 查询待处理任务
 func (s *MongoStorage) QueryDeployQueue(environment, user string) ([]DeployRequest, error) {
-	collection := s.db.Collection("deploy_queue")
+	coll := s.db.Collection("deploy_queue")
 	filter := bson.D{
-		{Key: "environments", Value: bson.D{{Key: "$in", Value: []string{environment}}}},
-		{Key: "user", Value: user},
-		{Key: "status", Value: bson.D{{Key: "$nin", Value: []string{"success", "failure"}}}},
+		{"environments", bson.D{{"$in", []string{environment}}}},
+		{"user", user},
+		{"status", bson.D{{"$nin", []string{"success", "failure"}}}},
 	}
-	cursor, err := collection.Find(s.ctx, filter)
+	cursor, err := coll.Find(s.ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -174,17 +168,17 @@ func (s *MongoStorage) QueryDeployQueue(environment, user string) ([]DeployReque
 	return results, nil
 }
 
-// UpdateStatus 更新 deploy_queue 集合中的任务状态
+// UpdateStatus 更新任务状态
 func (s *MongoStorage) UpdateStatus(req StatusRequest) (bool, error) {
-	collection := s.db.Collection("deploy_queue")
+	coll := s.db.Collection("deploy_queue")
 	filter := bson.D{
-		{Key: "service", Value: req.Service},
-		{Key: "version", Value: req.Version},
-		{Key: "user", Value: req.User},
-		{Key: "environments", Value: bson.D{{Key: "$in", Value: []string{req.Environment}}}},
+		{"service", req.Service},
+		{"version", req.Version},
+		{"user", req.User},
+		{"environments", bson.D{{"$in", []string{req.Environment}}}},
 	}
-	update := bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: req.Status}}}}
-	result, err := collection.UpdateOne(s.ctx, filter, update)
+	update := bson.D{{"$set", bson.D{{"status", req.Status}}}}
+	result, err := coll.UpdateOne(s.ctx, filter, update)
 	if err != nil {
 		return false, err
 	}
