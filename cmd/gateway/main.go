@@ -10,7 +10,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-co-op/gocron/v2"        // ✅ 只保留核心包
+	"github.com/go-co-op/gocron/v2"
+	"github.com/go-co-op/gocron/v2/events"  // ✅ 正确导入 events 子包
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -67,27 +68,40 @@ func main() {
 
 // initScheduler 初始化任务调度
 func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int64) {
-	s, err := gocron.NewScheduler(gocron.WithLocation(time.UTC))
+	s, err := gocron.NewScheduler(
+		gocron.WithLocation(time.UTC),
+		gocron.WithLogger(gocron.VerboseLogger), // ✅ 使用 events 包的日志
+	)
 	if err != nil {
 		log.Fatalf("初始化调度器失败: %v", err)
 	}
 
 	// 每日报告：每天 00:00
-	_, err = s.NewJob(
+	dailyJob, err := s.NewJob(
 		gocron.DailyAt("00:00"),
-		gocron.NewTask(func() { sendDailyReport(stats, bot, chatID) }),
+		gocron.NewTaskWithData(func() { sendDailyReport(stats, bot, chatID) }),
 	)
 	if err != nil {
 		log.Printf("⚠️ 每日报告调度失败: %v", err)
+	} else {
+		// ✅ 使用 events 监听任务完成
+		events.ListenJobFinish(dailyJob, func(e events.Event) {
+			log.Printf("✅ 每日报告已发送: %v", e.Job().ID())
+		})
 	}
 
 	// 每月报告：每月3号 00:00
-	_, err = s.NewJob(
+	monthlyJob, err := s.NewJob(
 		gocron.MonthlyAt(gocron.Day(3), "00:00"),
-		gocron.NewTask(func() { sendMonthlyReport(stats, bot, chatID, s) }),
+		gocron.NewTaskWithData(func() { sendMonthlyReport(stats, bot, chatID, s) }),
 	)
 	if err != nil {
 		log.Printf("⚠️ 每月报告调度失败: %v", err)
+	} else {
+		// ✅ 使用 events 监听任务完成
+		events.ListenJobFinish(monthlyJob, func(e events.Event) {
+			log.Printf("✅ 月报已发送: %v", e.Job().ID())
+		})
 	}
 
 	s.Start()
@@ -147,7 +161,7 @@ func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID
 	sendTelegramMessage(bot, chatID, text, "MarkdownV2")
 
 	// 7天后删除上月数据
-	_, err = scheduler.NewJob(
+	cleanupJob, err := scheduler.NewJob(
 		gocron.DurationJob(7*24*time.Hour),
 		gocron.NewTask(func() {
 			if err := stats.DeleteMonthData(prevMonthFirst, nextMonthFirst); err != nil {
@@ -159,6 +173,11 @@ func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID
 	)
 	if err != nil {
 		log.Printf("⚠️ 调度删除任务失败: %v", err)
+	} else {
+		// ✅ 使用 events 监听清理任务
+		events.ListenJobFinish(cleanupJob, func(e events.Event) {
+			log.Printf("✅ 数据清理完成: %v", e.Job().ID())
+		})
 	}
 }
 
