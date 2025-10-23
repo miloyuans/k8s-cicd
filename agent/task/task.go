@@ -7,28 +7,28 @@ import (
 	"sync"
 	"time"
 
-	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/config"
+	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/client"
 	"k8s-cicd/agent/kubernetes"
 	"k8s-cicd/agent/models"
 	"k8s-cicd/agent/telegram"
 
-	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
 
-// TaskQueue 任务队列结构（FIFO先进先出，支持并发执行）
+// TaskQueue 任务队列结构（FIFO，支持并发）
 type TaskQueue struct {
-	queue    *list.List        // 任务列表（双向链表实现FIFO）
-	mu       sync.Mutex        // 队列锁（保证线程安全）
-	workers  int               // 并发worker数量
-	stopCh   chan struct{}     // 停止信号通道
-	wg       sync.WaitGroup    // 等待组（等待所有worker完成）
+	queue    *list.List    // 任务列表
+	mu       sync.Mutex    // 队列锁
+	workers  int           // worker数量
+	stopCh   chan struct{} // 停止通道
+	wg       sync.WaitGroup // 等待组
 }
 
 // NewTaskQueue 创建新的任务队列
 func NewTaskQueue(workers int) *TaskQueue {
+	// 步骤1：初始化队列
 	q := &TaskQueue{
 		queue:   list.New(),
 		workers: workers,
@@ -41,77 +41,69 @@ func NewTaskQueue(workers int) *TaskQueue {
 
 // StartWorkers 启动所有任务worker
 func (q *TaskQueue) StartWorkers(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient) {
-	green := color.New(color.FgGreen).SprintFunc()
-	logrus.Infof("%s 启动 %d 个任务worker", green("👷"), q.workers)
-
+	// 步骤1：添加等待组
 	q.wg.Add(q.workers)
+	// 步骤2：启动每个worker
 	for i := 0; i < q.workers; i++ {
 		go q.worker(cfg, redis, k8s, botMgr, apiClient, i+1)
 	}
-
+	// 步骤3：等待所有worker
 	q.wg.Wait()
 	logrus.Info("所有任务worker已停止")
 }
 
-// worker 单个任务worker（无限循环执行任务）
+// worker 单个任务worker（无限循环）
 func (q *TaskQueue) worker(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, workerID int) {
+	// 步骤1：延迟等待组完成
 	defer q.wg.Done()
 
-	yellow := color.New(color.FgYellow).SprintFunc()
-	logrus.Infof("%s Worker-%d 启动", yellow("👷"), workerID)
+	logrus.Infof("👷 Worker-%d 启动", workerID)
 
 	for {
 		select {
 		case <-q.stopCh:
-			green := color.New(color.FgGreen).SprintFunc()
-			logrus.Infof("%s Worker-%d 收到停止信号", green("🛑"), workerID)
+			logrus.Infof("🛑 Worker-%d 收到停止信号", workerID)
 			return
 		default:
-		}
-
-		task, ok := q.Dequeue()
-		if !ok {
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		cyan := color.New(color.FgCyan).SprintFunc()
-		logrus.Infof("%s Worker-%d 执行任务: %s", cyan("🔨"), workerID, task.ID)
-
-		err := executeTask(cfg, redis, k8s, apiClient, task, botMgr)
-		if err != nil {
-			red := color.New(color.FgRed).SprintFunc()
-			logrus.Errorf("%s Worker-%d 任务执行失败: %v", red("💥"), workerID, err)
-
-			if task.Retries < cfg.Task.MaxRetries {
-				task.Retries++
-				retryDelay := time.Duration(cfg.Task.RetryDelay*task.Retries) * time.Second
-				green := color.New(color.FgGreen).SprintFunc()
-				logrus.Infof("%s Worker-%d 任务重试 [%d/%d]，%d秒后重试: %s",
-					green("🔄"), workerID, task.Retries, cfg.Task.MaxRetries, retryDelay.Seconds(), task.ID)
-				
-				time.Sleep(retryDelay)
-				q.Enqueue(task)
-			} else {
-				red := color.New(color.FgRed).SprintFunc()
-				logrus.Errorf("%s Worker-%d 任务永久失败，已达最大重试次数: %s", red("🪦"), workerID, task.ID)
+			// 出队任务
+			task, ok := q.Dequeue()
+			if !ok {
+				time.Sleep(1 * time.Second)
+				continue
 			}
-		} else {
-			green := color.New(color.FgGreen).SprintFunc()
-			logrus.Infof("%s Worker-%d 任务成功完成: %s", green("🎉"), workerID, task.ID)
+
+			logrus.Infof("🔨 Worker-%d 执行任务: %s", workerID, task.ID)
+
+			// 执行任务
+			err := executeTask(cfg, redis, k8s, apiClient, task, botMgr)
+			if err != nil {
+				logrus.Errorf("💥 Worker-%d 任务执行失败: %v", workerID, err)
+
+				if task.Retries < cfg.Task.MaxRetries {
+					task.Retries++
+					retryDelay := time.Duration(cfg.Task.RetryDelay*task.Retries) * time.Second
+					logrus.Infof("🔄 Worker-%d 任务重试 [%d/%d]，%d秒后重试: %s",
+						workerID, task.Retries, cfg.Task.MaxRetries, int(retryDelay.Seconds()), task.ID)
+					time.Sleep(retryDelay)
+					q.Enqueue(task)
+				} else {
+					logrus.Errorf("🪦 Worker-%d 任务永久失败: %s", workerID, task.ID)
+				}
+			} else {
+				logrus.Infof("🎉 Worker-%d 任务成功完成: %s", workerID, task.ID)
+			}
 		}
 	}
 }
 
-// Enqueue 将任务加入队列尾部（FIFO）
+// Enqueue 将任务加入队列尾部
 func (q *TaskQueue) Enqueue(task models.Task) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	q.queue.PushBack(task)
-	
-	green := color.New(color.FgGreen).SprintFunc()
-	logrus.Debugf("%s 任务入队: %s (队列长度: %d)", green("📥"), task.ID, q.queue.Len())
+
+	logrus.Debugf("📥 任务入队: %s (队列长度: %d)", task.ID, q.queue.Len())
 }
 
 // Dequeue 从队列头部取出任务
@@ -125,12 +117,11 @@ func (q *TaskQueue) Dequeue() (models.Task, bool) {
 
 	element := q.queue.Front()
 	q.queue.Remove(element)
-	
+
 	task := element.Value.(models.Task)
-	
-	yellow := color.New(color.FgYellow).SprintFunc()
-	logrus.Debugf("%s 任务出队: %s (剩余: %d)", yellow("📤"), task.ID, q.queue.Len())
-	
+
+	logrus.Debugf("📤 任务出队: %s (剩余: %d)", task.ID, q.queue.Len())
+
 	return task, true
 }
 
@@ -145,9 +136,8 @@ func (q *TaskQueue) Len() int {
 func (q *TaskQueue) Stop() {
 	close(q.stopCh)
 	q.wg.Wait()
-	
-	red := color.New(color.FgRed).SprintFunc()
-	logrus.Infof("%s 任务队列已停止 (剩余任务: %d)", red("🛑"), q.Len())
+
+	logrus.Infof("🛑 任务队列已停止 (剩余任务: %d)", q.Len())
 }
 
 // IsEmpty 检查队列是否为空
@@ -159,127 +149,97 @@ func (q *TaskQueue) IsEmpty() bool {
 
 // executeTask 执行单个部署任务
 func executeTask(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task models.Task, botMgr *telegram.BotManager) error {
-	green := color.New(color.FgGreen).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
-	red := color.New(color.FgRed).SprintFunc()
-	cyan := color.New(color.FgCyan).SprintFunc()
+	// 步骤1：提取命名空间（优化：使用namespace执行k8s操作）
+	namespace := task.Environments[0]
 
-	// ================================
-	// 步骤1：记录任务开始
-	// ================================
-	logrus.Infof("%s 开始执行部署任务:\n"+
-		"  服务: %s\n"+
-		"  环境: %s\n"+
-		"  版本: %s\n"+
-		"  用户: %s\n"+
-		"  等待超时: %v",
-		green("🚀"), task.Service, task.Environments[0], task.Version, task.User, cfg.Deploy.WaitTimeout)
+	// 步骤2：记录任务开始
+	logrus.Infof("🚀 开始执行部署任务: 服务=%s, 环境=%s, 版本=%s, 用户=%s, 超时=%v",
+		task.Service, namespace, task.Version, task.User, cfg.Deploy.WaitTimeout)
 
-	// ================================
-	// 步骤2：获取旧版本
-	// ================================
-	oldVersion, err := k8s.GetCurrentImage(task.Service)
+	// 步骤3：获取旧版本
+	oldVersion, err := k8s.GetCurrentImage(namespace, task.Service)
 	if err != nil {
-		logrus.Warnf("%s 获取当前镜像失败，使用默认值: %v", yellow("⚠️"), err)
+		logrus.Warnf("⚠️ 获取当前镜像失败: %v", err)
 		oldVersion = "unknown"
 	}
-	logrus.Infof("%s 当前镜像版本: %s", cyan("📋"), oldVersion)
+	logrus.Infof("📋 当前镜像版本: %s", oldVersion)
 
-	// ================================
-	// 步骤3：滚动更新
-	// ================================
+	// 步骤4：滚动更新
 	newImage := fmt.Sprintf("%s:%s", strings.ToLower(task.Service), task.Version)
-	err = k8s.UpdateDeploymentImage(task.Service, newImage)
+	err = k8s.UpdateDeploymentImage(namespace, task.Service, newImage)
 	if err != nil {
-		// 更新失败
-		redis.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, "failure")
-		botMgr.SendNotification(task.Service, task.Environments[0], task.User, oldVersion, task.Version, false)
+		// 更新失败处理
+		redis.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, "failure")
+		botMgr.SendNotification(task.Service, namespace, task.User, oldVersion, task.Version, false)
 		return fmt.Errorf("更新失败: %v", err)
 	}
 
-	logrus.Infof("%s Deployment镜像更新成功: %s -> %s", green("✅"), oldVersion, newImage)
+	logrus.Infof("✅ Deployment镜像更新成功: %s -> %s", oldVersion, newImage)
 
-	// ================================
-	// 步骤4：等待新版本就绪（使用配置超时）
-	// ================================
-	logrus.Infof("%s 等待新版本就绪（超时: %v）", cyan("⏳"), cfg.Deploy.WaitTimeout)
-	
+	// 步骤5：等待新版本就绪
+	logrus.Infof("⏳ 等待新版本就绪（超时: %v）", cfg.Deploy.WaitTimeout)
+
 	startTime := time.Now()
 	success := true
-	err = k8s.WaitForDeploymentReady(task.Service, task.Version)
+	err = k8s.WaitForDeploymentReady(namespace, task.Service, task.Version)
 	if err != nil {
-		logrus.Errorf("%s 部署超时（%v）", red("💥"), cfg.Deploy.WaitTimeout)
+		logrus.Errorf("💥 部署超时（%v）", cfg.Deploy.WaitTimeout)
 		success = false
-		
+
 		// 执行回滚
-		logrus.Infof("%s 开始回滚（超时: %v）", yellow("🔄"), cfg.Deploy.RollbackTimeout)
-		rollbackErr := k8s.RollbackDeployment(task.Service, oldVersion)
+		logrus.Infof("🔄 开始回滚（超时: %v）", cfg.Deploy.RollbackTimeout)
+		rollbackErr := k8s.RollbackDeployment(namespace, task.Service, oldVersion)
 		if rollbackErr != nil {
-			logrus.Errorf("%s 回滚失败: %v", red("🔙"), rollbackErr)
+			logrus.Errorf("🔙 回滚失败: %v", rollbackErr)
 		} else {
-			logrus.Infof("%s 回滚操作成功完成", green("🔙"))
+			logrus.Infof("🔙 回滚操作成功完成")
 		}
 	} else {
-		logrus.Infof("%s 新版本就绪，耗时: %v", green("✅"), time.Since(startTime))
+		logrus.Infof("✅ 新版本就绪，耗时: %v", time.Since(startTime))
 	}
 
-	// ================================
-	// 步骤5：发送Telegram通知
-	// ================================
-	notifyErr := botMgr.SendNotification(task.Service, task.Environments[0], task.User, oldVersion, task.Version, success)
+	// 步骤6：发送通知
+	notifyErr := botMgr.SendNotification(task.Service, namespace, task.User, oldVersion, task.Version, success)
 	if notifyErr != nil {
-		logrus.Errorf("%s 通知发送失败: %v", red("📱"), notifyErr)
+		logrus.Errorf("📱 通知发送失败: %v", notifyErr)
 	} else {
-		logrus.Infof("%s Telegram通知发送成功", green("📱"))
+		logrus.Infof("📱 Telegram通知发送成功")
 	}
 
-	// ================================
-	// 步骤6：更新Redis状态
-	// ================================
+	// 步骤7：更新Redis状态
 	status := "success"
 	if !success {
 		status = "failure"
 	}
-	redisErr := redis.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, status)
+	redisErr := redis.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, status)
 	if redisErr != nil {
-		logrus.Errorf("%s Redis状态更新失败: %v", red("💾"), redisErr)
+		logrus.Errorf("💾 Redis状态更新失败: %v", redisErr)
 	} else {
-		logrus.Infof("%s Redis状态更新成功: %s", green("💾"), status)
+		logrus.Infof("💾 Redis状态更新成功: %s", status)
 	}
 
-	// ================================
-	// 步骤7：推送 /status 接口
-	// ================================
+	// 步骤8：推送 /status
 	statusReq := models.StatusRequest{
 		Service:     task.Service,
 		Version:     task.Version,
-		Environment: task.Environments[0],
+		Environment: namespace,
 		User:        task.User,
 		Status:      status,
 	}
 	err = apiClient.UpdateStatus(statusReq)
 	if err != nil {
 		logrus.Errorf("❌ /status 推送失败: %v", err)
-		// 可重试逻辑
 	} else {
 		logrus.Infof("✅ /status 推送成功: %s", status)
 	}
 
-	// ================================
-	// 步骤8：任务总结
-	// ================================
+	// 步骤9：任务总结
 	if success {
-		logrus.Infof("%s 🎉 部署成功:\n"+
-			"  服务: %s\n"+
-			"  耗时: %v\n"+
-			"  旧版本: %s -> 新版本: %s",
-			green("🎉"), task.Service, time.Since(startTime), oldVersion, task.Version)
+		logrus.Infof("🎉 部署成功: 服务=%s, 耗时=%v, %s -> %s",
+			task.Service, time.Since(startTime), oldVersion, task.Version)
 	} else {
-		logrus.Infof("%s 💥 部署失败（已回滚）:\n"+
-			"  服务: %s\n"+
-			"  耗时: %v\n"+
-			"  回滚至: %s",
-			red("💥"), task.Service, time.Since(startTime), oldVersion)
+		logrus.Infof("💥 部署失败（已回滚）: 服务=%s, 耗时=%v, 回滚至=%s",
+			task.Service, time.Since(startTime), oldVersion)
 	}
 
 	return nil
