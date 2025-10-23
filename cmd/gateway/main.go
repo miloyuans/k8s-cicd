@@ -67,14 +67,18 @@ func main() {
 
 // initScheduler 初始化任务调度
 func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int64) {
-	// *** 修复1：正确创建 Scheduler ***
-	s := gocron.NewScheduler(
-		gocron.WithLocation(time.UTC), // ✅ 正确选项
+	// *** 修复1：正确接收 2 个返回值 ***
+	s, err := gocron.NewScheduler(
+		gocron.WithLocation(time.UTC),
 	)
+	if err != nil {
+		log.Fatalf("初始化调度器失败: %v", err)
+	}
+	defer s.Shutdown() // 优雅关闭
 
 	// *** 修复2：正确创建每日任务 - 每天 00:00 ***
-	_, err := s.NewJob(
-		gocron.Daily(0, 0, 0), // 每天 00:00:00
+	_, err = s.NewJob(
+		gocron.DailyJob(0, 0), // ✅ 每天 00:00
 		gocron.NewTask(func() {
 			log.Println("🔄 开始执行每日报告...")
 			sendDailyReport(stats, bot, chatID)
@@ -89,7 +93,7 @@ func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int
 
 	// *** 修复3：正确创建每月任务 - 每月3号 00:00 ***
 	_, err = s.NewJob(
-		gocron.Monthly(0, 0, 0, 3), // 每月3日 00:00:00
+		gocron.MonthlyJob(0, 0, []int{3}), // ✅ 每月3日 00:00
 		gocron.NewTask(func() {
 			log.Println("🔄 开始执行月报...")
 			sendMonthlyReport(stats, bot, chatID)
@@ -159,7 +163,7 @@ func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID
 
 	sendTelegramMessage(bot, chatID, text, "MarkdownV2")
 
-	// *** 修复5：7天后删除上月数据 - 使用 goroutine ***
+	// *** 修复5：7天后删除上月数据 - 使用 goroutine + 定时器 ***
 	go func() {
 		time.Sleep(7 * 24 * time.Hour)
 		log.Println("🔄 开始清理上月数据...")
