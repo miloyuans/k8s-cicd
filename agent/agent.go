@@ -2,7 +2,6 @@ package agent
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"k8s-cicd/agent/api"
@@ -11,6 +10,8 @@ import (
 	"k8s-cicd/agent/models"
 	"k8s-cicd/agent/task"
 	"k8s-cicd/agent/telegram"
+	"k8s-cicd/agent/client"
+
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
