@@ -2,14 +2,14 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/config"
-	"k8s-cicd/agent/task"
-	"k8s-cicd/agent/client"
 	"k8s-cicd/agent/kubernetes"
 	"k8s-cicd/agent/models"
+	"k8s-cicd/agent/task"
 	"k8s-cicd/agent/telegram"
 
 	"github.com/fatih/color"
@@ -26,6 +26,7 @@ type Agent struct {
 	envMapper  *EnvMapper
 }
 
+// EnvMapper 环境到命名空间映射器
 type EnvMapper struct {
 	mappings map[string]string
 }
@@ -42,18 +43,18 @@ func (m *EnvMapper) GetNamespace(env string) (string, bool) {
 		logrus.Errorf("❌ 未配置环境 [%s] 的命名空间映射", env)
 		return "", false
 	}
-	
 	logrus.Infof("🔄 环境 [%s] 映射到命名空间 [%s]", env, ns)
 	return ns, true
 }
 
+// NewAgent 创建Agent实例
 func NewAgent(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient) *Agent {
 	botMgr := telegram.NewBotManager(cfg.Telegram.Bots)
 	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers)
 	apiClient := api.NewAPIClient(&cfg.API)
 	envMapper := NewEnvMapper(cfg.EnvMapping.Mappings)
-	
-	return &Agent{
+
+	agent := &Agent{
 		config:    cfg,
 		redis:     redis,
 		k8s:       k8s,
@@ -62,195 +63,256 @@ func NewAgent(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8s
 		apiClient: apiClient,
 		envMapper: envMapper,
 	}
+
+	// 启动Telegram轮询
+	botMgr.StartPolling()
+
+	return agent
 }
 
+// Start 启动Agent
 func (a *Agent) Start() {
 	green := color.New(color.FgGreen).SprintFunc()
-	logrus.Infof("%s Agent启动成功", green("🚀"))
-	logrus.Infof("API Base URL: %s", a.config.API.BaseURL)
-	logrus.Infof("默认用户: %s", a.config.User.Default)
-	logrus.Infof("环境映射: %+v", a.config.EnvMapping.Mappings)
-	logrus.Infof("部署等待超时: %v", a.config.Deploy.WaitTimeout)
-	logrus.Infof("回滚等待超时: %v", a.config.Deploy.RollbackTimeout)
-	logrus.Infof("API推送间隔: %v", a.config.API.PushInterval)
+	logrus.Infof("%s 🚀 Agent启动成功", green("✅"))
 
-	// 周期性从K8s发现并推送 /push
+	logrus.Infof("📡 API Base URL: %s", a.config.API.BaseURL)
+	logrus.Infof("👤 默认用户: %s", a.config.User.Default)
+	logrus.Infof("🔄 推送间隔: %v", a.config.API.PushInterval)
+	logrus.Infof("🔍 查询间隔: %v", a.config.API.QueryInterval)
+	logrus.Infof("📱 弹窗环境: %v", a.config.Query.ConfirmEnvs)
+	logrus.Infof("👥 允许用户: %v", a.config.Telegram.AllowedUsers)
+
+	// 步骤1：启动任务队列Worker
+	go a.taskQ.StartWorkers(a.config, a.redis, a.k8s, a.botMgr, a.apiClient)
+
+	// 步骤2：启动周期性推送（需求2：30s轮询）
 	go a.periodicPushDiscovery()
 
-	// 周期性 /query 轮询
+	// 步骤3：启动周期性查询+弹窗确认（需求4）
 	go a.periodicQueryTasks()
-
-	// 启动任务队列worker
-	go a.taskQ.StartWorkers(a.config, a.redis, a.k8s, a.botMgr, a.apiClient)
 }
 
-// periodicPushDiscovery 周期性K8s发现 + /push
+// periodicPushDiscovery 周期性K8s发现 + 单个服务推送（需求1、2、3）
 func (a *Agent) periodicPushDiscovery() {
-    // 立即执行一次
-    a.performPushDiscovery()
+	// 立即执行一次
+	a.performPushDiscovery()
 
-    ticker := time.NewTicker(a.config.API.PushInterval)  // 使用配置间隔，默认30s
-    defer ticker.Stop()
+	// 无限轮询，使用配置间隔（默认30s）
+	ticker := time.NewTicker(a.config.API.PushInterval)
+	defer ticker.Stop()
 
-    for range ticker.C {
-        a.performPushDiscovery()
-    }
+	for range ticker.C {
+		a.performPushDiscovery()
+	}
 }
 
-// performPushDiscovery 执行单次 /push
+// performPushDiscovery 执行单次推送（按服务拆分）
 func (a *Agent) performPushDiscovery() {
-    logrus.Info("🌐 开始K8s服务发现")
-    
-    fullReq, err := a.k8s.BuildPushRequest(a.config)
-    if err != nil {
-        logrus.Error("服务发现失败:", err)
-        return
-    }
-    
-    // 按服务拆分推送
-    for _, service := range fullReq.Services {
-        var serviceDeployments []models.DeployRequest
-        for _, dep := range fullReq.Deployments {
-            if dep.Service == service {
-                serviceDeployments = append(serviceDeployments, dep)
-            }
-        }
-        
-        pushReq := models.PushRequest{
-            Services:     []string{service},  // 只当前服务
-            Environments: fullReq.Environments,  // 保持所有环境（去重后）
-            Deployments:  serviceDeployments,
-        }
-        
-        err = a.apiClient.PushData(pushReq)
-        if err != nil {
-            logrus.Errorf("推送 /push 失败 [%s]: %v", service, err)
-            continue
-        }
-        logrus.Infof("✅ 推送 /push 成功 [%s]", service)
-    }
+	logrus.Info("🌐 === 开始K8s服务发现 ===")
+
+	// 步骤1：构建完整请求（已去重）
+	fullReq, err := a.k8s.BuildPushRequest(a.config)
+	if err != nil {
+		logrus.Errorf("❌ 服务发现失败: %v", err)
+		return
+	}
+
+	logrus.Infof("📊 发现 %d 个服务，%d 个环境", len(fullReq.Services), len(fullReq.Environments))
+
+	// 步骤2：按服务拆分推送（需求3：单个服务一个请求）
+	for _, service := range fullReq.Services {
+		// 构建单个服务请求
+		var serviceDeployments []models.DeployRequest
+		for _, dep := range fullReq.Deployments {
+			if dep.Service == service {
+				serviceDeployments = append(serviceDeployments, dep)
+			}
+		}
+
+		pushReq := models.PushRequest{
+			Services:     []string{service},                    // 单个服务
+			Environments: fullReq.Environments,                 // 所有去重环境
+			Deployments:  serviceDeployments,                  // 该服务的部署记录
+		}
+
+		// 步骤3：发送单个请求
+		err = a.apiClient.PushData(pushReq)
+		if err != nil {
+			logrus.Errorf("❌ 推送失败 [%s]: %v", service, err)
+			continue
+		}
+
+		green := color.New(color.FgGreen)
+		green.Printf("✅ 推送成功 [%s] -> %d 环境\n", service, len(fullReq.Environments))
+		time.Sleep(100 * time.Millisecond) // 避免请求过快
+	}
 }
 
-// periodicQueryTasks 周期性 /query + 校验 + Redis存储
+// periodicQueryTasks 周期性查询 + 弹窗确认（需求4）
 func (a *Agent) periodicQueryTasks() {
-    ticker := time.NewTicker(time.Duration(a.config.Task.PollInterval) * time.Second)
-    defer ticker.Stop()
+	ticker := time.NewTicker(a.config.API.QueryInterval)
+	defer ticker.Stop()
 
-    confirmChan := make(chan models.DeployRequest)
-    rejectChan := make(chan models.StatusRequest)
-    
-    // 启动 Telegram updates polling（简化，使用 goroutine）
-    go a.botMgr.PollUpdates(a.config.Telegram.AllowedUsers, confirmChan, rejectChan)  // 新增 PollUpdates 函数实现 getUpdates API 循环
+	// 步骤1：创建通信通道
+	confirmChan := make(chan models.DeployRequest, 100)
+	rejectChan := make(chan models.StatusRequest, 100)
 
-    for range ticker.C {
-        // ... 现有 /query 逻辑
-        
-        for _, task := range tasks {
-            // 环境过滤：如果在 ConfirmEnvs 中，才弹窗
-            needConfirm := false
-            for _, confirmEnv := range a.config.Query.ConfirmEnvs {
-                if task.Environments[0] == confirmEnv {
-                    needConfirm = true
-                    break
-                }
-            }
-            
-            if !needConfirm {
-                // 不弹窗，直接校验存储入队列
-                if err := a.validateAndStoreTask(task, env); err != nil {
-                    continue
-                }
-                a.taskQ.Enqueue(models.Task{...})  // 现有
-                continue
-            }
-            
-            // 选择机器人并发送弹窗
-            bot, _ := a.botMgr.getBotForService(task.Service)
-            _, err := a.botMgr.SendConfirmation(bot, task.Service, env, task.User, task.Version, a.config.Telegram.AllowedUsers)
-            if err != nil {
-                logrus.Error("弹窗发送失败:", err)
-                continue
-            }
-        }
-    }
-    
-    // 处理渠道
-    go func() {
-        for {
-            select {
-            case confirmed := <-confirmChan:
-                // 确认：校验存储入队列
-                a.validateAndStoreTask(confirmed, confirmed.Environments[0])
-                a.taskQ.Enqueue(models.Task{DeployRequest: confirmed, ...})
-            case rejected := <-rejectChan:
-                // 拒绝：丢弃并更新 /status
-                a.apiClient.UpdateStatus(rejected)
-            }
-        }
-    }()
+	// 步骤2：启动Telegram回调处理
+	go a.botMgr.PollUpdates(a.config.Telegram.AllowedUsers, confirmChan, rejectChan)
+
+	// 步骤3：处理确认/拒绝通道
+	go a.handleConfirmationChannels(confirmChan, rejectChan)
+
+	for range ticker.C {
+		logrus.Info("🔍 === 开始 /query 轮询 ===")
+
+		user := a.config.User.Default
+		envs := make([]string, 0, len(a.config.EnvMapping.Mappings))
+		for env := range a.config.EnvMapping.Mappings {
+			envs = append(envs, env)
+		}
+
+		// 步骤4：对每个环境执行查询
+		for _, env := range envs {
+			queryReq := models.QueryRequest{
+				Environment: env,
+				User:        user,
+			}
+
+			// 执行 /query
+			tasks, err := a.apiClient.QueryTasks(queryReq)
+			if err != nil {
+				logrus.Errorf("❌ /query 失败 [%s]: %v", env, err)
+				continue
+			}
+
+			logrus.Infof("📋 /query 结果 [%s]: %d 个任务", env, len(tasks))
+
+			// 步骤5：处理每个任务
+			for _, task := range tasks {
+				a.processTask(task, env)
+			}
+		}
+	}
 }
 
-// validateAndStoreTask 严格校验 + Redis存储
-func (a *Agent) validateAndStoreTask(task models.DeployRequest, queryEnv string) error {
-	logrus.Infof("🔍 校验任务: %s v%s [%s/%s/%s]", task.Service, task.Version, queryEnv, task.User, task.Status)
-	
-	// 校验1: 环境匹配
+// processTask 处理单个任务（环境过滤 + 弹窗确认）
+func (a *Agent) processTask(task models.DeployRequest, queryEnv string) {
+	// 步骤1：环境匹配校验
 	if task.Environments[0] != queryEnv {
-		return fmt.Errorf("❌ 环境不匹配: 查询[%s] != 任务[%s]", queryEnv, task.Environments[0])
+		logrus.Warnf("⚠️ 环境不匹配: 查询[%s] != 任务[%s]", queryEnv, task.Environments[0])
+		return
 	}
-	
-	// 校验2: 状态pending
+
+	// 步骤2：状态校验
 	if task.Status != "pending" {
-		return fmt.Errorf("❌ 状态非pending: %s", task.Status)
+		logrus.Warnf("⚠️ 状态非pending: %s", task.Status)
+		return
 	}
-	
-	// 校验3: Redis去重
+
+	// 步骤3：环境过滤 - 是否需要弹窗确认
+	needConfirm := false
+	for _, confirmEnv := range a.config.Query.ConfirmEnvs {
+		if queryEnv == confirmEnv {
+			needConfirm = true
+			break
+		}
+	}
+
+	if needConfirm {
+		// 需要弹窗确认（需求4）
+		err := a.botMgr.SendConfirmation(task.Service, queryEnv, task.User, task.Version, a.config.Telegram.AllowedUsers)
+		if err != nil {
+			logrus.Errorf("❌ 弹窗发送失败 [%s]: %v", task.Service, err)
+			return
+		}
+		logrus.Infof("📱 已发送确认弹窗: %s v%s [%s]", task.Service, task.Version, queryEnv)
+	} else {
+		// 不需要弹窗，直接入队列
+		if err := a.validateAndStoreTask(task, queryEnv); err != nil {
+			logrus.Warn(err.Error())
+			return
+		}
+		a.taskQ.Enqueue(models.Task{
+			DeployRequest: task,
+			ID:            fmt.Sprintf("%s-%s-%d", task.Service, task.Version, time.Now().Unix()),
+			CreatedAt:     time.Now(),
+			Retries:       0,
+		})
+		logrus.Infof("📥 直接入队: %s v%s [%s]", task.Service, task.Version, queryEnv)
+	}
+}
+
+// handleConfirmationChannels 处理确认/拒绝通道
+func (a *Agent) handleConfirmationChannels(confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
+	for {
+		select {
+		case task := <-confirmChan:
+			// 处理确认：校验 + 入队
+			if err := a.validateAndStoreTask(task, task.Environments[0]); err != nil {
+				logrus.Error(err.Error())
+				continue
+			}
+			a.taskQ.Enqueue(models.Task{
+				DeployRequest: task,
+				ID:            fmt.Sprintf("%s-%s-%d", task.Service, task.Version, time.Now().Unix()),
+				CreatedAt:     time.Now(),
+				Retries:       0,
+			})
+			green := color.New(color.FgGreen)
+			green.Printf("✅ 确认入队: %s v%s [%s]\n", task.Service, task.Version, task.Environments[0])
+
+		case status := <-rejectChan:
+			// 处理拒绝：更新 /status 为 "rejected"
+			err := a.apiClient.UpdateStatus(status)
+			if err != nil {
+				logrus.Errorf("❌ 拒绝状态更新失败: %v", err)
+			} else {
+				red := color.New(color.FgRed)
+				red.Printf("❌ 已拒绝: %s v%s [%s]\n", status.Service, status.Version, status.Environment)
+			}
+		}
+	}
+}
+
+// validateAndStoreTask 任务校验 + Redis存储 + 去重
+func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) error {
+	// 步骤1：环境映射
+	namespace, ok := a.envMapper.GetNamespace(env)
+	if !ok {
+		return fmt.Errorf("❌ 环境 [%s] 无命名空间配置", env)
+	}
+	task.Environments = []string{namespace}
+
+	// 步骤2：Redis去重校验
 	isDuplicate, err := a.redis.CheckDuplicateTask(task)
 	if err != nil {
-		return err
+		return fmt.Errorf("❌ Redis去重失败: %v", err)
 	}
 	if isDuplicate {
-		return fmt.Errorf("❌ 任务重复，忽略: %s v%s", task.Service, task.Version)
+		return fmt.Errorf("⚠️ 任务重复，忽略: %s v%s", task.Service, task.Version)
 	}
-	
-	// 环境映射
-	namespace, ok := a.envMapper.GetNamespace(queryEnv)
-	if !ok {
-		return fmt.Errorf("❌ 环境 [%s] 无命名空间配置", queryEnv)
-	}
-	
-	task.Environments = []string{namespace}
-	
-	// 存储到Redis
+
+	// 步骤3：存储到Redis
 	err = a.redis.StoreTaskWithDeduplication(task)
 	if err != nil {
 		return fmt.Errorf("❌ Redis存储失败: %v", err)
 	}
-	
+
 	green := color.New(color.FgGreen)
-	green.Printf("✅ 校验通过 & 存储Redis: %s v%s [%s → %s]\n", task.Service, task.Version, queryEnv, namespace)
-	
+	green.Printf("✅ 校验通过 & 存储成功: %s v%s [%s -> %s]\n", task.Service, task.Version, env, namespace)
 	return nil
 }
 
-// notifyStatus 部署完成后推送 /status
-func (a *Agent) notifyStatus(task models.Task, status string) {
-	statusReq := models.StatusRequest{
-		Service:     task.Service,
-		Version:     task.Version,
-		Environment: task.Environments[0], // 命名空间
-		User:        task.User,
-		Status:      status,
-	}
-	
-	err := a.apiClient.UpdateStatus(statusReq)
-	if err != nil {
-		logrus.Error(" /status 推送失败: ", err)
-	}
-}
-
+// Stop 优雅停止Agent
 func (a *Agent) Stop() {
 	blue := color.New(color.FgBlue)
-	blue.Println("停止Agent...")
+	blue.Println("🛑 停止Agent...")
+	
 	a.taskQ.Stop()
+	a.botMgr.Stop()
+	
+	time.Sleep(2 * time.Second)
+	green := color.New(color.FgGreen)
+	green.Println("✅ Agent关闭完成")
 }
