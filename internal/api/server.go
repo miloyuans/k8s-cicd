@@ -474,6 +474,7 @@ func (s *Server) updateStatus(req StatusRequest) (bool, error) {
 }
 
 // PushTask Execute
+// PushTask Execute
 func (t *PushTask) Execute(storage *storage.RedisStorage) error {
 	if storage == nil {
 		return fmt.Errorf("storage 为 nil")
@@ -486,6 +487,27 @@ func (t *PushTask) Execute(storage *storage.RedisStorage) error {
 	}
 	if err := storage.AsyncStoreEnvironments(t.Environments); err != nil {
 		return err
+	}
+
+	// 新增: 查询更新后的服务列表和环境列表，并日志输出
+	updatedServices, err := storage.GetServices()
+	if err != nil {
+		logrus.WithError(err).Error("查询更新后服务列表失败")
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"task_id":          t.ID,
+			"updated_services": updatedServices,
+		}).Info("更新后服务列表")
+	}
+
+	updatedEnvs, err := storage.GetEnvironments()
+	if err != nil {
+		logrus.WithError(err).Error("查询更新后环境列表失败")
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"task_id":             t.ID,
+			"updated_environments": updatedEnvs,
+		}).Info("更新后环境列表")
 	}
 
 	logrus.WithFields(logrus.Fields{
