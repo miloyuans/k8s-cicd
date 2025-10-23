@@ -5,22 +5,40 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"k8s-cicd/internal/api"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+// *** 修复：定义独立的 DeployRequest 结构，避免导入 api 包 ***
+// DeployRequest 部署请求数据结构
+type DeployRequest struct {
+	Service      string   `json:"service" bson:"service"`
+	Environments []string `json:"environments" bson:"environments"`
+	Version      string   `json:"version" bson:"version"`
+	User         string   `json:"user" bson:"user"`
+	Status       string   `json:"status,omitempty" bson:"status"`
+}
+
+// StatusRequest 状态更新请求数据结构
+type StatusRequest struct {
+	Service     string `json:"service" bson:"service"`
+	Version     string `json:"version" bson:"version"`
+	Environment string `json:"environment" bson:"environment"`
+	User        string `json:"user" bson:"user"`
+	Status      string `json:"status" bson:"status"`
+}
+
 // MongoStorage 封装 MongoDB 操作，使用不同的集合隔离数据
 // - services 集合：存储服务列表，仅 /push 接口写入，其他可读
 // - environments 集合：存储环境列表，仅 /push 接口写入，其他可读
 // - deploy_queue 集合：存储部署请求，/deploy 插入，/status 更新，/query 查询
 type MongoStorage struct {
-	client     *mongo.Client
-	db         *mongo.Database
-	ctx        context.Context
-	dbName     string // 数据库名称
+	client *mongo.Client
+	db     *mongo.Database
+	ctx    context.Context
+	dbName string // 数据库名称
 }
 
 // NewMongoStorage 初始化 MongoDB 存储
@@ -39,10 +57,12 @@ func NewMongoStorage(uri string) (*MongoStorage, error) {
 	dbName := "k8s_cicd" // 默认数据库名称
 	db := client.Database(dbName)
 
-	// 初始化集合（如果不存在会自动创建）
+	// 初始化集合索引（如果不存在会自动创建）
 	_, _ = db.Collection("services").Indexes().CreateOne(ctx, mongo.IndexModel{Keys: bson.D{{Key: "_id", Value: 1}}})
 	_, _ = db.Collection("environments").Indexes().CreateOne(ctx, mongo.IndexModel{Keys: bson.D{{Key: "_id", Value: 1}}})
-	_, _ = db.Collection("deploy_queue").Indexes().CreateOne(ctx, mongo.IndexModel{Keys: bson.D{{Key: "service", Value: 1}, {Key: "version", Value: 1}, {Key: "user", Value: 1}}})
+	_, _ = db.Collection("deploy_queue").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "service", Value: 1}, {Key: "version", Value: 1}, {Key: "user", Value: 1}},
+	})
 
 	return &MongoStorage{
 		client: client,
@@ -127,14 +147,14 @@ func (s *MongoStorage) GetEnvironments() ([]string, error) {
 }
 
 // InsertDeployRequest 插入部署请求到 deploy_queue 集合
-func (s *MongoStorage) InsertDeployRequest(req api.DeployRequest) error {
+func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 	collection := s.db.Collection("deploy_queue")
 	_, err := collection.InsertOne(s.ctx, req)
 	return err
 }
 
 // QueryDeployQueue 查询 deploy_queue 集合中的待处理任务
-func (s *MongoStorage) QueryDeployQueue(environment, user string) ([]api.DeployRequest, error) {
+func (s *MongoStorage) QueryDeployQueue(environment, user string) ([]DeployRequest, error) {
 	collection := s.db.Collection("deploy_queue")
 	filter := bson.D{
 		{Key: "environments", Value: bson.D{{Key: "$in", Value: []string{environment}}}},
@@ -147,7 +167,7 @@ func (s *MongoStorage) QueryDeployQueue(environment, user string) ([]api.DeployR
 	}
 	defer cursor.Close(s.ctx)
 
-	var results []api.DeployRequest
+	var results []DeployRequest
 	if err := cursor.All(s.ctx, &results); err != nil {
 		return nil, err
 	}
@@ -155,7 +175,7 @@ func (s *MongoStorage) QueryDeployQueue(environment, user string) ([]api.DeployR
 }
 
 // UpdateStatus 更新 deploy_queue 集合中的任务状态
-func (s *MongoStorage) UpdateStatus(req api.StatusRequest) (bool, error) {
+func (s *MongoStorage) UpdateStatus(req StatusRequest) (bool, error) {
 	collection := s.db.Collection("deploy_queue")
 	filter := bson.D{
 		{Key: "service", Value: req.Service},

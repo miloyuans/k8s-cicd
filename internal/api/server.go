@@ -16,8 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// *** 修复：api 包统一管理 globalStorage ***
-// 全局存储实例，使用 MongoDB 存储
+// *** 全局存储实例，使用 MongoDB 存储 ***
 var globalStorage *storage.MongoStorage
 
 // *** 全局锁，确保 WorkerPool 安全初始化 ***
@@ -40,6 +39,22 @@ type Task interface {
 	GetID() string
 }
 
+// *** 修复：使用 storage 包的结构 ***
+// PushRequest 推送请求
+type PushRequest struct {
+	Services     []string `json:"services"`
+	Environments []string `json:"environments"`
+}
+
+// QueryRequest 查询请求
+type QueryRequest struct {
+	Environment string `json:"environment"`
+	User        string `json:"user"`
+}
+
+// *** 修复：直接使用 storage.DeployRequest 和 storage.StatusRequest ***
+// DeployRequest 和 StatusRequest 已定义在 storage 包中
+
 // PushTask 推送任务，用于更新 services 和 environments
 type PushTask struct {
 	Services     []string
@@ -49,7 +64,7 @@ type PushTask struct {
 
 // DeployTask 部署任务，用于插入部署请求到 deploy_queue
 type DeployTask struct {
-	Req DeployRequest
+	Req storage.DeployRequest // *** 使用 storage 包的结构 ***
 	ID  string
 }
 
@@ -62,7 +77,6 @@ type WorkerPool struct {
 // *** 安全获取全局工作池 ***
 func getGlobalWorkerPool() *WorkerPool {
 	workerPoolOnce.Do(func() {
-		// *** 修复：确保 globalStorage 已设置 ***
 		if globalStorage == nil {
 			logrus.Fatal("❌ FATAL: globalStorage 未设置，无法初始化 WorkerPool")
 		}
@@ -117,33 +131,6 @@ func (wp *WorkerPool) Submit(job Task) {
 	wp.jobs <- job
 }
 
-// 数据结构定义（保持不变）
-type PushRequest struct {
-	Services     []string `json:"services"`
-	Environments []string `json:"environments"`
-}
-
-type DeployRequest struct {
-	Service      string   `json:"service"`
-	Environments []string `json:"environments"`
-	Version      string   `json:"version"`
-	User         string   `json:"user"`
-	Status       string   `json:"status,omitempty"`
-}
-
-type QueryRequest struct {
-	Environment string `json:"environment"`
-	User        string `json:"user"`
-}
-
-type StatusRequest struct {
-	Service     string `json:"service"`
-	Version     string `json:"version"`
-	Environment string `json:"environment"`
-	User        string `json:"user"`
-	Status      string `json:"status"`
-}
-
 // *** 修复：NewServer 接收 Mongo 实例 ***
 func NewServer(mongoStorage *storage.MongoStorage, cfg *config.Config) *Server {
 	startTime := time.Now()
@@ -151,7 +138,6 @@ func NewServer(mongoStorage *storage.MongoStorage, cfg *config.Config) *Server {
 		logrus.WithField("init_duration_ms", time.Since(startTime).Milliseconds()).Info("Server 初始化完成")
 	}()
 
-	// *** 修复：设置全局存储 ***
 	globalStorage = mongoStorage
 	logrus.Info("✅ globalStorage 设置完成")
 
@@ -181,13 +167,11 @@ func NewServer(mongoStorage *storage.MongoStorage, cfg *config.Config) *Server {
 	server.Router.HandleFunc("/status", server.ipWhitelistMiddleware(server.handleStatus))
 	server.Router.HandleFunc("/deploy", server.ipWhitelistMiddleware(server.handleDeploy))
 
-	// *** 初始化全局工作池 ***
 	getGlobalWorkerPool()
-
 	return server
 }
 
-// ipWhitelistMiddleware（完整版本）
+// ipWhitelistMiddleware IP 白名单中间件
 func (s *Server) ipWhitelistMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -291,7 +275,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req DeployRequest
+	var req storage.DeployRequest // *** 使用 storage 包的结构 ***
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.WithError(err).Error("解析部署请求失败")
 		http.Error(w, "无效的请求数据", http.StatusBadRequest)
@@ -391,7 +375,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req StatusRequest
+	var req storage.StatusRequest // *** 使用 storage 包的结构 ***
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "无效的请求数据", http.StatusBadRequest)
 		return
@@ -436,7 +420,7 @@ func (t *PushTask) Execute(storage *storage.MongoStorage) error {
 		return err
 	}
 
-	// 新增: 查询更新后的服务列表和环境列表，并日志输出
+	// 查询更新后的服务列表和环境列表，并日志输出
 	updatedServices, err := storage.GetServices()
 	if err != nil {
 		logrus.WithError(err).Error("查询更新后服务列表失败")
