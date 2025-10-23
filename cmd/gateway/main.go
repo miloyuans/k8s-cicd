@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"k8s-cicd/internal/api"
 	"k8s-cicd/internal/config"
+	"k8s-cicd/internal/storage"
 	"log"
 	"net/http"
 )
 
-// main 是程序的入口函数，负责初始化配置和 HTTP 服务
+var globalStorage *storage.RedisStorage // 全局存储
+
 func main() {
 	// 初始化配置
 	cfg, err := config.LoadConfig()
@@ -16,7 +18,13 @@ func main() {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	// 初始化 API 服务（支持并发）
+	// 初始化全局 Redis 存储
+	globalStorage, err = storage.NewRedisStorage(cfg.RedisAddr)
+	if err != nil {
+		log.Fatalf("初始化 Redis 失败: %v", err)
+	}
+
+	// 初始化 API 服务
 	apiServer := api.NewServer(cfg.RedisAddr, cfg)
 
 	// 启动 HTTP 服务
