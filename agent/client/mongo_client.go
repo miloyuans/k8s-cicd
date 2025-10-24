@@ -1,3 +1,4 @@
+//mongo_client.go
 package client
 
 import (
@@ -17,7 +18,7 @@ import (
 
 // MongoClient MongoDB客户端
 type MongoClient struct {
-	client *mongo.Client // MongoDB客户端
+	client *mongo.Client      // MongoDB客户端
 	cfg    *config.MongoConfig // MongoDB配置
 }
 
@@ -114,20 +115,9 @@ func (m *MongoClient) PushDeployments(deploys []models.DeployRequest) error {
 	ctx := context.Background()
 
 	for _, deploy := range deploys {
-		// 步骤1：序列化部署任务
-		data, err := models.MarshalDeploy(deploy)
-		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "PushDeployments",
-				"took":   time.Since(startTime),
-			}).Errorf("序列化部署任务失败: %v", err)
-			return err
-		}
-
-		// 步骤2：存储到版本集合
+		// 步骤1：存储到版本集合
 		versionsColl := m.client.Database("cicd").Collection("versions")
-		_, err = versionsColl.UpdateOne(ctx,
+		_, err := versionsColl.UpdateOne(ctx,
 			bson.M{"service": deploy.Service, "version": deploy.Version},
 			bson.M{
 				"$set": bson.M{
@@ -147,7 +137,7 @@ func (m *MongoClient) PushDeployments(deploys []models.DeployRequest) error {
 			return err
 		}
 
-		// 步骤3：存储到环境特定任务集合
+		// 步骤2：存储到环境特定任务集合
 		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
 		task := models.Task{
 			DeployRequest: deploy,
@@ -334,7 +324,6 @@ func (m *MongoClient) CheckDuplicateTask(deploy models.DeployRequest) (bool, err
 // StoreTaskWithDeduplication 存储任务（带去重）
 func (m *MongoClient) StoreTaskWithDeduplication(deploy models.DeployRequest) error {
 	startTime := time.Now()
-
 	// 步骤1：检查重复
 	isDuplicate, err := m.CheckDuplicateTask(deploy)
 	if err != nil {
@@ -407,7 +396,7 @@ func (m *MongoClient) CleanCompletedTasks() error {
 			"service":    task.Service,
 			"version":    task.Version,
 			"environment": task.Environment,
-			"user":       task.User,
+			"user":        task.User,
 			"status":     task.Status,
 		})
 		if err != nil {

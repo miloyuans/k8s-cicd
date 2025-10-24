@@ -1,3 +1,4 @@
+//config.go
 package config
 
 import (
@@ -9,106 +10,116 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TelegramBot 配置单个Telegram机器人的配置
+// TelegramBot 配置单个Telegram机器人
 type TelegramBot struct {
 	Name        string              `yaml:"name"`          // 机器人名称
 	Token       string              `yaml:"token"`         // Bot Token
 	GroupID     string              `yaml:"group_id"`      // 群组ID
-	Services    map[string][]string `yaml:"services"`      // 服务匹配规则: prefix -> 服务列表
+	Services    map[string][]string `yaml:"services"`      // 服务匹配规则
 	RegexMatch  bool                `yaml:"regex_match"`   // 是否使用正则匹配
-	IsEnabled   bool                `yaml:"enabled"`       // 是否启用该机器人
+	IsEnabled   bool                `yaml:"enabled"`       // 是否启用
 }
 
-// TelegramConfig Telegram多机器人配置（已合并扩展配置）
+// TelegramConfig Telegram多机器人配置
 type TelegramConfig struct {
-	Bots           []TelegramBot    `yaml:"bots"`
-	AllowedUsers   []int64          `yaml:"allowed_users"`    // 有效用户ID列表
-	ConfirmTimeout time.Duration    `yaml:"confirm_timeout"`  // 弹窗超时时间，默认24小时
+	Bots           []TelegramBot    `yaml:"bots"`            // 机器人列表
+	AllowedUsers   []int64          `yaml:"allowed_users"`   // 有效用户ID
+	ConfirmTimeout time.Duration    `yaml:"confirm_timeout"` // 弹窗超时
 }
 
 // APIConfig API服务配置
 type APIConfig struct {
-	BaseURL        string        `yaml:"base_url"`          // API基础地址
-	PushInterval   time.Duration `yaml:"push_interval"`     // 推送间隔，默认30秒
-	QueryInterval  time.Duration `yaml:"query_interval"`    // 查询间隔，默认15秒
-	MaxRetries     int           `yaml:"max_retries"`       // 最大重试次数，0=无限重试
+	BaseURL        string        `yaml:"base_url"`       // API基础地址
+	PushInterval   time.Duration `yaml:"push_interval"`  // 推送间隔
+	QueryInterval  time.Duration `yaml:"query_interval"` // 查询间隔
+	MaxRetries     int           `yaml:"max_retries"`    // 最大重试次数
 }
 
-// QueryConfig /query 弹窗过滤配置
+// QueryConfig 查询弹窗过滤配置
 type QueryConfig struct {
-	ConfirmEnvs []string `yaml:"confirm_envs"`  // 需要弹窗的环境
+	ConfirmEnvs []string `yaml:"confirm_envs"` // 需要弹窗的环境
 }
 
-// K8sAuthConfig K8s认证方式配置（支持kubeconfig和ServiceAccount双重认证）
+// K8sAuthConfig Kubernetes认证配置
 type K8sAuthConfig struct {
-	AuthType    string `yaml:"auth_type"`    // "kubeconfig" 或 "serviceaccount"
-	Kubeconfig  string `yaml:"kubeconfig"`   // kubeconfig文件路径
-	Namespace   string `yaml:"namespace"`    // 默认命名空间
-	ServiceName string `yaml:"service_name"` // ServiceAccount名称（集群内运行时）
+	AuthType    string `yaml:"auth_type"`     // 认证类型
+	Kubeconfig  string `yaml:"kubeconfig"`    // kubeconfig路径
+	Namespace   string `yaml:"namespace"`     // 默认命名空间
+	ServiceName string `yaml:"service_name"`  // ServiceAccount名称
 }
 
-// RedisConfig Redis配置（增加TTL支持）
-type RedisConfig struct {
-	Addr        string        `yaml:"addr"`
-	Password    string        `yaml:"password"`
-	DB          int           `yaml:"db"`
-	TTL         time.Duration `yaml:"ttl"`           // 数据过期时间，默认24小时
-	MaxRetries  int           `yaml:"max_retries"`   // 连接重试次数
-	IdleTimeout time.Duration `yaml:"idle_timeout"`  // 空闲连接超时
+// MongoConfig MongoDB配置
+type MongoConfig struct {
+	URI         string              `yaml:"uri"`          // MongoDB连接URI
+	TTL         time.Duration       `yaml:"ttl"`          // 数据过期时间
+	MaxRetries  int                 `yaml:"max_retries"`  // 连接重试次数
+	IdleTimeout time.Duration       `yaml:"idle_timeout"` // 空闲连接超时
+	EnvMapping  EnvMappingConfig    `yaml:"env_mapping"`  // 环境映射
 }
 
 // TaskConfig 任务队列配置
 type TaskConfig struct {
-	MaxRetries     int `yaml:"max_retries"`
-	RetryDelay     int `yaml:"retry_delay_seconds"`
-	QueueWorkers   int `yaml:"queue_workers"`
-	PollInterval   int `yaml:"poll_interval_seconds"`
-	MaxQueueSize   int `yaml:"max_queue_size"`
+	MaxRetries     int `yaml:"max_retries"`         // 最大重试次数
+	RetryDelay     int `yaml:"retry_delay_seconds"` // 重试延迟
+	QueueWorkers   int `yaml:"queue_workers"`       // 工作线程数
+	PollInterval   int `yaml:"poll_interval_seconds"` // 轮询间隔
+	MaxQueueSize   int `yaml:"max_queue_size"`      // 最大队列大小
 }
 
-// DeployConfig 部署相关配置
+// DeployConfig 部署配置
 type DeployConfig struct {
-	WaitTimeout     time.Duration `yaml:"wait_timeout"`        // 等待Deployment就绪超时，默认5分钟
-	RollbackTimeout time.Duration `yaml:"rollback_timeout"`    // 回滚等待超时，默认3分钟
-	PollInterval    time.Duration `yaml:"poll_interval"`       // 健康检查轮询间隔，默认5秒
+	WaitTimeout     time.Duration `yaml:"wait_timeout"`     // 部署等待超时
+	RollbackTimeout time.Duration `yaml:"rollback_timeout"` // 回滚等待超时
+	PollInterval    time.Duration `yaml:"poll_interval"`    // 健康检查间隔
 }
 
 // UserConfig 用户配置
 type UserConfig struct {
-	Default string `yaml:"default"`  // 默认用户
+	Default string `yaml:"default"` // 默认用户
 }
 
-// EnvMappingConfig 环境到命名空间的映射配置
+// EnvMappingConfig 环境到命名空间的映射
 type EnvMappingConfig struct {
-	Mappings map[string]string `yaml:"mappings"`  // env -> namespace
+	Mappings map[string]string `yaml:"mappings"` // env -> namespace
 }
 
 // Config 完整配置结构
 type Config struct {
-	Telegram    TelegramConfig      `yaml:"telegram"`
-	API         APIConfig           `yaml:"api"`
-	Query       QueryConfig         `yaml:"query"`       
-	Kubernetes  K8sAuthConfig       `yaml:"kubernetes"`
-	Redis       RedisConfig         `yaml:"redis"`
-	Task        TaskConfig          `yaml:"task"`
-	Deploy      DeployConfig        `yaml:"deploy"`
-	User        UserConfig          `yaml:"user"`
-	EnvMapping  EnvMappingConfig    `yaml:"env_mapping"`
-	LogLevel    string              `yaml:"log_level"`
+	Telegram    TelegramConfig      `yaml:"telegram"`    // Telegram配置
+	API         APIConfig           `yaml:"api"`         // API配置
+	Query       QueryConfig         `yaml:"query"`       // 查询配置
+	Kubernetes  K8sAuthConfig       `yaml:"kubernetes"`  // Kubernetes配置
+	Mongo       MongoConfig         `yaml:"mongo"`       // MongoDB配置
+	Task        TaskConfig          `yaml:"task"`        // 任务配置
+	Deploy      DeployConfig        `yaml:"deploy"`      // 部署配置
+	User        UserConfig          `yaml:"user"`        // 用户配置
+	EnvMapping  EnvMappingConfig    `yaml:"env_mapping"` // 环境映射
+	LogLevel    string              `yaml:"log_level"`   // 日志级别
 }
 
-// LoadConfig 从YAML文件加载配置，并合并环境变量
+// LoadConfig 从YAML文件加载配置
 func LoadConfig(filePath string) (*Config, error) {
+	startTime := time.Now()
 	// 步骤1：读取配置文件
 	data, err := os.ReadFile(filePath)
 	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "LoadConfig",
+			"took":   time.Since(startTime),
+		}).Errorf("读取配置文件失败: %v", err)
 		return nil, err
 	}
 
-	// 步骤2：解析YAML配置
+	// 步骤2：解析YAML
 	var cfg Config
 	err = yaml.Unmarshal(data, &cfg)
 	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "LoadConfig",
+			"took":   time.Since(startTime),
+		}).Errorf("解析YAML失败: %v", err)
 		return nil, err
 	}
 
@@ -118,7 +129,7 @@ func LoadConfig(filePath string) (*Config, error) {
 	// 步骤4：合并环境变量
 	cfg.mergeEnvVars()
 
-	// 步骤5：配置日志级别
+	// 步骤5：设置日志级别
 	logrus.SetLevel(logrus.DebugLevel)
 	if cfg.LogLevel != "" {
 		level, err := logrus.ParseLevel(cfg.LogLevel)
@@ -127,38 +138,38 @@ func LoadConfig(filePath string) (*Config, error) {
 		}
 	}
 
-	logrus.Info("配置加载成功")
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "LoadConfig",
+		"took":   time.Since(startTime),
+	}).Info("配置加载成功")
 	return &cfg, nil
 }
 
 // setDefaults 设置配置默认值
 func (c *Config) setDefaults() {
-	// API推送间隔 - 默认30秒
+	// 步骤1：设置API默认值
 	if c.API.PushInterval == 0 {
 		c.API.PushInterval = 30 * time.Second
 	}
-	
-	// API查询间隔 - 默认15秒
 	if c.API.QueryInterval == 0 {
 		c.API.QueryInterval = 15 * time.Second
 	}
-	
-	// API最大重试次数
 	if c.API.MaxRetries == 0 {
-		c.API.MaxRetries = 0 // 无限重试
+		c.API.MaxRetries = 0
 	}
 
-	// Telegram弹窗超时 - 默认24小时
+	// 步骤2：设置Telegram默认值
 	if c.Telegram.ConfirmTimeout == 0 {
 		c.Telegram.ConfirmTimeout = 24 * time.Hour
 	}
-	
-	// /query 弹窗环境 - 默认需要弹窗的环境
+
+	// 步骤3：设置查询默认值
 	if len(c.Query.ConfirmEnvs) == 0 {
 		c.Query.ConfirmEnvs = []string{"eks", "eks-pro"}
 	}
-	
-	// 部署配置默认值
+
+	// 步骤4：设置部署默认值
 	if c.Deploy.WaitTimeout == 0 {
 		c.Deploy.WaitTimeout = 5 * time.Minute
 	}
@@ -169,20 +180,21 @@ func (c *Config) setDefaults() {
 		c.Deploy.PollInterval = 5 * time.Second
 	}
 
-	// Redis默认TTL为24小时
-	if c.Redis.TTL == 0 {
-		c.Redis.TTL = 24 * time.Hour
+	// 步骤5：设置MongoDB默认值
+	if c.Mongo.TTL == 0 {
+		c.Mongo.TTL = 30 * 24 * time.Hour // 默认30天
 	}
-	// Redis默认重试次数
-	if c.Redis.MaxRetries == 0 {
-		c.Redis.MaxRetries = 3
+	if c.Mongo.MaxRetries == 0 {
+		c.Mongo.MaxRetries = 3
 	}
-	// Redis默认空闲超时
-	if c.Redis.IdleTimeout == 0 {
-		c.Redis.IdleTimeout = 5 * time.Minute
+	if c.Mongo.IdleTimeout == 0 {
+		c.Mongo.IdleTimeout = 5 * time.Minute
 	}
-	
-	// 任务默认配置
+	if c.Mongo.URI == "" {
+		c.Mongo.URI = "mongodb://localhost:27017"
+	}
+
+	// 步骤6：设置任务默认值
 	if c.Task.MaxRetries == 0 {
 		c.Task.MaxRetries = 3
 	}
@@ -198,8 +210,8 @@ func (c *Config) setDefaults() {
 	if c.Task.MaxQueueSize == 0 {
 		c.Task.MaxQueueSize = 100
 	}
-	
-	// K8s默认认证方式
+
+	// 步骤7：设置Kubernetes默认值
 	if c.Kubernetes.AuthType == "" {
 		c.Kubernetes.AuthType = "kubeconfig"
 	}
@@ -207,12 +219,12 @@ func (c *Config) setDefaults() {
 		c.Kubernetes.Namespace = "default"
 	}
 
-	// 用户默认配置
+	// 步骤8：设置用户默认值
 	if c.User.Default == "" {
 		c.User.Default = "deployer"
 	}
-	
-	// 环境映射默认配置
+
+	// 步骤9：设置环境映射默认值
 	if len(c.EnvMapping.Mappings) == 0 {
 		c.EnvMapping.Mappings = map[string]string{
 			"eks":     "ns",
@@ -221,9 +233,9 @@ func (c *Config) setDefaults() {
 	}
 }
 
-// mergeEnvVars 合并环境变量覆盖配置
+// mergeEnvVars 合并环境变量
 func (c *Config) mergeEnvVars() {
-	// Telegram配置
+	// 步骤1：合并Telegram环境变量
 	if token := os.Getenv("TELEGRAM_TOKEN"); token != "" {
 		for i := range c.Telegram.Bots {
 			c.Telegram.Bots[i].Token = token
@@ -234,21 +246,18 @@ func (c *Config) mergeEnvVars() {
 			c.Telegram.Bots[i].GroupID = groupID
 		}
 	}
-	
-	// Redis配置
-	if redisAddr := os.Getenv("REDIS_ADDR"); redisAddr != "" {
-		c.Redis.Addr = redisAddr
+
+	// 步骤2：合并MongoDB环境变量
+	if mongoURI := os.Getenv("MONGO_URI"); mongoURI != "" {
+		c.Mongo.URI = mongoURI
 	}
-	if redisPass := os.Getenv("REDIS_PASSWORD"); redisPass != "" {
-		c.Redis.Password = redisPass
-	}
-	if redisDB := os.Getenv("REDIS_DB"); redisDB != "" {
-		if db, err := strconv.Atoi(redisDB); err == nil {
-			c.Redis.DB = db
+	if mongoTTL := os.Getenv("MONGO_TTL"); mongoTTL != "" {
+		if ttl, err := strconv.Atoi(mongoTTL); err == nil {
+			c.Mongo.TTL = time.Duration(ttl) * time.Hour
 		}
 	}
-	
-	// API配置
+
+	// 步骤3：合并API环境变量
 	if apiURL := os.Getenv("API_BASE_URL"); apiURL != "" {
 		c.API.BaseURL = apiURL
 	}
