@@ -4,7 +4,6 @@ package task
 import (
 	"container/list"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -95,7 +94,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				"took":   time.Since(startTime),
 			}).Infof("Worker-%d 执行任务: %s", workerID, task.ID)
 
-			err := executeTask(cfg, mongo, k8s, apiClient, task, botMgr)
+			err := q.executeTask(cfg, mongo, k8s, apiClient, task, botMgr)
 			if err != nil {
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
