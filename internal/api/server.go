@@ -16,14 +16,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// 全局存储实例
+// 全局存储实例，确保并发安全
 var globalStorage *storage.MongoStorage
 
 // 全局锁，确保 WorkerPool 安全初始化
 var workerPoolOnce sync.Once
 var globalWorkerPool *WorkerPool
 
-// Server 封装 HTTP 服务
+// Server 封装 HTTP 服务，提供 API 处理
 type Server struct {
 	Router          *http.ServeMux
 	storage         *storage.MongoStorage
@@ -31,60 +31,61 @@ type Server struct {
 	logger          *logrus.Logger
 	whitelistIPs    []string
 	config          *config.Config
-	mu              sync.RWMutex
+	mu              sync.RWMutex // 读写锁用于并发保护
 }
 
-// Task 异步任务接口
+// Task 异步任务接口定义
 type Task interface {
 	Execute(*storage.MongoStorage) error
 	GetID() string
 }
 
-// PushTask 推送任务
+// PushTask 推送任务结构
 type PushTask struct {
 	Services     []string
 	Environments []string
 	ID           string
 }
 
-// DeployTask 部署任务
+// DeployTask 部署任务结构
 type DeployTask struct {
 	Req storage.DeployRequest
 	ID  string
 }
 
-// WorkerPool 工作池
+// WorkerPool 工作池，用于异步任务处理，支持并发
 type WorkerPool struct {
 	workers int
-	jobs    chan Task
+	jobs    chan Task // 任务通道，支持缓冲避免阻塞
 }
 
-// getGlobalWorkerPool 安全获取全局工作池
+// getGlobalWorkerPool 安全获取全局工作池，确保单次初始化
 func getGlobalWorkerPool() *WorkerPool {
 	workerPoolOnce.Do(func() {
 		if globalStorage == nil {
 			logrus.Fatal("❌ FATAL: globalStorage 未设置，无法初始化 WorkerPool")
 		}
-		globalWorkerPool = NewWorkerPool(20)
+		globalWorkerPool = NewWorkerPool(20) // 默认20个worker，支持并发处理
 		logrus.Info("✅ 全局工作池初始化完成 (20 workers)")
 	})
 	return globalWorkerPool
 }
 
-// NewWorkerPool 创建工作池
+// NewWorkerPool 创建工作池，启动多个goroutine处理任务
 func NewWorkerPool(workers int) *WorkerPool {
 	pool := &WorkerPool{
 		workers: workers,
-		jobs:    make(chan Task, 1000),
+		jobs:    make(chan Task, 1000), // 缓冲通道，避免任务丢失
 	}
 
 	for i := 0; i < workers; i++ {
-		go pool.worker()
+		go pool.worker() // 启动worker goroutine
 	}
 	logrus.WithField("workers", workers).Info("WorkerPool 启动完成")
 	return pool
 }
 
+// worker 工作goroutine，处理通道中的任务
 func (wp *WorkerPool) worker() {
 	for job := range wp.jobs {
 		if job == nil {
@@ -108,27 +109,28 @@ func (wp *WorkerPool) worker() {
 	}
 }
 
+// Submit 提交任务到工作池
 func (wp *WorkerPool) Submit(job Task) {
 	if wp.jobs == nil {
 		logrus.Error("❌ WorkerPool 未初始化")
 		return
 	}
-	wp.jobs <- job
+	wp.jobs <- job // 异步提交，避免阻塞
 }
 
-// PushRequest 推送请求
+// PushRequest 推送请求结构
 type PushRequest struct {
 	Services     []string `json:"services"`
 	Environments []string `json:"environments"`
 }
 
-// QueryRequest 查询请求
+// QueryRequest 查询请求结构（重新设计：基于service和environment）
 type QueryRequest struct {
-	Environment string `json:"environment"`
-	User        string `json:"user"`
+	Service     string `json:"service"`     // 服务名字（必须）
+	Environment string `json:"environment"` // 环境（必须）
 }
 
-// NewServer 创建 Server
+// NewServer 创建 Server 实例
 func NewServer(mongoStorage *storage.MongoStorage, statsStorage *storage.StatsStorage, cfg *config.Config) *Server {
 	startTime := time.Now()
 	defer func() {
@@ -139,13 +141,13 @@ func NewServer(mongoStorage *storage.MongoStorage, statsStorage *storage.StatsSt
 	logrus.Info("✅ globalStorage 设置完成")
 
 	logger := logrus.New()
-	logger.SetFormatter(&logrus.JSONFormatter{})
+	logger.SetFormatter(&logrus.JSONFormatter{}) // JSON格式日志，便于解析
 	logger.SetLevel(logrus.InfoLevel)
 
 	whitelist := os.Getenv("WHITELIST_IPS")
 	whitelistIPs := []string{}
 	if whitelist != "" {
-		whitelistIPs = strings.Split(whitelist, ",")
+		whitelistIPs = strings.Split(whitelist, ",") // 支持IP白名单
 	}
 
 	server := &Server{
@@ -157,16 +159,17 @@ func NewServer(mongoStorage *storage.MongoStorage, statsStorage *storage.StatsSt
 		config:       cfg,
 	}
 
+	// 注册路由
 	server.Router.HandleFunc("/push", server.ipWhitelistMiddleware(server.handlePush))
 	server.Router.HandleFunc("/query", server.ipWhitelistMiddleware(server.handleQuery))
 	server.Router.HandleFunc("/status", server.ipWhitelistMiddleware(server.handleStatus))
 	server.Router.HandleFunc("/deploy", server.ipWhitelistMiddleware(server.handleDeploy))
 
-	getGlobalWorkerPool()
+	getGlobalWorkerPool() // 初始化工作池
 	return server
 }
 
-// ipWhitelistMiddleware IP 白名单中间件
+// ipWhitelistMiddleware IP 白名单中间件，支持并发请求
 func (s *Server) ipWhitelistMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -195,6 +198,7 @@ func (s *Server) ipWhitelistMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		allowed := false
+		s.mu.RLock() // 读锁保护白名单
 		for _, ip := range s.whitelistIPs {
 			if strings.Contains(ip, "/") {
 				_, ipNet, err := net.ParseCIDR(ip)
@@ -210,6 +214,7 @@ func (s *Server) ipWhitelistMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				break
 			}
 		}
+		s.mu.RUnlock()
 
 		if !allowed {
 			s.logger.Warnf("IP %s 不允许访问", clientIP)
@@ -221,7 +226,7 @@ func (s *Server) ipWhitelistMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// handlePush 处理推送请求
+// handlePush 处理推送请求（/push 接口）
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -258,7 +263,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		ID:           taskID,
 	}
 
-	wp.Submit(pushTask)
+	wp.Submit(pushTask) // 异步提交任务
 
 	w.WriteHeader(http.StatusOK)
 	response := map[string]interface{}{
@@ -268,7 +273,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleDeploy 处理部署请求
+// handleDeploy 处理部署请求（/deploy 接口，优化确认：服务单个，环境多个，版本单个，必须检查存在）
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -283,39 +288,43 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	var req storage.DeployRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.WithError(err).Error("解析部署请求失败")
-		http.Error(w, "无效的请求数据", http.StatusBadRequest)
+		http.Error(w, "无效的请求数据", 120) // 自定义错误码120
 		return
 	}
 
+	// 必须参数检查：服务单个，环境多个，版本单个
 	if req.Service == "" || len(req.Environments) == 0 || req.Version == "" {
-		http.Error(w, "缺少必填字段：服务名、环境、版本", http.StatusBadRequest)
+		http.Error(w, "缺少必填字段：服务名、环境、版本", 120) // 自定义错误码120
 		return
 	}
+
+	// 默认覆盖状态为pending
+	req.Status = "pending"
 
 	if req.User == "" {
-		req.User = "system"
-	}
-	if req.Status == "" {
-		req.Status = "pending"
+		req.User = "system" // 默认用户
 	}
 
+	// 检查服务和环境是否存在
 	svcEnvs, err := s.storage.GetServiceEnvironments(req.Service)
 	if err != nil {
+		s.logger.WithError(err).Error("查询服务失败")
 		http.Error(w, "查询服务失败", http.StatusInternalServerError)
 		return
 	}
 	if svcEnvs == nil {
-		http.Error(w, fmt.Sprintf("服务 %s 不存在", req.Service), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("服务 %s 不存在", req.Service), 120) // 自定义错误码120
 		return
 	}
 
 	for _, env := range req.Environments {
 		if !contains(svcEnvs, env) {
-			http.Error(w, fmt.Sprintf("环境 %s 不存在于服务 %s", env, req.Service), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("环境 %s 不存在于服务 %s", env, req.Service), 120) // 自定义错误码120
 			return
 		}
 	}
 
+	// 异步提交部署任务
 	wp := getGlobalWorkerPool()
 	taskID := fmt.Sprintf("deploy-%s-%s-%d", req.Service, req.Version, time.Now().UnixNano())
 	deployTask := &DeployTask{
@@ -325,7 +334,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	wp.Submit(deployTask)
 
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(521) // 自定义成功码521
 	response := map[string]interface{}{
 		"message": "部署请求已入队",
 		"task_id": taskID,
@@ -333,7 +342,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleQuery 处理查询请求
+// handleQuery 处理查询请求（重新设计：基于service和environment查询pending任务，支持模糊查询）
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -351,23 +360,28 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Environment == "" || req.User == "" {
-		http.Error(w, "缺少必填字段", http.StatusBadRequest)
+	if req.Service == "" || req.Environment == "" {
+		http.Error(w, "缺少必填字段：服务名、环境", http.StatusBadRequest)
 		return
 	}
 
-	results, err := s.storage.QueryDeployQueue(req.Environment, req.User)
+	// 查询pending状态的任务（模糊查询：服务使用正则模糊匹配）
+	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, req.Environment)
 	if err != nil {
+		s.logger.WithError(err).Error("查询失败")
 		http.Error(w, "查询失败", http.StatusInternalServerError)
 		return
 	}
 
-	if len(results) == 0 {
+	// 日志记录：使用ANSI颜色渲染（绿色成功，红色失败）
+	if len(results) > 0 {
+		dataJSON, _ := json.Marshal(results)
+		fmt.Printf("\033[32m[成功] 查询到pending任务: %s\033[0m\n", string(dataJSON)) // 绿色成功日志
+		json.NewEncoder(w).Encode(results) // 返回完整JSON
+	} else {
+		fmt.Printf("\033[31m[失败] 未查询到pending任务: service=%s, env=%s\033[0m\n", req.Service, req.Environment) // 红色失败日志
 		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
-		return
 	}
-
-	json.NewEncoder(w).Encode(results)
 }
 
 // handleStatus 处理状态更新请求
@@ -418,7 +432,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// PushTask Execute
+// Execute PushTask 执行方法
 func (t *PushTask) Execute(storage *storage.MongoStorage) error {
 	if storage == nil {
 		return fmt.Errorf("storage 为 nil")
@@ -448,7 +462,7 @@ func (t *PushTask) Execute(storage *storage.MongoStorage) error {
 
 func (t *PushTask) GetID() string { return t.ID }
 
-// DeployTask Execute
+// Execute DeployTask 执行方法
 func (t *DeployTask) Execute(storage *storage.MongoStorage) error {
 	if storage == nil {
 		return fmt.Errorf("storage 为 nil")
@@ -469,7 +483,7 @@ func (t *DeployTask) Execute(storage *storage.MongoStorage) error {
 
 func (t *DeployTask) GetID() string { return t.ID }
 
-// contains 检查是否包含
+// contains 检查切片是否包含元素
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {

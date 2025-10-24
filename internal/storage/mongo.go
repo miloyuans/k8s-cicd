@@ -4,6 +4,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"regexp"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -30,7 +31,7 @@ type StatusRequest struct {
 	Status      string `json:"status" bson:"status"`
 }
 
-// MongoStorage 封装主 MongoDB 操作
+// MongoStorage 封装主 MongoDB 操作，支持并发查询
 type MongoStorage struct {
 	client *mongo.Client
 	db     *mongo.Database
@@ -65,7 +66,7 @@ func NewMongoStorage(uri string, ttlHours int) (*MongoStorage, error) {
 	return s, nil
 }
 
-// createIndexes 创建所有集合的索引
+// createIndexes 创建所有集合的索引，确保TTL自动过期
 func (s *MongoStorage) createIndexes(ttlHours int) error {
 	svcColl := s.db.Collection("service_environments")
 	_, err := svcColl.Indexes().CreateMany(s.ctx, []mongo.IndexModel{
@@ -89,7 +90,7 @@ func (s *MongoStorage) createIndexes(ttlHours int) error {
 	return err
 }
 
-// StoreServiceEnvironments 存储或合并服务环境
+// StoreServiceEnvironments 存储或合并服务环境，支持批量更新
 func (s *MongoStorage) StoreServiceEnvironments(services, environments []string) error {
 	if len(services) == 0 || len(environments) == 0 {
 		return errors.New("服务名和环境必须存在")
@@ -111,21 +112,18 @@ func (s *MongoStorage) StoreServiceEnvironments(services, environments []string)
 // GetServices 获取所有服务列表
 func (s *MongoStorage) GetServices() ([]string, error) {
 	coll := s.db.Collection("service_environments")
-	
-	// *** 修复：使用正确的 Distinct 返回类型处理 ***
 	cursor, err := coll.Distinct(s.ctx, "_id", bson.D{})
 	if err != nil {
 		return nil, err
 	}
-	
-	// *** 修复：正确转换 []interface{} 为 []string ***
+
 	services := make([]string, 0, len(cursor))
 	for _, v := range cursor {
 		if str, ok := v.(string); ok {
 			services = append(services, str)
 		}
 	}
-	
+
 	return services, nil
 }
 
@@ -145,7 +143,7 @@ func (s *MongoStorage) GetServiceEnvironments(service string) ([]string, error) 
 	return result.Environments, nil
 }
 
-// InsertDeployRequest 插入部署请求
+// InsertDeployRequest 插入部署请求，确保数据持久化避免丢失
 func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 	coll := s.db.Collection("deploy_queue")
 	req.CreatedAt = time.Now().UTC()
@@ -153,13 +151,14 @@ func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 	return err
 }
 
-// QueryDeployQueue 查询待处理任务
-func (s *MongoStorage) QueryDeployQueue(environment, user string) ([]DeployRequest, error) {
+// QueryDeployQueueByServiceEnv 查询pending任务（重新设计：基于service模糊和environment精确）
+func (s *MongoStorage) QueryDeployQueueByServiceEnv(service, environment string) ([]DeployRequest, error) {
 	coll := s.db.Collection("deploy_queue")
+	// 模糊查询service（使用正则），environment精确在environments数组中，status=pending
 	filter := bson.D{
+		{"service", bson.D{{"$regex", regexp.QuoteMeta(service)}}},
 		{"environments", bson.D{{"$in", []string{environment}}}},
-		{"user", user},
-		{"status", bson.D{{"$nin", []string{"success", "failure"}}}},
+		{"status", "pending"},
 	}
 	cursor, err := coll.Find(s.ctx, filter)
 	if err != nil {

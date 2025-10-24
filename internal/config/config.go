@@ -9,13 +9,13 @@ import (
 // Config 定义程序的配置结构
 type Config struct {
 	MongoURI       string // MongoDB 连接 URI
-	Port           int    // HTTP 服务端口
+	Port           int    // HTTP 服务端口，默认8080
 	TTLH           int    // 部署队列TTL小时，默认24
 	TelegramToken  string // Telegram Bot Token
 	TelegramChatID int64  // Telegram Chat ID
 }
 
-// LoadConfig 从环境变量加载配置
+// LoadConfig 从环境变量加载配置，支持默认值
 func LoadConfig() (*Config, error) {
 	config := &Config{
 		MongoURI:      os.Getenv("MONGO_URI"),
@@ -25,7 +25,7 @@ func LoadConfig() (*Config, error) {
 	}
 
 	if config.MongoURI == "" {
-		config.MongoURI = "mongodb://localhost:27017"
+		config.MongoURI = "mongodb://localhost:27017" // 默认Mongo URI
 	}
 
 	if portStr := os.Getenv("PORT"); portStr != "" {

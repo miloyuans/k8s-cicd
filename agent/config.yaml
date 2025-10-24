@@ -1,0 +1,72 @@
+```yaml
+# Telegram配置
+telegram:
+  # 机器人列表
+  bots:
+    - name: "deploy-bot"        # 机器人名称
+      token: "your-bot-token"   # Telegram Bot Token
+      group_id: "-123456789"    # 群组ID
+      services:                 # 服务匹配规则
+        prefix1: ["service1", "service2"]
+        prefix2: ["service3"]
+      regex_match: false        # 是否使用正则匹配
+      enabled: true             # 是否启用机器人
+  allowed_users: [123456, 789012] # 允许的用户ID列表
+  confirm_timeout: 24h           # 弹窗确认超时时间，默认24小时
+
+# API服务配置
+api:
+  base_url: "http://localhost:8080" # API基础地址
+  push_interval: 30s               # 服务发现推送间隔，默认30秒
+  query_interval: 15s              # 任务查询间隔，默认15秒
+  max_retries: 0                   # 最大重试次数，0表示无限重试
+
+# 查询弹窗过滤配置
+query:
+  confirm_envs: ["eks", "eks-pro"] # 需要弹窗确认的环境列表
+
+# Kubernetes认证配置
+kubernetes:
+  auth_type: "kubeconfig"          # 认证类型：kubeconfig 或 serviceaccount
+  kubeconfig: "~/.kube/config"     # kubeconfig文件路径
+  namespace: "default"             # 默认命名空间
+  service_name: "deployer-sa"      # ServiceAccount名称（集群内运行时使用）
+
+# MongoDB配置
+mongo:
+  uri: "mongodb://localhost:27017" # MongoDB连接URI
+  ttl: 720h                        # 数据过期时间，默认30天（720小时）
+  max_retries: 3                   # 连接重试次数
+  idle_timeout: 5m                 # 空闲连接超时，默认5分钟
+  env_mapping:                     # 环境到命名空间的映射
+    mappings:
+      eks: "ns"                    # 环境eks映射到命名空间ns
+      eks-pro: "bs"                # 环境eks-pro映射到命名空间bs
+
+# 任务队列配置
+task:
+  max_retries: 3                   # 最大重试次数
+  retry_delay_seconds: 30          # 重试延迟（秒）
+  queue_workers: 5                 # 工作线程数
+  poll_interval_seconds: 30        # 轮询间隔（秒）
+  max_queue_size: 100              # 最大队列大小
+
+# 部署配置
+deploy:
+  wait_timeout: 5m                 # 部署等待超时，默认5分钟
+  rollback_timeout: 3m             # 回滚等待超时，默认3分钟
+  poll_interval: 5s                # 健康检查轮询间隔，默认5秒
+
+# 用户配置
+user:
+  default: "deployer"              # 默认用户
+
+# 环境映射配置（与mongo.env_mapping保持一致）
+env_mapping:
+  mappings:
+    eks: "ns"                      # 环境eks映射到命名空间ns
+    eks-pro: "bs"                  # 环境eks-pro映射到命名空间bs
+
+# 日志级别
+log_level: "debug"                 # 日志级别：debug, info, warn, error, fatal
+```

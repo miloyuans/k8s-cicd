@@ -64,14 +64,13 @@ func (s *StatsStorage) InsertDeploySuccess(service, environment, version string)
 	return err
 }
 
-// GetStats 获取统计报告
+// GetStats 获取统计报告，使用聚合管道
 func (s *StatsStorage) GetStats(match bson.D) ([]StatResult, error) {
 	coll := s.db.Collection("deploys")
-	
-	// *** 修复：使用 bson.M 构建管道，避免 interface{} 问题 ***
-	pipeline := []interface{}{
-		bson.M{"$match": match},
-		bson.M{
+
+	pipeline := []bson.M{
+		{"$match": match},
+		{
 			"$group": bson.M{
 				"_id": bson.M{
 					"service":     "$service",
@@ -80,7 +79,7 @@ func (s *StatsStorage) GetStats(match bson.D) ([]StatResult, error) {
 				"versions": bson.M{"$addToSet": "$version"},
 			},
 		},
-		bson.M{
+		{
 			"$project": bson.M{
 				"service":     "$_id.service",
 				"environment": "$_id.environment",
@@ -88,7 +87,7 @@ func (s *StatsStorage) GetStats(match bson.D) ([]StatResult, error) {
 			},
 		},
 	}
-	
+
 	cursor, err := coll.Aggregate(s.ctx, pipeline)
 	if err != nil {
 		return nil, err

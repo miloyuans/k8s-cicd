@@ -22,7 +22,7 @@ func main() {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	// 2. 初始化主 MongoDB
+	// 2. 初始化主 MongoDB，确保数据持久化
 	mongoStorage, err := storage.NewMongoStorage(cfg.MongoURI, cfg.TTLH)
 	if err != nil {
 		log.Fatalf("初始化 MongoDB 失败: %v", err)
@@ -45,29 +45,35 @@ func main() {
 		log.Println("✅ Telegram Bot 初始化完成")
 	}
 
-	// 5. 初始化 API 服务
+	// 5. 初始化 API 服务，支持并发和异步
 	apiServer := api.NewServer(mongoStorage, statsStorage, cfg)
 
-	// 6. 启动 HTTP 服务
-	addr := fmt.Sprintf(":%d", cfg.Port)
+	// 6. 启动 HTTP 服务，支持自定义超时响应
+	server := &http.Server{
+		Addr:         fmt.Sprintf(":%d", cfg.Port),
+		Handler:      apiServer.Router,
+		ReadTimeout:  10 * time.Second,  // 读取超时
+		WriteTimeout: 10 * time.Second,  // 写入超时
+		IdleTimeout:  30 * time.Second,  // 空闲超时
+		ErrorLog:     log.Default(),     // 错误日志
+	}
 	go func() {
-		log.Printf("🚀 启动 HTTP 服务于 %s", addr)
-		if err := http.ListenAndServe(addr, apiServer.Router); err != nil {
+		log.Printf("🚀 启动 HTTP 服务于 %s", server.Addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("HTTP 服务启动失败: %v", err)
 		}
 	}()
 
-	// 7. 初始化任务调度器
+	// 7. 初始化任务调度器，支持异步报告
 	initScheduler(statsStorage, bot, cfg.TelegramChatID)
 
-	// 8. 阻塞主线程
+	// 8. 阻塞主线程，避免退出
 	log.Println("🎉 系统启动完成，等待任务...")
 	select {}
 }
 
-// initScheduler 初始化任务调度
+// initScheduler 初始化任务调度，支持每日/每月报告
 func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int64) {
-	// ✅ 正确创建 Scheduler
 	s, err := gocron.NewScheduler(
 		gocron.WithLocation(time.UTC),
 	)
@@ -76,11 +82,11 @@ func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int
 	}
 	defer s.Shutdown()
 
-	// ✅ 正确创建每日任务：每天 00:00
+	// 每日报告任务
 	_, err = s.NewJob(
 		gocron.DailyJob(
-			1, // 执行次数
-			gocron.NewAtTimes(gocron.NewAtTime(0, 0, 0)), // 00:00:00
+			1,
+			gocron.NewAtTimes(gocron.NewAtTime(0, 0, 0)),
 		),
 		gocron.NewTask(func() {
 			log.Println("🔄 开始执行每日报告...")
@@ -94,12 +100,12 @@ func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int
 		log.Println("✅ 每日报告任务已调度")
 	}
 
-	// ✅ 正确创建每月任务：每月 3 号 00:00
+	// 每月报告任务
 	_, err = s.NewJob(
 		gocron.MonthlyJob(
-			1,                                    // 执行次数
-			gocron.NewDaysOfTheMonth(3),          // 第3天
-			gocron.NewAtTimes(gocron.NewAtTime(0, 0, 0)), // 00:00:00
+			1,
+			gocron.NewDaysOfTheMonth(3),
+			gocron.NewAtTimes(gocron.NewAtTime(0, 0, 0)),
 		),
 		gocron.NewTask(func() {
 			log.Println("🔄 开始执行月报...")
@@ -113,7 +119,6 @@ func initScheduler(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int
 		log.Println("✅ 月报任务已调度")
 	}
 
-	// ✅ 正确启动调度器
 	s.Start()
 	log.Println("✅ 任务调度器启动")
 }
@@ -143,7 +148,7 @@ func sendDailyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID i
 	sendTelegramMessage(bot, chatID, text, "MarkdownV2")
 }
 
-// sendMonthlyReport 发送每月报告
+// sendMonthlyReport 发送每月报告，并异步删除旧数据
 func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID int64) {
 	now := time.Now().UTC()
 	prevMonthFirst := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
@@ -170,7 +175,7 @@ func sendMonthlyReport(stats *storage.StatsStorage, bot *tgbotapi.BotAPI, chatID
 
 	sendTelegramMessage(bot, chatID, text, "MarkdownV2")
 
-	// 7天后删除上月数据
+	// 异步删除：7天后删除上月数据，避免阻塞
 	go func() {
 		time.Sleep(7 * 24 * time.Hour)
 		log.Println("🔄 开始清理上月数据...")
