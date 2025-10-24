@@ -192,7 +192,7 @@ func (q *TaskQueue) Stop() {
 }
 
 // executeTask 执行部署任务
-func executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task models.Task, botMgr *telegram.BotManager) error {
+func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task models.Task, botMgr *telegram.BotManager) error {
 	startTime := time.Now()
 	// 步骤1：检查任务状态
 	if task.Status != "pending" {

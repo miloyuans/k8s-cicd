@@ -16,6 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// main 程序入口
 func main() {
 	startTime := time.Now()
 	// 步骤1：解析命令行参数
