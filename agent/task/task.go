@@ -1,3 +1,4 @@
+//task.go
 package task
 
 import (
@@ -7,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/client"
+	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/kubernetes"
 	"k8s-cicd/agent/models"
 	"k8s-cicd/agent/telegram"
@@ -17,7 +18,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// TaskQueue 任务队列结构（FIFO，支持并发）
+// TaskQueue 任务队列结构
 type TaskQueue struct {
 	queue    *list.List    // 任务列表
 	mu       sync.Mutex    // 队列锁
@@ -26,88 +27,126 @@ type TaskQueue struct {
 	wg       sync.WaitGroup // 等待组
 }
 
-// NewTaskQueue 创建新的任务队列
+// NewTaskQueue 创建任务队列
 func NewTaskQueue(workers int) *TaskQueue {
+	startTime := time.Now()
 	// 步骤1：初始化队列
 	q := &TaskQueue{
 		queue:   list.New(),
 		workers: workers,
 		stopCh:  make(chan struct{}),
 	}
-
-	logrus.Infof("任务队列初始化完成，worker数量: %d", workers)
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewTaskQueue",
+		"took":   time.Since(startTime),
+	}).Infof("任务队列初始化完成，worker数量: %d", workers)
 	return q
 }
 
-// StartWorkers 启动所有任务worker
-func (q *TaskQueue) StartWorkers(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient) {
+// StartWorkers 启动任务worker
+func (q *TaskQueue) StartWorkers(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient) {
+	startTime := time.Now()
 	// 步骤1：添加等待组
 	q.wg.Add(q.workers)
-	// 步骤2：启动每个worker
+	// 步骤2：启动worker
 	for i := 0; i < q.workers; i++ {
-		go q.worker(cfg, redis, k8s, botMgr, apiClient, i+1)
+		go q.worker(cfg, mongo, k8s, botMgr, apiClient, i+1)
 	}
-	// 步骤3：等待所有worker
-	q.wg.Wait()
-	logrus.Info("所有任务worker已停止")
+	// 步骤3：启动清理任务
+	go mongo.CleanCompletedTasks()
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "StartWorkers",
+		"took":   time.Since(startTime),
+	}).Infof("启动 %d 个任务worker", q.workers)
 }
 
-// worker 单个任务worker（无限循环）
-func (q *TaskQueue) worker(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, workerID int) {
-	// 步骤1：延迟等待组完成
+// worker 任务worker
+func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, workerID int) {
+	startTime := time.Now()
 	defer q.wg.Done()
 
-	logrus.Infof("👷 Worker-%d 启动", workerID)
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "worker",
+		"took":   time.Since(startTime),
+	}).Infof("Worker-%d 启动", workerID)
 
 	for {
 		select {
 		case <-q.stopCh:
-			logrus.Infof("🛑 Worker-%d 收到停止信号", workerID)
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "worker",
+				"took":   time.Since(startTime),
+			}).Infof("Worker-%d 停止", workerID)
 			return
 		default:
-			// 出队任务
 			task, ok := q.Dequeue()
 			if !ok {
 				time.Sleep(1 * time.Second)
 				continue
 			}
 
-			logrus.Infof("🔨 Worker-%d 执行任务: %s", workerID, task.ID)
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "worker",
+				"took":   time.Since(startTime),
+			}).Infof("Worker-%d 执行任务: %s", workerID, task.ID)
 
-			// 执行任务
-			err := executeTask(cfg, redis, k8s, apiClient, task, botMgr)
+			err := executeTask(cfg, mongo, k8s, apiClient, task, botMgr)
 			if err != nil {
-				logrus.Errorf("💥 Worker-%d 任务执行失败: %v", workerID, err)
-
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "worker",
+					"took":   time.Since(startTime),
+				}).Errorf("Worker-%d 任务失败: %v", workerID, err)
 				if task.Retries < cfg.Task.MaxRetries {
 					task.Retries++
 					retryDelay := time.Duration(cfg.Task.RetryDelay*task.Retries) * time.Second
-					logrus.Infof("🔄 Worker-%d 任务重试 [%d/%d]，%d秒后重试: %s",
-						workerID, task.Retries, cfg.Task.MaxRetries, int(retryDelay.Seconds()), task.ID)
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "worker",
+						"took":   time.Since(startTime),
+					}).Infof("Worker-%d 任务重试 [%d/%d]，%ds后重试: %s", workerID, task.Retries, cfg.Task.MaxRetries, int(retryDelay.Seconds()), task.ID)
 					time.Sleep(retryDelay)
 					q.Enqueue(task)
 				} else {
-					logrus.Errorf("🪦 Worker-%d 任务永久失败: %s", workerID, task.ID)
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "worker",
+						"took":   time.Since(startTime),
+					}).Errorf("Worker-%d 任务永久失败: %s", workerID, task.ID)
 				}
 			} else {
-				logrus.Infof("🎉 Worker-%d 任务成功完成: %s", workerID, task.ID)
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "worker",
+					"took":   time.Since(startTime),
+				}).Infof("Worker-%d 任务成功: %s", workerID, task.ID)
 			}
 		}
 	}
 }
 
-// Enqueue 将任务加入队列尾部
+// Enqueue 任务入队
 func (q *TaskQueue) Enqueue(task models.Task) {
+	startTime := time.Now()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	q.queue.PushBack(task)
-
-	logrus.Debugf("📥 任务入队: %s (队列长度: %d)", task.ID, q.queue.Len())
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "Enqueue",
+		"took":   time.Since(startTime),
+	}).Debugf("任务入队: %s (队列长度: %d)", task.ID, q.queue.Len())
 }
 
-// Dequeue 从队列头部取出任务
+// Dequeue 任务出队
 func (q *TaskQueue) Dequeue() (models.Task, bool) {
+	startTime := time.Now()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -117,108 +156,137 @@ func (q *TaskQueue) Dequeue() (models.Task, bool) {
 
 	element := q.queue.Front()
 	q.queue.Remove(element)
-
 	task := element.Value.(models.Task)
-
-	logrus.Debugf("📤 任务出队: %s (剩余: %d)", task.ID, q.queue.Len())
-
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "Dequeue",
+		"took":   time.Since(startTime),
+	}).Debugf("任务出队: %s (剩余: %d)", task.ID, q.queue.Len())
 	return task, true
 }
 
-// Len 返回当前队列长度
+// Len 返回队列长度
 func (q *TaskQueue) Len() int {
+	startTime := time.Now()
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.queue.Len()
+	length := q.queue.Len()
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "Len",
+		"took":   time.Since(startTime),
+	}).Debugf("队列长度: %d", length)
+	return length
 }
 
-// Stop 停止所有worker
+// Stop 停止队列
 func (q *TaskQueue) Stop() {
+	startTime := time.Now()
 	close(q.stopCh)
 	q.wg.Wait()
-
-	logrus.Infof("🛑 任务队列已停止 (剩余任务: %d)", q.Len())
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "Stop",
+		"took":   time.Since(startTime),
+	}).Infof("任务队列停止 (剩余任务: %d)", q.Len())
 }
 
-// IsEmpty 检查队列是否为空
-func (q *TaskQueue) IsEmpty() bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.queue.Len() == 0
-}
+// executeTask 执行部署任务
+func executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task models.Task, botMgr *telegram.BotManager) error {
+	startTime := time.Now()
+	// 步骤1：检查任务状态
+	if task.Status != "pending" {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+		}).Infof("任务非pending状态，跳过执行: %s, 状态: %s", task.ID, task.Status)
+		return nil
+	}
 
-// executeTask 执行单个部署任务
-func executeTask(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task models.Task, botMgr *telegram.BotManager) error {
-	// 步骤1：提取命名空间（优化：使用namespace执行k8s操作）
+	// 步骤2：获取命名空间
 	namespace := task.Environments[0]
-
-	// 步骤2：记录任务开始
-	logrus.Infof("🚀 开始执行部署任务: 服务=%s, 环境=%s, 版本=%s, 用户=%s, 超时=%v",
-		task.Service, namespace, task.Version, task.User, cfg.Deploy.WaitTimeout)
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "executeTask",
+		"took":   time.Since(startTime),
+	}).Infof("执行部署任务: 服务=%s, 环境=%s, 版本=%s, 用户=%s", task.Service, namespace, task.Version, task.User)
 
 	// 步骤3：获取旧版本
 	oldVersion, err := k8s.GetCurrentImage(namespace, task.Service)
 	if err != nil {
-		logrus.Warnf("⚠️ 获取当前镜像失败: %v", err)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+		}).Warnf("获取旧版本失败: %v", err)
 		oldVersion = "unknown"
 	}
-	logrus.Infof("📋 当前镜像版本: %s", oldVersion)
 
-	// 步骤4：滚动更新
-	newImage := fmt.Sprintf("%s:%s", strings.ToLower(task.Service), task.Version)
+	// 步骤4：更新镜像
+	newImage := task.Version
 	err = k8s.UpdateDeploymentImage(namespace, task.Service, newImage)
 	if err != nil {
-		// 更新失败处理
-		redis.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, "failure")
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+		}).Errorf("更新镜像失败: %v", err)
+		mongo.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, "failure")
 		botMgr.SendNotification(task.Service, namespace, task.User, oldVersion, task.Version, false)
-		return fmt.Errorf("更新失败: %v", err)
+		return fmt.Errorf("更新镜像失败: %v", err)
 	}
 
-	logrus.Infof("✅ Deployment镜像更新成功: %s -> %s", oldVersion, newImage)
-
-	// 步骤5：等待新版本就绪
-	logrus.Infof("⏳ 等待新版本就绪（超时: %v）", cfg.Deploy.WaitTimeout)
-
-	startTime := time.Now()
+	// 步骤5：等待就绪
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "executeTask",
+		"took":   time.Since(startTime),
+	}).Info("等待新版本就绪")
 	success := true
 	err = k8s.WaitForDeploymentReady(namespace, task.Service, task.Version)
 	if err != nil {
-		logrus.Errorf("💥 部署超时（%v）", cfg.Deploy.WaitTimeout)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+		}).Errorf("部署超时: %v", err)
 		success = false
-
-		// 执行回滚
-		logrus.Infof("🔄 开始回滚（超时: %v）", cfg.Deploy.RollbackTimeout)
-		rollbackErr := k8s.RollbackDeployment(namespace, task.Service, oldVersion)
-		if rollbackErr != nil {
-			logrus.Errorf("🔙 回滚失败: %v", rollbackErr)
-		} else {
-			logrus.Infof("🔙 回滚操作成功完成")
+		err = k8s.RollbackDeployment(namespace, task.Service, oldVersion)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"took":   time.Since(startTime),
+			}).Errorf("回滚失败: %v", err)
 		}
-	} else {
-		logrus.Infof("✅ 新版本就绪，耗时: %v", time.Since(startTime))
 	}
 
 	// 步骤6：发送通知
-	notifyErr := botMgr.SendNotification(task.Service, namespace, task.User, oldVersion, task.Version, success)
-	if notifyErr != nil {
-		logrus.Errorf("📱 通知发送失败: %v", notifyErr)
-	} else {
-		logrus.Infof("📱 Telegram通知发送成功")
+	err = botMgr.SendNotification(task.Service, namespace, task.User, oldVersion, task.Version, success)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+		}).Errorf("发送通知失败: %v", err)
 	}
 
-	// 步骤7：更新Redis状态
+	// 步骤7：更新状态
 	status := "success"
 	if !success {
 		status = "failure"
 	}
-	redisErr := redis.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, status)
-	if redisErr != nil {
-		logrus.Errorf("💾 Redis状态更新失败: %v", redisErr)
-	} else {
-		logrus.Infof("💾 Redis状态更新成功: %s", status)
+	err = mongo.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, status)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+		}).Errorf("更新状态失败: %v", err)
 	}
 
-	// 步骤8：推送 /status
+	// 步骤8：推送状态
 	statusReq := models.StatusRequest{
 		Service:     task.Service,
 		Version:     task.Version,
@@ -228,19 +296,18 @@ func executeTask(cfg *config.Config, redis *client.RedisClient, k8s *kubernetes.
 	}
 	err = apiClient.UpdateStatus(statusReq)
 	if err != nil {
-		logrus.Errorf("❌ /status 推送失败: %v", err)
-	} else {
-		logrus.Infof("✅ /status 推送成功: %s", status)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+		}).Errorf("推送状态失败: %v", err)
 	}
 
-	// 步骤9：任务总结
-	if success {
-		logrus.Infof("🎉 部署成功: 服务=%s, 耗时=%v, %s -> %s",
-			task.Service, time.Since(startTime), oldVersion, task.Version)
-	} else {
-		logrus.Infof("💥 部署失败（已回滚）: 服务=%s, 耗时=%v, 回滚至=%s",
-			task.Service, time.Since(startTime), oldVersion)
-	}
-
+	// 步骤9：记录总结
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "executeTask",
+		"took":   time.Since(startTime),
+	}).Infof("任务完成: 服务=%s, 状态=%s, 耗时=%v", task.Service, status, time.Since(startTime))
 	return nil
 }
