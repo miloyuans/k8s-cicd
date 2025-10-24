@@ -1,3 +1,5 @@
+```
+/*
 package client
 
 import (
@@ -183,3 +185,5 @@ func (r *RedisClient) StoreTaskWithDeduplication(deploy models.DeployRequest) er
 func (r *RedisClient) Close() error {
 	return r.client.Close()
 }
+*/
+```
