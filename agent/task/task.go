@@ -1,4 +1,3 @@
-//task.go
 package task
 
 import (
@@ -212,19 +211,11 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	}).Infof("执行部署任务: 服务=%s, 环境=%s, 版本=%s, 用户=%s", task.Service, namespace, task.Version, task.User)
 
 	// 步骤3：获取旧版本
-	oldVersion, err := k8s.GetCurrentImage(namespace, task.Service)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "executeTask",
-			"took":   time.Since(startTime),
-		}).Warnf("获取旧版本失败: %v", err)
-		oldVersion = "unknown"
-	}
+	oldVersion := k8s.GetCurrentImage(namespace, task.Service)
 
 	// 步骤4：更新镜像
 	newImage := task.Version
-	err = k8s.UpdateDeploymentImage(namespace, task.Service, newImage)
+	err := k8s.UpdateDeploymentImage(namespace, task.Service, newImage)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
