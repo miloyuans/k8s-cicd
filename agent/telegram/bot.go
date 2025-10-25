@@ -130,6 +130,7 @@ func (bm *BotManager) StartPolling() {
 				return
 			default:
 				bm.pollUpdates()
+				time.Sleep(1 * time.Second) // 防止频繁轮询导致冲突
 			}
 		}
 	}()
@@ -526,6 +527,7 @@ func (bm *BotManager) Stop() {
 	startTime := time.Now()
 	// 步骤1：关闭停止通道
 	close(bm.stopChan)
+	close(bm.updateChan)
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "Stop",
