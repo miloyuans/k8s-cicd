@@ -353,10 +353,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					continue
 				}
 
-				// 设置初始 ConfirmationStatus 为 "pending"
-				t.ConfirmationStatus = "pending"
-
-				// 存储任务 (已有重复检查)
+				// 存储任务 (已有重复检查，并设置ConfirmationStatus = "pending")
 				err = a.validateAndStoreTask(t, env)
 				if err != nil {
 					continue
@@ -455,16 +452,16 @@ func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployReque
 	startTime := time.Now()
 	select {
 	case task := <-confirmChan:
-		// 要求3: 确认，更新状态"confirmed"，入队
-		err := a.mongo.UpdateConfirmationStatus(task.Service, task.Version, task.Environments[0], task.User, "confirmed")
+		// 要求3: 确认，更新状态"pending"，入队
+		err := a.mongo.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, "pending")
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
-			}).Errorf(color.RedString("更新确认状态失败: %v", err))
+			}).Errorf(color.RedString("更新任务状态失败: %v", err))
 		}
-		// 入队
+		// 入队执行k8s API
 		taskID := generateTaskID(task)
 		a.taskQ.Enqueue(&models.Task{
 			DeployRequest: task,
@@ -476,19 +473,19 @@ func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployReque
 			"method": "handleConfirmationChannels",
 			"took":   time.Since(startTime),
 			"data": logrus.Fields{
-				"task_id": taskID, "service": task.Service, "version": task.Version, "env": task.Environments[0], "user": task.User, "status": "confirmed",
+				"task_id": taskID, "service": task.Service, "version": task.Version, "env": task.Environments[0], "user": task.User, "status": "pending",
 			},
-		}).Infof(color.GreenString("用户确认部署，任务入队并更新状态'confirmed': %s v%s [%s]", task.Service, task.Version, task.Environments[0]))
+		}).Infof(color.GreenString("用户确认，任务状态更新为'pending'并入队: %s v%s [%s]", task.Service, task.Version, task.Environments[0]))
 
 	case status := <-rejectChan:
-		// 要求3: 拒绝，更新状态"rejected"，推送no_action，删除任务
-		err := a.mongo.UpdateConfirmationStatus(status.Service, status.Version, status.Environment, status.User, "rejected")
+		// 要求3: 拒绝，更新状态"no_action"，推送/status
+		err := a.mongo.UpdateTaskStatus(status.Service, status.Version, status.Environment, status.User, "no_action")
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
-			}).Errorf(color.RedString("更新拒绝状态失败: %v", err))
+			}).Errorf(color.RedString("更新任务状态失败: %v", err))
 		}
 		err = a.apiClient.UpdateStatus(models.StatusRequest{
 			Service:     status.Service,
@@ -503,18 +500,18 @@ func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployReque
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
 				"data": logrus.Fields{
-					"service": status.Service, "version": status.Version, "env": status.Environment, "user": status.User, "status": "rejected",
+					"service": status.Service, "version": status.Version, "env": status.Environment, "user": status.User, "status": "no_action",
 				},
-			}).Errorf(color.RedString("拒绝任务推送no_action失败: %v", err))
+			}).Errorf(color.RedString("推送no_action状态失败: %v", err))
 		} else {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
 				"data": logrus.Fields{
-					"service": status.Service, "version": status.Version, "env": status.Environment, "user": status.User, "status": "rejected",
+					"service": status.Service, "version": status.Version, "env": status.Environment, "user": status.User, "status": "no_action",
 				},
-			}).Infof(color.GreenString("用户拒绝部署，推送no_action成功并更新状态'rejected': %s v%s [%s]", status.Service, status.Version, status.Environment))
+			}).Infof(color.GreenString("用户拒绝，任务状态更新为'no_action'并推送: %s v%s [%s]", status.Service, status.Version, status.Environment))
 		}
 		err = a.mongo.DeleteTask(status.Service, status.Version, status.Environment, status.User)
 		if err != nil {
