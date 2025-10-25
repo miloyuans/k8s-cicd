@@ -1,10 +1,10 @@
 //agent.go
-//
 package agent
 
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	"k8s-cicd/agent/api"
@@ -152,18 +152,78 @@ func (a *Agent) performPushDiscovery() {
 		return
 	}
 
-	// 步骤2：按服务逐个推送
-	for _, service := range req.Services {
-		var serviceDeployments []models.DeployRequest
-		for _, dep := range req.Deployments {
-			if dep.Service == service {
-				serviceDeployments = append(serviceDeployments, dep)
-			}
+	// 步骤2：检查MongoDB中数据是否存在且是否相同
+	ctx := context.Background()
+	versionsColl := a.mongo.GetClient().Database("cicd").Collection("versions")
+	currentData := make(map[string]string) // 服务 -> 版本
+	for _, dep := range req.Deployments {
+		currentData[dep.Service] = dep.Version
+	}
+	dbServices, err := a.getServicesFromMongo(ctx)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "performPushDiscovery",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("查询MongoDB版本数据失败: %v", err))
+		return
+	}
+	dbData := make(map[string]string)
+	for _, svc := range dbServices {
+		var version struct {
+			Service string `bson:"service"`
+			Version string `bson:"version"`
 		}
+		err := versionsColl.FindOne(ctx, bson.M{"service": svc}).Decode(&version)
+		if err == nil {
+			dbData[version.Service] = version.Version
+		}
+	}
+
+	// 步骤3：比较数据是否相同
+	if reflect.DeepEqual(currentData, dbData) && reflect.DeepEqual(req.Environments, a.config.EnvMapping.Mappings) {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "performPushDiscovery",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"services":      req.Services,
+				"service_count": len(req.Services),
+				"env_mappings":  a.config.EnvMapping.Mappings,
+				"env_count":     len(a.config.EnvMapping.Mappings),
+			},
+		}).Infof(color.GreenString("数据无变化，无需推送 /push 接口"))
+		return
+	}
+
+	// 步骤4：更新MongoDB版本数据
+	for service, version := range currentData {
+		_, err = versionsColl.UpdateOne(ctx,
+			bson.M{"service": service},
+			bson.M{
+				"$set": bson.M{
+					"service":    service,
+					"version":    version,
+					"updated_at": time.Now(),
+				},
+			},
+			options.Update().SetUpsert(true),
+		)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "performPushDiscovery",
+				"took":   time.Since(startTime),
+			}).Errorf(color.RedString("更新MongoDB版本数据失败: %v", err))
+			continue
+		}
+	}
+
+	// 步骤5：按服务逐个推送
+	for _, service := range req.Services {
 		pushReq := models.PushRequest{
 			Services:     []string{service},
 			Environments: req.Environments,
-			Deployments:  serviceDeployments,
 		}
 		err = a.apiClient.PushData(pushReq)
 		if err != nil {
@@ -175,7 +235,8 @@ func (a *Agent) performPushDiscovery() {
 			continue
 		}
 	}
-	// 步骤3：总结推送结果
+
+	// 步骤6：总结推送结果
 	uniqueServices := make(map[string]struct{})
 	for _, s := range req.Services {
 		uniqueServices[s] = struct{}{}
@@ -189,13 +250,12 @@ func (a *Agent) performPushDiscovery() {
 		"method": "performPushDiscovery",
 		"took":   time.Since(startTime),
 		"data": logrus.Fields{
-			"services":        uniqueServices,
-			"service_count":   len(uniqueServices),
-			"env_mappings":    uniqueEnvs,
-			"env_count":       len(uniqueEnvs),
-			"deployments_count": len(req.Deployments),
+			"services":      uniqueServices,
+			"service_count": len(uniqueServices),
+			"env_mappings":  uniqueEnvs,
+			"env_count":     len(uniqueEnvs),
 		},
-	}).Infof(color.GreenString("服务发现和推送完成，服务数: %d, 环境数: %d, 部署数: %d", len(uniqueServices), len(uniqueEnvs), len(req.Deployments)))
+	}).Infof(color.GreenString("服务发现和推送完成，服务数: %d, 环境数: %d", len(uniqueServices), len(uniqueEnvs)))
 }
 
 // getServicesFromMongo 从MongoDB获取服务列表

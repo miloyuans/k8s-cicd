@@ -1,4 +1,4 @@
-//go
+//
 package models
 
 import (
@@ -8,9 +8,8 @@ import (
 
 // PushRequest 推送请求数据结构
 type PushRequest struct {
-	Services     []string        `json:"services" bson:"services"`         // 服务列表
-	Environments []string        `json:"environments" bson:"environments"` // 环境列表
-	Deployments  []DeployRequest `json:"deployments" bson:"deployments"`   // 部署记录
+	Services     []string `json:"services" bson:"services"`         // 服务列表
+	Environments []string `json:"environments" bson:"environments"` // 环境列表
 }
 
 // DeployRequest 单个部署任务请求

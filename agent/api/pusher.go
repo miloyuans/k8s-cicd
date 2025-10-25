@@ -104,13 +104,12 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 		"method": "PushData",
 		"took":   time.Since(startTime),
 		"data": logrus.Fields{
-			"services":        uniqueServices,
-			"service_count":   len(uniqueServices),
-			"environments":    uniqueEnvs,
-			"environment_count": len(uniqueEnvs),
-			"deployments_count": len(req.Deployments),
+			"services":      uniqueServices,
+			"service_count": len(uniqueServices),
+			"environments":  uniqueEnvs,
+			"env_count":     len(uniqueEnvs),
 		},
-	}).Infof(color.GreenString("推送 /push 接口成功，完成数据交互，服务数: %d, 环境数: %d, 部署数: %d", len(uniqueServices), len(uniqueEnvs), len(req.Deployments)))
+	}).Infof(color.GreenString("推送 /push 接口成功，完成数据交互，服务数: %d, 环境数: %d", len(uniqueServices), len(uniqueEnvs)))
 	return nil
 }
 

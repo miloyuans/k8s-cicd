@@ -36,6 +36,7 @@ type BotManager struct {
 
 // NewBotManager 创建多机器人管理器
 func NewBotManager(bots []config.TelegramBot) *BotManager {
+	startTime := time.Now()
 	// 步骤1：初始化管理器结构
 	m := &BotManager{
 		Bots:       make(map[string]*TelegramBot),
@@ -46,7 +47,6 @@ func NewBotManager(bots []config.TelegramBot) *BotManager {
 	// 步骤2：遍历配置中的机器人，初始化启用的机器人
 	for i := range bots {
 		if bots[i].IsEnabled {
-			// 创建机器人实例
 			bot := &TelegramBot{
 				Name:       bots[i].Name,
 				Token:      bots[i].Token,
@@ -55,35 +55,54 @@ func NewBotManager(bots []config.TelegramBot) *BotManager {
 				RegexMatch: bots[i].RegexMatch,
 				IsEnabled:  true,
 			}
-			// 添加到管理器映射中
 			m.Bots[bot.Name] = bot
-			logrus.Infof("✅ Telegram机器人 [%s] 已启用", bot.Name)
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "NewBotManager",
+				"took":   time.Since(startTime),
+			}).Infof(color.GreenString("✅ Telegram机器人 [%s] 已启用", bot.Name))
 		}
 	}
 
 	// 步骤3：检查是否有启用的机器人
 	if len(m.Bots) == 0 {
-		logrus.Warn("⚠️ 未启用任何Telegram机器人")
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewBotManager",
+			"took":   time.Since(startTime),
+		}).Warn("⚠️ 未启用任何Telegram机器人")
 	}
 
 	// 步骤4：返回管理器实例
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewBotManager",
+		"took":   time.Since(startTime),
+	}).Info(color.GreenString("BotManager创建成功"))
 	return m
 }
 
 // StartPolling 启动Telegram Updates轮询
 func (bm *BotManager) StartPolling() {
+	startTime := time.Now()
 	// 步骤1：记录启动日志
-	logrus.Info("🔄 启动Telegram Updates轮询")
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "StartPolling",
+		"took":   time.Since(startTime),
+	}).Info(color.GreenString("🔄 启动Telegram Updates轮询"))
 	// 步骤2：启动goroutine进行无限轮询
 	go func() {
 		for {
 			select {
 			case <-bm.stopChan:
-				// 收到停止信号，记录日志并返回
-				logrus.Info("🛑 Telegram轮询已停止")
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "StartPolling",
+					"took":   time.Since(startTime),
+				}).Info(color.GreenString("🛑 Telegram轮询已停止"))
 				return
 			default:
-				// 执行轮询更新
 				bm.pollUpdates()
 			}
 		}
@@ -92,63 +111,109 @@ func (bm *BotManager) StartPolling() {
 
 // pollUpdates 轮询Telegram Updates
 func (bm *BotManager) pollUpdates() {
+	startTime := time.Now()
 	// 步骤1：构建getUpdates请求URL
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=10",
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=30",
 		bm.getDefaultBot().Token, bm.offset)
 
-	// 步骤2：发送HTTP GET请求
-	resp, err := http.Get(url)
-	if err != nil {
-		// 请求失败，记录错误日志并等待重试
-		logrus.Errorf("❌ Telegram轮询网络错误: %v", err)
-		time.Sleep(5 * time.Second)
+	// 步骤2：发送HTTP GET请求，带重试机制
+	retryCount := 0
+	maxRetries := 3
+	for retryCount < maxRetries {
+		resp, err := http.Get(url)
+		if err != nil {
+			retryCount++
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "pollUpdates",
+				"took":   time.Since(startTime),
+				"data": logrus.Fields{
+					"retry": retryCount,
+				},
+			}).Errorf(color.RedString("❌ Telegram轮询网络错误: %v", err))
+			// 指数退避
+			time.Sleep(time.Duration(5*retryCount) * time.Second)
+			continue
+		}
+		defer resp.Body.Close()
+
+		// 步骤3：解析响应JSON
+		var result struct {
+			Ok     bool                       `json:"ok"`
+			Result []map[string]interface{}   `json:"result"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "pollUpdates",
+				"took":   time.Since(startTime),
+			}).Errorf(color.RedString("❌ Telegram响应解析失败: %v", err))
+			return
+		}
+
+		// 步骤4：处理每个update，并更新offset
+		for _, update := range result.Result {
+			bm.offset = int64(update["update_id"].(float64)) + 1
+			bm.updateChan <- update
+		}
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "pollUpdates",
+			"took":   time.Since(startTime),
+		}).Infof(color.GreenString("轮询完成，处理 %d 个更新", len(result.Result)))
 		return
 	}
-	defer resp.Body.Close()
-
-	// 步骤3：解析响应JSON
-	var result struct {
-		Ok     bool                       `json:"ok"`
-		Result []map[string]interface{}   `json:"result"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		// 解析失败，记录错误日志
-		logrus.Errorf("❌ Telegram响应解析失败: %v", err)
-		return
-	}
-
-	// 步骤4：处理每个update，并更新offset
-	for _, update := range result.Result {
-		bm.offset = int64(update["update_id"].(float64)) + 1
-		// 发送到更新通道
-		bm.updateChan <- update
-	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "pollUpdates",
+		"took":   time.Since(startTime),
+	}).Errorf(color.RedString("Telegram轮询失败，达到最大重试次数: %d", maxRetries))
 }
 
 // getDefaultBot 获取默认机器人（第一个启用的）
 func (bm *BotManager) getDefaultBot() *TelegramBot {
+	startTime := time.Now()
 	// 步骤1：遍历机器人映射
 	for _, bot := range bm.Bots {
 		// 步骤2：返回第一个启用的机器人
 		if bot.IsEnabled {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "getDefaultBot",
+				"took":   time.Since(startTime),
+			}).Debugf(color.GreenString("获取默认机器人: %s", bot.Name))
 			return bot
 		}
 	}
 	// 步骤3：如果没有，返回nil
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "getDefaultBot",
+		"took":   time.Since(startTime),
+	}).Warn("未找到默认机器人")
 	return nil
 }
 
 // PollUpdates 阻塞式处理Updates（供Agent调用）
 func (bm *BotManager) PollUpdates(allowedUsers []string, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
+	startTime := time.Now()
 	// 步骤1：记录启动日志
-	logrus.Info("📡 开始处理Telegram回调")
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "PollUpdates",
+		"took":   time.Since(startTime),
+	}).Info(color.GreenString("开始处理Telegram回调"))
 	for {
 		select {
 		case update := <-bm.updateChan:
 			// 处理更新
 			bm.HandleCallback(update, allowedUsers, confirmChan, rejectChan)
 		case <-bm.stopChan:
-			// 收到停止信号，返回
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "PollUpdates",
+				"took":   time.Since(startTime),
+			}).Info(color.GreenString("Telegram回调处理停止"))
 			return
 		}
 	}
@@ -156,6 +221,7 @@ func (bm *BotManager) PollUpdates(allowedUsers []string, confirmChan chan models
 
 // HandleCallback 处理回调查询
 func (bm *BotManager) HandleCallback(update map[string]interface{}, allowedUsers []string, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
+	startTime := time.Now()
 	// 步骤1：检查是否为callback_query
 	if _, ok := update["callback_query"]; !ok {
 		return
@@ -165,17 +231,32 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, allowedUsers
 	callback := update["callback_query"].(map[string]interface{})
 	userIDFloat, ok := callback["from"].(map[string]interface{})["id"]
 	if !ok {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "HandleCallback",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("无法解析用户ID"))
 		return
 	}
 	userID := fmt.Sprintf("%v", userIDFloat)
 	data, ok := callback["data"].(string)
 	if !ok {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "HandleCallback",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("无法解析回调数据"))
 		return
 	}
 
-	logrus.Infof("🔘 收到回调: user=%s, data=%s", userID, data)
+	// 步骤3：记录回调日志
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "HandleCallback",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("收到回调: user=%s, data=%s", userID, data))
 
-	// 步骤3：用户ID过滤
+	// 步骤4：用户ID过滤
 	allowed := false
 	for _, uid := range allowedUsers {
 		if uid == userID {
@@ -184,33 +265,42 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, allowedUsers
 		}
 	}
 	if !allowed {
-		logrus.Warnf("⚠️ 无效用户ID: %s", userID)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "HandleCallback",
+			"took":   time.Since(startTime),
+		}).Warnf("无效用户ID: %s", userID)
 		return
 	}
 
-	// 步骤4：解析回调数据
+	// 步骤5：解析回调数据
 	parts := strings.Split(data, ":")
 	if len(parts) != 5 {
-		logrus.Errorf("❌ 回调数据格式错误: %s", data)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "HandleCallback",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("回调数据格式错误: %s", data))
 		return
 	}
 
+	// 步骤6：提取行动和服务信息
 	action, service, env, version, user := parts[0], parts[1], parts[2], parts[3], parts[4]
 
-	// 步骤5：删除原弹窗
+	// 步骤7：删除原弹窗消息
 	message := callback["message"].(map[string]interface{})
 	messageID := int(message["message_id"].(float64))
 	chatID := fmt.Sprintf("%v", message["chat"].(map[string]interface{})["id"])
 	bm.DeleteMessage(bm.getDefaultBot(), chatID, messageID)
 
-	// 步骤6：构建反馈消息文本
+	// 步骤8：构建反馈消息文本
 	resultText := fmt.Sprintf("✅ 用户 @%s %s 部署请求: *%s* v`%s` 在 `%s`",
 		userID, action, service, version, env)
 
-	// 步骤7：发送反馈消息
+	// 步骤9：发送反馈消息
 	bm.SendSimpleMessage(bm.getDefaultBot(), chatID, resultText, "Markdown")
 
-	// 步骤8：根据行动处理确认或拒绝
+	// 步骤10：根据行动处理确认或拒绝
 	if action == "confirm" {
 		task := models.DeployRequest{
 			Service:      service,
@@ -230,13 +320,24 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, allowedUsers
 		}
 		rejectChan <- status
 	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "HandleCallback",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("回调处理完成: action=%s, service=%s, env=%s", action, service, env))
 }
 
 // SendConfirmation 发送确认弹窗
 func (bm *BotManager) SendConfirmation(service, env, user, version string, allowedUsers []string) error {
+	startTime := time.Now()
 	// 步骤1：根据服务选择机器人
 	bot, err := bm.getBotForService(service)
 	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendConfirmation",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("选择机器人失败: %v", err))
 		return err
 	}
 
@@ -273,20 +374,34 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, allow
 	// 步骤5：发送带键盘的消息
 	_, err = bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2")
 	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendConfirmation",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("发送弹窗失败: %v", err))
 		return err
 	}
 
 	// 步骤6：记录发送成功日志
-	green := color.New(color.FgGreen)
-	green.Printf("✅ 确认弹窗发送成功: %s v%s [%s]\n", service, version, env)
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "SendConfirmation",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("确认弹窗发送成功: %s v%s [%s]", service, version, env))
 	return nil
 }
 
 // SendNotification 发送部署通知
 func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
+	startTime := time.Now()
 	// 步骤1：根据服务选择机器人
 	bot, err := bm.getBotForService(service)
 	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendNotification",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("选择机器人失败: %v", err))
 		return err
 	}
 
@@ -296,17 +411,26 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 	// 步骤3：发送消息
 	_, err = bm.sendMessage(bot, bot.GroupID, message, "MarkdownV2")
 	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendNotification",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("发送通知失败: %v", err))
 		return err
 	}
 
 	// 步骤4：记录发送成功日志
-	green := color.New(color.FgGreen)
-	green.Printf("✅ 部署通知发送成功: %s -> %s [%s]\n", oldVersion, newVersion, service)
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "SendNotification",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("部署通知发送成功: %s -> %s [%s]", oldVersion, newVersion, service))
 	return nil
 }
 
 // sendMessage 发送普通消息
 func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode string) (int, error) {
+	startTime := time.Now()
 	// 步骤1：构建payload
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
@@ -321,6 +445,11 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode stri
 	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token),
 		"application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "sendMessage",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("发送消息失败: %v", err))
 		return 0, err
 	}
 	defer resp.Body.Close()
@@ -330,20 +459,38 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode stri
 		Ok     bool                   `json:"ok"`
 		Result map[string]interface{} `json:"result"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "sendMessage",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("解析响应失败: %v", err))
+		return 0, err
+	}
 
 	// 步骤5：检查响应是否成功
 	if !result.Ok {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "sendMessage",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("Telegram API错误"))
 		return 0, fmt.Errorf("Telegram API错误")
 	}
 
 	// 步骤6：提取并返回message ID
 	messageID := int(result.Result["message_id"].(float64))
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "sendMessage",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("消息发送成功，message_id=%d", messageID))
 	return messageID, nil
 }
 
 // sendMessageWithKeyboard 发送带键盘的消息
 func (bm *BotManager) sendMessageWithKeyboard(bot *TelegramBot, chatID, text string, keyboard map[string]interface{}, parseMode string) (int, error) {
+	startTime := time.Now()
 	// 步骤1：构建payload
 	payload := map[string]interface{}{
 		"chat_id":      chatID,
@@ -359,6 +506,11 @@ func (bm *BotManager) sendMessageWithKeyboard(bot *TelegramBot, chatID, text str
 	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token),
 		"application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "sendMessageWithKeyboard",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("发送消息失败: %v", err))
 		return 0, err
 	}
 	defer resp.Body.Close()
@@ -368,28 +520,59 @@ func (bm *BotManager) sendMessageWithKeyboard(bot *TelegramBot, chatID, text str
 		Ok     bool                   `json:"ok"`
 		Result map[string]interface{} `json:"result"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "sendMessageWithKeyboard",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("解析响应失败: %v", err))
+		return 0, err
+	}
 
 	// 步骤5：检查响应是否成功
 	if !result.Ok {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "sendMessageWithKeyboard",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("Telegram API错误"))
 		return 0, fmt.Errorf("Telegram API错误")
 	}
 
 	// 步骤6：提取并返回message ID
 	messageID := int(result.Result["message_id"].(float64))
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "sendMessageWithKeyboard",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("带键盘消息发送成功，message_id=%d", messageID))
 	return messageID, nil
 }
 
 // SendSimpleMessage 发送简单反馈消息
 func (bm *BotManager) SendSimpleMessage(bot *TelegramBot, chatID, text, parseMode string) error {
+	startTime := time.Now()
 	// 步骤1：调用sendMessage发送消息
 	_, err := bm.sendMessage(bot, chatID, text, parseMode)
-	// 步骤2：返回错误
-	return err
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendSimpleMessage",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("发送简单消息失败: %v", err))
+		return err
+	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "SendSimpleMessage",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("简单消息发送成功"))
+	return nil
 }
 
 // DeleteMessage 删除指定消息
 func (bm *BotManager) DeleteMessage(bot *TelegramBot, chatID string, messageID int) error {
+	startTime := time.Now()
 	// 步骤1：构建payload
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
@@ -400,18 +583,39 @@ func (bm *BotManager) DeleteMessage(bot *TelegramBot, chatID string, messageID i
 	jsonData, _ := json.Marshal(payload)
 
 	// 步骤3：发送POST请求
-	resp, _ := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage", bot.Token),
+	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage", bot.Token),
 		"application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "DeleteMessage",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("删除消息失败: %v", err))
+		return err
+	}
+	defer resp.Body.Close()
+
+	// 步骤4：检查响应状态
 	if resp.StatusCode != http.StatusOK {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "DeleteMessage",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("删除消息失败，状态码: %d", resp.StatusCode))
 		return fmt.Errorf("删除消息失败，状态码: %d", resp.StatusCode)
 	}
 
-	// 步骤4：返回nil表示成功
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "DeleteMessage",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("消息删除成功，message_id=%d", messageID))
 	return nil
 }
 
 // getBotForService 根据服务名选择机器人
 func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
+	startTime := time.Now()
 	// 步骤1：遍历所有机器人
 	for _, bot := range bm.Bots {
 		// 步骤2：遍历服务的匹配规则
@@ -422,11 +626,21 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 					// 使用正则匹配
 					matched, err := regexp.MatchString(pattern, service)
 					if err == nil && matched {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "getBotForService",
+							"took":   time.Since(startTime),
+						}).Infof(color.GreenString("服务 %s 匹配机器人 %s", service, bot.Name))
 						return bot, nil
 					}
 				} else {
 					// 使用前缀匹配（忽略大小写）
 					if strings.HasPrefix(strings.ToUpper(service), strings.ToUpper(pattern)) {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "getBotForService",
+							"took":   time.Since(startTime),
+						}).Infof(color.GreenString("服务 %s 匹配机器人 %s", service, bot.Name))
 						return bot, nil
 					}
 				}
@@ -434,17 +648,29 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 		}
 	}
 	// 步骤4：未匹配，返回错误
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "getBotForService",
+		"took":   time.Since(startTime),
+	}).Errorf(color.RedString("服务 %s 未匹配任何机器人", service))
 	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
 }
 
 // Stop 停止Telegram轮询
 func (bm *BotManager) Stop() {
+	startTime := time.Now()
 	// 步骤1：关闭停止通道
 	close(bm.stopChan)
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "Stop",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("Telegram轮询停止"))
 }
 
 // generateMarkdownMessage 生成美观的Markdown部署通知
 func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
+	startTime := time.Now()
 	// 步骤1：初始化字符串构建器
 	var message strings.Builder
 
@@ -504,5 +730,10 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 	message.WriteString("*由 K8s-CICD Agent 自动发送*")
 
 	// 步骤8：返回生成的字符串
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "generateMarkdownMessage",
+		"took":   time.Since(startTime),
+	}).Debugf(color.GreenString("生成Markdown消息成功"))
 	return message.String()
 }
