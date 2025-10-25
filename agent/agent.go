@@ -353,7 +353,10 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					continue
 				}
 
-				// 存储任务 (已有重复检查，并设置ConfirmationStatus = "pending")
+				// 设置初始 ConfirmationStatus 为 "pending"
+				t.ConfirmationStatus = "pending"
+
+				// 存储任务 (已有重复检查)
 				err = a.validateAndStoreTask(t, env)
 				if err != nil {
 					continue
