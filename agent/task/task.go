@@ -152,8 +152,8 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 				"task_id": task.ID,
 			},
 		}).Infof(color.GreenString("无Pod运行，跳过更新"))
-		// 更新状态为skipped
-		err := mongo.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, "skipped")
+		// 更新状态为no_action
+		err := mongo.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, "no_action")
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -169,7 +169,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			Version:     task.Version,
 			Environment: namespace,
 			User:        task.User,
-			Status:      "skipped",
+			Status:      "no_action",
 		})
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
@@ -307,14 +307,13 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	}
 
 	// 步骤7：推送状态
-	statusReq := models.StatusRequest{
+	err = apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.Service,
 		Version:     task.Version,
 		Environment: namespace,
 		User:        task.User,
 		Status:      status,
-	}
-	err = apiClient.UpdateStatus(statusReq)
+	})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),

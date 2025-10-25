@@ -2,6 +2,7 @@
 package agent
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -393,8 +394,14 @@ func (a *Agent) handleConfirmationChannels(confirmChan chan models.DeployRequest
 			}).Errorf(color.RedString("删除任务失败: %v", err))
 			return
 		}
-		// 更新API状态为rejected
-		err = a.apiClient.UpdateStatus(status)
+		// 更新API状态为no_action
+		err = a.apiClient.UpdateStatus(models.StatusRequest{
+			Service:     status.Service,
+			Version:     status.Version,
+			Environment: status.Environment,
+			User:        status.User,
+			Status:      "no_action",
+		})
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
