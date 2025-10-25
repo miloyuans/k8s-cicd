@@ -1,4 +1,4 @@
-//
+//.go
 package kubernetes
 
 import (
@@ -20,6 +20,7 @@ import (
 
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
+	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
 
@@ -43,14 +44,14 @@ func NewK8sClient(k8sCfg *config.K8sAuthConfig, deployCfg *config.DeployConfig) 
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "NewK8sClient",
 				"took":   time.Since(startTime),
-			}).Errorf("kubeconfig认证失败: %v", err)
+			}).Errorf(color.RedString("kubeconfig认证失败: %v", err))
 			return nil, fmt.Errorf("kubeconfig认证失败: %v", err)
 		}
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "NewK8sClient",
 			"took":   time.Since(startTime),
-		}).Info("使用kubeconfig认证成功")
+		}).Infof(color.GreenString("使用kubeconfig认证成功"))
 	case "serviceaccount":
 		config, err = rest.InClusterConfig()
 		if err != nil {
@@ -58,20 +59,20 @@ func NewK8sClient(k8sCfg *config.K8sAuthConfig, deployCfg *config.DeployConfig) 
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "NewK8sClient",
 				"took":   time.Since(startTime),
-			}).Errorf("ServiceAccount认证失败: %v", err)
+			}).Errorf(color.RedString("ServiceAccount认证失败: %v", err))
 			return nil, fmt.Errorf("ServiceAccount认证失败: %v", err)
 		}
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "NewK8sClient",
 			"took":   time.Since(startTime),
-		}).Info("使用ServiceAccount认证成功")
+		}).Infof(color.GreenString("使用ServiceAccount认证成功"))
 	default:
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "NewK8sClient",
 			"took":   time.Since(startTime),
-		}).Errorf("不支持的认证类型: %s", k8sCfg.AuthType)
+		}).Errorf(color.RedString("不支持的认证类型: %s", k8sCfg.AuthType))
 		return nil, fmt.Errorf("不支持的认证类型: %s", k8sCfg.AuthType)
 	}
 
@@ -82,7 +83,7 @@ func NewK8sClient(k8sCfg *config.K8sAuthConfig, deployCfg *config.DeployConfig) 
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "NewK8sClient",
 			"took":   time.Since(startTime),
-		}).Errorf("创建K8s客户端失败: %v", err)
+		}).Errorf(color.RedString("创建K8s客户端失败: %v", err))
 		return nil, fmt.Errorf("创建K8s客户端失败: %v", err)
 	}
 
@@ -95,7 +96,7 @@ func NewK8sClient(k8sCfg *config.K8sAuthConfig, deployCfg *config.DeployConfig) 
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "NewK8sClient",
 		"took":   time.Since(startTime),
-	}).Info("K8s客户端创建成功")
+	}).Infof(color.GreenString("K8s客户端创建成功"))
 	return client, nil
 }
 
@@ -109,7 +110,7 @@ func (k *K8sClient) UpdateDeploymentImage(namespace, deploymentName, newImage st
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateDeploymentImage",
 			"took":   time.Since(startTime),
-		}).Errorf("获取Deployment失败: %v", err)
+		}).Errorf(color.RedString("获取Deployment失败: %v", err))
 		return fmt.Errorf("获取Deployment失败: %v", err)
 	}
 
@@ -119,7 +120,7 @@ func (k *K8sClient) UpdateDeploymentImage(namespace, deploymentName, newImage st
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "UpdateDeploymentImage",
 		"took":   time.Since(startTime),
-	}).Infof("当前镜像: %s", oldImage)
+	}).Infof(color.GreenString("当前镜像: %s", oldImage))
 
 	// 步骤3：确保滚动更新策略
 	k.ensureRollingUpdateStrategy(deploy)
@@ -137,7 +138,7 @@ func (k *K8sClient) UpdateDeploymentImage(namespace, deploymentName, newImage st
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateDeploymentImage",
 			"took":   time.Since(startTime),
-		}).Error("未找到可更新的容器镜像")
+		}).Errorf(color.RedString("未找到可更新的容器镜像"))
 		return fmt.Errorf("未找到可更新的容器镜像")
 	}
 
@@ -162,7 +163,7 @@ func (k *K8sClient) UpdateDeploymentImage(namespace, deploymentName, newImage st
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateDeploymentImage",
 			"took":   time.Since(startTime),
-		}).Errorf("更新Deployment失败: %v", err)
+		}).Errorf(color.RedString("更新Deployment失败: %v", err))
 		return fmt.Errorf("更新Deployment失败: %v", err)
 	}
 
@@ -170,7 +171,7 @@ func (k *K8sClient) UpdateDeploymentImage(namespace, deploymentName, newImage st
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "UpdateDeploymentImage",
 		"took":   time.Since(startTime),
-	}).Infof("滚动更新成功: %s -> %s", oldImage, newImage)
+	}).Infof(color.GreenString("滚动更新成功: %s -> %s", oldImage, newImage))
 	return nil
 }
 
@@ -207,7 +208,7 @@ func (k *K8sClient) ensureRollingUpdateStrategy(deploy *appsv1.Deployment) {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "ensureRollingUpdateStrategy",
 		"took":   time.Since(startTime),
-	}).Debug("滚动更新策略设置完成")
+	}).Debugf(color.GreenString("滚动更新策略设置完成"))
 }
 
 // GetCurrentImage 获取当前镜像
@@ -220,7 +221,7 @@ func (k *K8sClient) GetCurrentImage(namespace, deploymentName string) string {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetCurrentImage",
 			"took":   time.Since(startTime),
-		}).Warnf("获取Deployment失败: %v", err)
+		}).Warnf(color.RedString("获取Deployment失败: %v", err))
 		return "unknown"
 	}
 
@@ -231,7 +232,7 @@ func (k *K8sClient) GetCurrentImage(namespace, deploymentName string) string {
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "GetCurrentImage",
 				"took":   time.Since(startTime),
-			}).Debugf("获取镜像: %s", container.Image)
+			}).Debugf(color.GreenString("获取镜像: %s", container.Image))
 			return container.Image
 		}
 	}
@@ -255,7 +256,7 @@ func (k *K8sClient) WaitForDeploymentReady(namespace, deploymentName, newImageTa
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "WaitForDeploymentReady",
 				"took":   time.Since(startTime),
-			}).Errorf("获取Deployment失败: %v", err)
+			}).Errorf(color.RedString("获取Deployment失败: %v", err))
 			return false, err
 		}
 
@@ -276,7 +277,7 @@ func (k *K8sClient) WaitForDeploymentReady(namespace, deploymentName, newImageTa
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "WaitForDeploymentReady",
 				"took":   time.Since(startTime),
-			}).Errorf("检查Pod就绪失败: %v", err)
+			}).Errorf(color.RedString("检查Pod就绪失败: %v", err))
 			return false, err
 		}
 		return ready, nil
@@ -286,14 +287,14 @@ func (k *K8sClient) WaitForDeploymentReady(namespace, deploymentName, newImageTa
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "WaitForDeploymentReady",
 			"took":   time.Since(startTime),
-		}).Errorf("等待Deployment就绪失败: %v", err)
+		}).Errorf(color.RedString("等待Deployment就绪失败: %v", err))
 		return err
 	}
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "WaitForDeploymentReady",
 		"took":   time.Since(startTime),
-	}).Info("Deployment就绪")
+	}).Infof(color.GreenString("Deployment就绪"))
 	return nil
 }
 
@@ -310,7 +311,7 @@ func (k *K8sClient) checkNewVersionPodsReady(deploy *appsv1.Deployment, newImage
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "checkNewVersionPodsReady",
 			"took":   time.Since(startTime),
-		}).Errorf("获取Pod列表失败: %v", err)
+		}).Errorf(color.RedString("获取Pod列表失败: %v", err))
 		return false, err
 	}
 
@@ -333,7 +334,7 @@ func (k *K8sClient) checkNewVersionPodsReady(deploy *appsv1.Deployment, newImage
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "checkNewVersionPodsReady",
 		"took":   time.Since(startTime),
-	}).Debugf("新版本Pod就绪: %d/%d", newVersionReady, *deploy.Spec.Replicas)
+	}).Debugf(color.GreenString("新版本Pod就绪: %d/%d", newVersionReady, *deploy.Spec.Replicas))
 	return ready, nil
 }
 
@@ -347,7 +348,7 @@ func (k *K8sClient) RollbackDeployment(namespace, deploymentName, oldImage strin
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "RollbackDeployment",
 			"took":   time.Since(startTime),
-		}).Errorf("回滚镜像失败: %v", err)
+		}).Errorf(color.RedString("回滚镜像失败: %v", err))
 		return err
 	}
 
@@ -358,7 +359,7 @@ func (k *K8sClient) RollbackDeployment(namespace, deploymentName, oldImage strin
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "RollbackDeployment",
 			"took":   time.Since(startTime),
-		}).Errorf("等待回滚失败: %v", err)
+		}).Errorf(color.RedString("等待回滚失败: %v", err))
 		return err
 	}
 
@@ -366,7 +367,7 @@ func (k *K8sClient) RollbackDeployment(namespace, deploymentName, oldImage strin
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "RollbackDeployment",
 		"took":   time.Since(startTime),
-	}).Info("回滚成功")
+	}).Infof(color.GreenString("回滚成功"))
 	return nil
 }
 
@@ -381,7 +382,7 @@ func (k *K8sClient) WaitForRollbackReady(namespace, deploymentName string) error
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "WaitForRollbackReady",
 				"took":   time.Since(startTime),
-			}).Errorf("获取Deployment失败: %v", err)
+			}).Errorf(color.RedString("获取Deployment失败: %v", err))
 			return false, err
 		}
 		ready := deploy.Status.ReadyReplicas == *deploy.Spec.Replicas
@@ -397,14 +398,14 @@ func (k *K8sClient) WaitForRollbackReady(namespace, deploymentName string) error
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "WaitForRollbackReady",
 			"took":   time.Since(startTime),
-		}).Errorf("等待回滚就绪失败: %v", err)
+		}).Errorf(color.RedString("等待回滚就绪失败: %v", err))
 		return err
 	}
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "WaitForRollbackReady",
 		"took":   time.Since(startTime),
-	}).Info("回滚就绪")
+	}).Infof(color.GreenString("回滚就绪"))
 	return nil
 }
 
@@ -424,7 +425,7 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "DiscoverServicesFromNamespace",
 			"took":   time.Since(startTime),
-		}).Errorf("列出Deployment失败: %v", err)
+		}).Errorf(color.RedString("列出Deployment失败: %v", err))
 		return nil, fmt.Errorf("列出Deployment失败: %v", err)
 	}
 
@@ -444,7 +445,7 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "DiscoverServicesFromNamespace",
 				"took":   time.Since(startTime),
-			}).Warnf("获取服务 [%s] 版本失败", serviceName)
+			}).Warnf(color.RedString("获取服务 [%s] 版本失败", serviceName))
 			continue
 		}
 		services = append(services, fmt.Sprintf("%s:%s", serviceName, image))
@@ -454,7 +455,7 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "DiscoverServicesFromNamespace",
 		"took":   time.Since(startTime),
-	}).Infof("命名空间 [%s] 发现 %d 个服务", namespace, len(services))
+	}).Infof(color.GreenString("命名空间 [%s] 发现 %d 个服务", namespace, len(services)))
 	return services, nil
 }
 
@@ -469,9 +470,6 @@ func (k *K8sClient) BuildPushRequest(cfg *config.Config) (models.PushRequest, er
 
 	serviceSet := make(map[string]struct{})
 	envSet := make(map[string]struct{})
-	var deployments []models.DeployRequest
-	user := cfg.User.Default
-	status := "running"
 
 	// 步骤1：遍历环境映射
 	for env, namespace := range cfg.EnvMapping.Mappings {
@@ -488,33 +486,23 @@ func (k *K8sClient) BuildPushRequest(cfg *config.Config) (models.PushRequest, er
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "BuildPushRequest",
 				"took":   time.Since(startTime),
-			}).Errorf("环境 [%s] 服务发现失败: %v", env, err)
+			}).Errorf(color.RedString("环境 [%s] 服务发现失败: %v", env, err))
 			continue
 		}
 
 		// 步骤3：添加环境
 		envSet[env] = struct{}{}
 
-		// 步骤4：创建部署记录
+		// 步骤4：添加服务
 		for _, serviceWithVersion := range nsServices {
 			parts := strings.SplitN(serviceWithVersion, ":", 2)
 			serviceName := parts[0]
-			version := parts[1]
-
 			serviceSet[serviceName] = struct{}{}
-			deploy := models.DeployRequest{
-				Service:      serviceName,
-				Environments: []string{env},
-				Version:      version,
-				User:         user,
-				Status:       status,
-			}
-			deployments = append(deployments, deploy)
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "BuildPushRequest",
 				"took":   time.Since(startTime),
-			}).Debugf("添加部署: %s v%s [%s/%s]", serviceName, version, env, user)
+			}).Debugf("发现服务: %s", serviceName)
 		}
 	}
 
@@ -534,20 +522,19 @@ func (k *K8sClient) BuildPushRequest(cfg *config.Config) (models.PushRequest, er
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "BuildPushRequest",
 			"took":   time.Since(startTime),
-		}).Error("services 或 environments 不能为空")
+		}).Errorf(color.RedString("services 或 environments 不能为空"))
 		return models.PushRequest{}, fmt.Errorf("services 或 environments 不能为空")
 	}
 
-	// 步骤7：构建请求
+	// 步骤7：构建请求（去除Deployments）
 	pushReq := models.PushRequest{
 		Services:     services,
 		Environments: environments,
-		Deployments:  deployments,
 	}
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "BuildPushRequest",
 		"took":   time.Since(startTime),
-	}).Infof("构建完成: %d 服务, %d 环境, %d 部署", len(services), len(environments), len(deployments))
+	}).Infof(color.GreenString("构建完成: %d 服务, %d 环境", len(services), len(environments)))
 	return pushReq, nil
 }
