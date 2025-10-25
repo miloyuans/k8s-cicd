@@ -46,6 +46,7 @@ type confirmationChans struct {
 }
 
 // NewBotManager 创建多机器人管理器
+// 从配置中加载机器人列表，并初始化启用的机器人
 func NewBotManager(bots []config.TelegramBot) *BotManager {
 	startTime := time.Now()
 	// 步骤1：初始化管理器结构
@@ -100,6 +101,7 @@ func NewBotManager(bots []config.TelegramBot) *BotManager {
 }
 
 // SetGlobalAllowedUsers 设置全局允许用户
+// 从配置中设置全局允许的用户ID列表
 func (bm *BotManager) SetGlobalAllowedUsers(users []string) {
 	bm.globalAllowedUsers = users
 	logrus.WithFields(logrus.Fields{
@@ -109,6 +111,7 @@ func (bm *BotManager) SetGlobalAllowedUsers(users []string) {
 }
 
 // StartPolling 启动Telegram Updates轮询
+// 启动后台goroutine进行无限轮询更新
 func (bm *BotManager) StartPolling() {
 	startTime := time.Now()
 	// 步骤1：记录启动日志
@@ -137,6 +140,7 @@ func (bm *BotManager) StartPolling() {
 }
 
 // pollUpdates 轮询Telegram Updates
+// 通过HTTP GET请求获取Telegram更新
 func (bm *BotManager) pollUpdates() {
 	startTime := time.Now()
 	// 步骤1：获取默认机器人
@@ -209,6 +213,7 @@ func (bm *BotManager) pollUpdates() {
 }
 
 // processUpdateChan 处理更新通道
+// 处理Telegram回调查询，如确认或拒绝
 func (bm *BotManager) processUpdateChan() {
 	for update := range bm.updateChan {
 		if callback, ok := update["callback_query"].(map[string]interface{}); ok {
@@ -257,6 +262,7 @@ func (bm *BotManager) processUpdateChan() {
 }
 
 // answerCallbackQuery 应答回调查询
+// 向Telegram发送回调查询应答
 func (bm *BotManager) answerCallbackQuery(bot *TelegramBot, queryID string) {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery", bot.Token)
 	payload := map[string]string{"callback_query_id": queryID}
@@ -266,6 +272,7 @@ func (bm *BotManager) answerCallbackQuery(bot *TelegramBot, queryID string) {
 }
 
 // SendConfirmation 发送确认弹窗
+// 发送Telegram确认弹窗，并存储通道等待用户响应
 func (bm *BotManager) SendConfirmation(service, env, version, user string, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) error {
 	startTime := time.Now()
 	// 步骤1：根据服务选择机器人
@@ -335,6 +342,7 @@ func (bm *BotManager) SendConfirmation(service, env, version, user string, confi
 }
 
 // getDefaultBot 获取默认机器人
+// 返回第一个机器人作为默认
 func (bm *BotManager) getDefaultBot() *TelegramBot {
 	for _, bot := range bm.Bots {
 		return bot
@@ -343,6 +351,7 @@ func (bm *BotManager) getDefaultBot() *TelegramBot {
 }
 
 // SendNotification 发送部署通知
+// 发送部署结果通知到Telegram群组
 func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
 	startTime := time.Now()
 	// 步骤1：获取匹配的机器人
@@ -400,6 +409,7 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 }
 
 // generateMarkdownMessage 生成美观的Markdown部署通知
+// 生成格式化的Markdown消息用于通知
 func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
 	startTime := time.Now()
 	// 步骤1：初始化字符串构建器
@@ -462,6 +472,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 }
 
 // escapeMarkdownV2 转义MarkdownV2特殊字符
+// 转义Telegram MarkdownV2格式中的特殊字符
 func escapeMarkdownV2(text string) string {
 	reserved := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	for _, char := range reserved {
@@ -471,6 +482,7 @@ func escapeMarkdownV2(text string) string {
 }
 
 // sendMessage 发送消息
+// 发送Telegram消息，支持可选键盘
 func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text string, replyMarkup interface{}) (map[string]interface{}, error) {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token)
 	payload := map[string]interface{}{
@@ -503,6 +515,7 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text string, replyMa
 }
 
 // getBotForService 根据服务获取机器人
+// 根据服务名称匹配机器人配置，支持正则或前缀匹配
 func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 	for _, bot := range bm.Bots {
 		for prefix, services := range bot.Services {
@@ -519,10 +532,19 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 			}
 		}
 	}
+	// 如果未匹配，返回默认机器人
+	defaultBot := bm.getDefaultBot()
+	if defaultBot != nil {
+		logrus.WithFields(logrus.Fields{
+			"time": time.Now().Format("2006-01-02 15:04:05"),
+		}).Warnf(color.YellowString("服务 %s 未匹配特定机器人，使用默认机器人 %s", service, defaultBot.Name))
+		return defaultBot, nil
+	}
 	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
 }
 
 // Stop 停止Telegram轮询
+// 关闭轮询通道并停止更新处理
 func (bm *BotManager) Stop() {
 	startTime := time.Now()
 	// 步骤1：关闭停止通道

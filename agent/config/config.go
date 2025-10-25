@@ -99,6 +99,7 @@ type Config struct {
 }
 
 // LoadConfig 从YAML文件加载配置
+// 读取配置文件并解析YAML
 func LoadConfig(filePath string) (*Config, error) {
 	startTime := time.Now()
 	// 步骤1：读取配置文件
@@ -148,6 +149,7 @@ func LoadConfig(filePath string) (*Config, error) {
 }
 
 // setDefaults 设置配置默认值
+// 为配置项设置默认值
 func (c *Config) setDefaults() {
 	// 步骤1：设置API默认值
 	if c.API.PushInterval == 0 {
@@ -236,6 +238,7 @@ func (c *Config) setDefaults() {
 }
 
 // mergeEnvVars 合并环境变量
+// 从环境变量中合并配置值
 func (c *Config) mergeEnvVars() {
 	// 步骤1：合并Telegram环境变量
 	if token := os.Getenv("TELEGRAM_TOKEN"); token != "" {
