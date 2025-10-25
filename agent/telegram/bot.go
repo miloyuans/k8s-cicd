@@ -201,7 +201,7 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 	}
 
 	// 步骤3：构造确认消息并转义
-	message := fmt.Sprintf("确认部署 %s 到 %s? (用户: %s, 版本: %s)",
+	message := fmt.Sprintf("*确认部署* `%s` *到* `%s`? *(用户:* `%s`*, 版本:* `%s`*)*",
 		escapeMarkdownV2(service),
 		escapeMarkdownV2(env),
 		escapeMarkdownV2(user),
@@ -209,13 +209,29 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 	keyboard := map[string]interface{}{
 		"inline_keyboard": [][]map[string]string{
 			{
-				{"text": "确认", "callback_data": fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, user, version)},
-				{"text": "拒绝", "callback_data": fmt.Sprintf("reject:%s:%s:%s:%s", service, env, user, version)},
+				{"text": "确认", "callback_data": fmt.Sprintf("confirm:%s:%s:%s:%s",
+					escapeMarkdownV2(service),
+					escapeMarkdownV2(env),
+					escapeMarkdownV2(user),
+					escapeMarkdownV2(version))},
+				{"text": "拒绝", "callback_data": fmt.Sprintf("reject:%s:%s:%s:%s",
+					escapeMarkdownV2(service),
+					escapeMarkdownV2(env),
+					escapeMarkdownV2(user),
+					escapeMarkdownV2(version))},
 			},
 		},
 	}
 
-	// 步骤4：发送确认消息
+	// 步骤4：发送确认消息并记录发送的文本
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "SendConfirmation",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"message": message,
+		},
+	}).Debugf(color.GreenString("准备发送确认消息"))
 	respMessageID, err := bm.sendMessage(bot, bot.GroupID, message, keyboard)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -615,7 +631,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 	if success {
 		message.WriteString("✅ *部署成功*")
 	} else {
-		message.WriteString("❌ *部署失败-已回滚*")
+		message.WriteString("❌ *部署失败\\-已回滚*")
 	}
 	message.WriteString("\n")
 
@@ -630,8 +646,8 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 	}
 
 	// 步骤7：添加签名
-	message.WriteString("---\n")
-	message.WriteString("*由 K8s-CICD Agent 自动发送*")
+	message.WriteString("\\-\\-\\-\n")
+	message.WriteString("*由 K8s\\-CICD Agent 自动发送*")
 
 	// 步骤8：返回生成的字符串
 	logrus.WithFields(logrus.Fields{
