@@ -158,6 +158,7 @@ func (a *Agent) performPushDiscovery() {
 			"method": "performPushDiscovery",
 			"took":   time.Since(startTime),
 		}).Infof(color.GreenString("数据无更新，忽略推送"))
+		time.Sleep(5 * time.Minute) // 静默5分钟
 		return
 	}
 

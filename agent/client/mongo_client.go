@@ -310,7 +310,7 @@ func (m *MongoClient) CleanCompletedTasks() error {
 			continue
 		}
 
-		// 如果状态为completed/rejected/failed，删除（状态已包含在任务中）
+		// 如果状态为confirmed/rejected/failed，删除（状态已包含在任务中）
 		if task.ConfirmationStatus == "confirmed" || task.ConfirmationStatus == "rejected" || task.ConfirmationStatus == "failed" {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -441,5 +441,63 @@ func (m *MongoClient) UpdateConfirmationStatus(service, version, environment, us
 			"confirmation_status": confirmationStatus,
 		},
 	}).Infof("确认状态更新成功: %s", confirmationStatus)
+	return nil
+}
+
+// GetLastPushRequest 获取上一次推送的PushRequest
+func (m *MongoClient) GetLastPushRequest() (models.PushRequest, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection("last_push_request")
+
+	var result models.PushRequest
+	err := collection.FindOne(ctx, bson.M{}).Decode(&result)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "GetLastPushRequest",
+				"took":   time.Since(startTime),
+			}).Info("未找到上一次推送数据")
+			return models.PushRequest{}, nil // 返回空PushRequest，表示没有历史数据
+		}
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetLastPushRequest",
+			"took":   time.Since(startTime),
+		}).Errorf("获取上一次推送数据失败: %v", err)
+		return models.PushRequest{}, err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetLastPushRequest",
+		"took":   time.Since(startTime),
+	}).Info("成功获取上一次推送数据")
+	return result, nil
+}
+
+// StoreLastPushRequest 存储当前的PushRequest
+func (m *MongoClient) StoreLastPushRequest(req models.PushRequest) error {
+	startTime := time.Now()
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection("last_push_request")
+
+	// 使用固定的_id以确保只有一个文档
+	_, err := collection.ReplaceOne(ctx, bson.M{"_id": "last_push"}, req, options.Replace().SetUpsert(true))
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "StoreLastPushRequest",
+			"took":   time.Since(startTime),
+		}).Errorf("存储推送数据失败: %v", err)
+		return err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "StoreLastPushRequest",
+		"took":   time.Since(startTime),
+	}).Info("推送数据存储成功")
 	return nil
 }
