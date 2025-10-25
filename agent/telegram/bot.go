@@ -40,6 +40,7 @@ type BotManager struct {
 	stopChan           chan struct{}           // 停止信号通道
 	globalAllowedUsers []string            // 全局允许用户
 	confirmationChans  sync.Map            // 存储确认通道: key -> confirmationChans
+	wg                 sync.WaitGroup      // 用于等待轮询goroutine退出
 }
 
 type confirmationChans struct {
@@ -123,7 +124,9 @@ func (bm *BotManager) StartPolling() {
 		"took":   time.Since(startTime),
 	}).Info(color.GreenString("🔄 启动Telegram Updates轮询"))
 	// 步骤2：启动goroutine进行无限轮询
+	bm.wg.Add(1)
 	go func() {
+		defer bm.wg.Done()
 		for {
 			select {
 			case <-bm.stopChan:
@@ -207,13 +210,7 @@ func (bm *BotManager) pollUpdates() {
 	updates, _ := result["result"].([]interface{})
 	for _, u := range updates {
 		update, _ := u.(map[string]interface{})
-		select {
-		case bm.updateChan <- update:
-			// 发送成功
-		default:
-			// 通道关闭，退出
-			return
-		}
+		bm.updateChan <- update
 		if updateID, _ := update["update_id"].(float64); updateID >= float64(bm.offset) {
 			bm.offset = int64(updateID) + 1
 		}
@@ -573,7 +570,7 @@ func (bm *BotManager) Stop() {
 	// 步骤1：关闭停止通道
 	close(bm.stopChan)
 	// 等待轮询goroutine退出
-	time.Sleep(1 * time.Second) // 给予时间退出
+	bm.wg.Wait()
 	close(bm.updateChan)
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),

@@ -359,6 +359,21 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					continue
 				}
 
+				// 获取命名空间
+				namespace, ok := a.envMapper.GetNamespace(env)
+				if !ok {
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "processQueryTasks",
+						"took":   time.Since(startTime),
+						"data": logrus.Fields{
+							"env": env,
+						},
+					}).Errorf(color.RedString("获取命名空间失败: %v", err))
+					continue
+				}
+				t.Namespace = namespace
+
 				// 设置初始 ConfirmationStatus 为 "pending"
 				t.ConfirmationStatus = "pending"
 
