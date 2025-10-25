@@ -379,3 +379,63 @@ func (m *MongoClient) CheckExistingTask(service, version, environment string) (b
 	}
 	return count > 0, nil
 }
+
+// UpdateTaskStatus 更新任务状态
+func (m *MongoClient) UpdateTaskStatus(service, version, environment, user, status string) error {
+	startTime := time.Now()
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
+	_, err := collection.UpdateOne(ctx, bson.M{
+		"service":     service,
+		"version":     version,
+		"environment": environment,
+		"user":        user,
+	}, bson.M{"$set": bson.M{"status": status}})
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "UpdateTaskStatus",
+			"took":   time.Since(startTime),
+		}).Errorf("更新任务状态失败: %v", err)
+		return err
+	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "UpdateTaskStatus",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"status": status,
+		},
+	}).Infof("任务状态更新成功: %s", status)
+	return nil
+}
+
+// UpdateConfirmationStatus 更新确认状态
+func (m *MongoClient) UpdateConfirmationStatus(service, version, environment, user, confirmationStatus string) error {
+	startTime := time.Now()
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
+	_, err := collection.UpdateOne(ctx, bson.M{
+		"service":     service,
+		"version":     version,
+		"environment": environment,
+		"user":        user,
+	}, bson.M{"$set": bson.M{"confirmation_status": confirmationStatus}})
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "UpdateConfirmationStatus",
+			"took":   time.Since(startTime),
+		}).Errorf("更新确认状态失败: %v", err)
+		return err
+	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "UpdateConfirmationStatus",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"confirmation_status": confirmationStatus,
+		},
+	}).Infof("确认状态更新成功: %s", confirmationStatus)
+	return nil
+}

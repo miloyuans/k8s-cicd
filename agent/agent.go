@@ -276,7 +276,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					err := a.botMgr.SendConfirmation(t.Service, env, t.Version, t.User, confirmChan, rejectChan)
 					if err != nil {
 						// 要求2: 发送失败，设置"failed"
-						a.mongo.UpdateTaskStatus(t.Service, t.Version, env, t.User, "failed") // 更新主status为failed，或单独更新ConfirmationStatus
+						a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed")
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "processQueryTasks",
@@ -288,7 +288,6 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						continue
 					}
 					// 发送成功，更新状态"sent"
-					// 注意：假设有UpdateConfirmationStatus方法，需要实现
 					err = a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "sent")
 					if err != nil {
 						logrus.WithFields(logrus.Fields{
