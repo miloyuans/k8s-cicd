@@ -1,552 +1,560 @@
-// 文件: internal/telegram/bot.go
+// bot.go
 package telegram
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"k8s-cicd/internal/storage"
+	"io"
+	"net/http"
+	"regexp"
 	"strings"
+	"sync"
+	"time"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"k8s-cicd/agent/config"
+	"k8s-cicd/agent/models"
+
+	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
 
-// Bot 封装 Telegram 机器人功能
-type Bot struct {
-	bot     *tgbotapi.BotAPI
-	storage *storage.RedisStorage
-	logger  *logrus.Logger
-	groupID int64 // Telegram 群组 ID
+// TelegramBot 单个Telegram机器人配置
+// 用于存储单个机器人的配置信息，从配置文件加载
+type TelegramBot struct {
+	Name         string              // 机器人名称
+	Token        string              // Bot Token
+	GroupID      string              // 群组ID
+	Services     map[string][]string // 服务匹配规则: prefix -> 服务列表
+	RegexMatch   bool                // 是否使用正则匹配
+	IsEnabled    bool                // 是否启用该机器人
+	AllowedUsers []string            // 机器人特定的允许用户
 }
 
-// UserState 保存用户交互状态
-type UserState struct {
-	Step         int      // 当前交互步骤
-	Service      string   // 选择的服务
-	Environments []string // 选择的环境
-	Version      string   // 输入的版本号
-	ChatID       int64    // 用户聊天 ID（群组 ID）
-	UserID       int64    // 用户 ID（Telegram 用户 ID）
-	Messages     []int    // 交互消息 ID 列表
-	LastMsgID    int      // 最后用户消息 ID（用于回复）
+// BotManager 多机器人管理器
+// 管理多个Telegram机器人，实现匹配选择和消息处理
+type BotManager struct {
+	Bots               map[string]*TelegramBot // 机器人映射
+	offset             int64                   // Telegram updates offset
+	updateChan         chan map[string]interface{} // 更新通道
+	stopChan           chan struct{}           // 停止信号通道
+	globalAllowedUsers []string            // 全局允许用户
+	confirmationChans  sync.Map            // 存储确认通道: key -> confirmationChans
 }
 
-// NewBot 初始化 Telegram 机器人
-func NewBot(token string, groupID int64) (*Bot, error) {
-	bot, err := tgbotapi.NewBotAPI(token)
-	if err != nil {
-		return nil, fmt.Errorf("初始化 Telegram 机器人失败: %v", err)
+type confirmationChans struct {
+	confirmChan chan models.DeployRequest
+	rejectChan  chan models.StatusRequest
+}
+
+// NewBotManager 创建多机器人管理器
+// 从配置中加载机器人列表，并初始化启用的机器人
+func NewBotManager(bots []config.TelegramBot) *BotManager {
+	startTime := time.Now()
+	// 步骤1：初始化管理器结构
+	m := &BotManager{
+		Bots:       make(map[string]*TelegramBot),
+		updateChan: make(chan map[string]interface{}, 100),
+		stopChan:   make(chan struct{}),
+		globalAllowedUsers: make([]string, 0), // 将在调用时设置
 	}
 
-	redisStorage, err := storage.NewRedisStorage("localhost:6379")
-	if err != nil {
-		return nil, fmt.Errorf("初始化 Redis 失败: %v", err)
+	// 步骤2：遍历配置中的机器人，初始化启用的机器人
+	for i := range bots {
+		if bots[i].IsEnabled {
+			bot := &TelegramBot{
+				Name:         bots[i].Name,
+				Token:        bots[i].Token,
+				GroupID:      bots[i].GroupID,
+				Services:     bots[i].Services,
+				RegexMatch:   bots[i].RegexMatch,
+				IsEnabled:    true,
+				AllowedUsers: bots[i].AllowedUsers, // 从配置中获取机器人特定的允许用户
+			}
+			m.Bots[bot.Name] = bot
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "NewBotManager",
+				"took":   time.Since(startTime),
+			}).Infof(color.GreenString("✅ Telegram机器人 [%s] 已启用，允许用户: %v", bot.Name, bot.AllowedUsers))
+		}
 	}
 
-	logger := logrus.New()
-	return &Bot{
-		bot:     bot,
-		storage: redisStorage,
-		logger:  logger,
-		groupID: groupID,
-	}, nil
+	// 步骤3：检查是否有启用的机器人
+	if len(m.Bots) == 0 {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewBotManager",
+			"took":   time.Since(startTime),
+		}).Warn("⚠️ 未启用任何Telegram机器人")
+	}
+
+	// 步骤4：返回管理器实例
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewBotManager",
+		"took":   time.Since(startTime),
+	}).Info(color.GreenString("BotManager创建成功"))
+
+	// 启动更新处理
+	go m.processUpdateChan()
+
+	return m
 }
 
-// Start 启动 Telegram 机器人，处理消息和回调
-func (b *Bot) Start() {
-	b.logger.Info("启动 Telegram 机器人")
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
+// SetGlobalAllowedUsers 设置全局允许用户
+// 从配置中设置全局允许的用户ID列表
+func (bm *BotManager) SetGlobalAllowedUsers(users []string) {
+	bm.globalAllowedUsers = users
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "SetGlobalAllowedUsers",
+	}).Infof(color.GreenString("全局允许用户设置为: %v", users))
+}
 
-	updates := b.bot.GetUpdatesChan(u)
-	for update := range updates {
-		if update.Message != nil && update.Message.Chat.ID == b.groupID {
-			b.handleMessage(update.Message)
-		} else if update.CallbackQuery != nil && update.CallbackQuery.Message.Chat.ID == b.groupID {
-			b.handleCallback(update.CallbackQuery)
+// StartPolling 启动Telegram Updates轮询
+// 启动后台goroutine进行无限轮询更新
+func (bm *BotManager) StartPolling() {
+	startTime := time.Now()
+	// 步骤1：记录启动日志
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "StartPolling",
+		"took":   time.Since(startTime),
+	}).Info(color.GreenString("🔄 启动Telegram Updates轮询"))
+	// 步骤2：启动goroutine进行无限轮询
+	go func() {
+		for {
+			select {
+			case <-bm.stopChan:
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "StartPolling",
+					"took":   time.Since(startTime),
+				}).Info(color.GreenString("🛑 Telegram轮询已停止"))
+				return
+			default:
+				bm.pollUpdates()
+				time.Sleep(1 * time.Second) // 防止频繁轮询导致冲突
+			}
+		}
+	}()
+}
+
+// pollUpdates 轮询Telegram Updates
+// 通过HTTP GET请求获取Telegram更新
+func (bm *BotManager) pollUpdates() {
+	startTime := time.Now()
+	// 步骤1：获取默认机器人
+	bot := bm.getDefaultBot()
+	if bot == nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "pollUpdates",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("❌ 无可用机器人，无法轮询"))
+		return
+	}
+
+	// 步骤2：构建getUpdates请求URL
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=10",
+		bot.Token, bm.offset)
+
+	// 步骤3：发送HTTP GET请求
+	resp, err := http.Get(url)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "pollUpdates",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("轮询失败: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	// 步骤4：读取响应
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "pollUpdates",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("读取响应失败: %v", err))
+		return
+	}
+
+	// 步骤5：解析JSON
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "pollUpdates",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("JSON解析失败: %v", err))
+		return
+	}
+
+	// 步骤6：处理更新
+	if ok, _ := result["ok"].(bool); !ok {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "pollUpdates",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("Telegram API错误: %v", result["description"]))
+		return
+	}
+
+	updates, _ := result["result"].([]interface{})
+	for _, u := range updates {
+		update, _ := u.(map[string]interface{})
+		bm.updateChan <- update
+		if updateID, _ := update["update_id"].(float64); updateID >= float64(bm.offset) {
+			bm.offset = int64(updateID) + 1
 		}
 	}
 }
 
-// getServices 从 Redis 获取服务列表
-func (b *Bot) getServices() ([]string, error) {
-	data, err := b.storage.Get("services")
-	if err != nil || data == "" {
-		b.logger.Warn("从 Redis 获取服务列表失败，无数据")
-		return nil, fmt.Errorf("服务列表未初始化，请等待外部服务推送")
+// processUpdateChan 处理更新通道
+// 处理Telegram回调查询，如确认或拒绝
+func (bm *BotManager) processUpdateChan() {
+	for update := range bm.updateChan {
+		if callback, ok := update["callback_query"].(map[string]interface{}); ok {
+			bot := bm.getDefaultBot() // 假设默认机器人，或根据context
+			data, _ := callback["data"].(string)
+			if strings.HasPrefix(data, "confirm:") {
+				key := data[8:]
+				if val, ok := bm.confirmationChans.LoadAndDelete(key); ok {
+					chans := val.(confirmationChans)
+					parts := strings.Split(key, ":")
+					if len(parts) == 4 {
+						service, env, version, user := parts[0], parts[1], parts[2], parts[3]
+						chans.confirmChan <- models.DeployRequest{
+							Service:      service,
+							Environments: []string{env},
+							Version:      version,
+							User:         user,
+						}
+						close(chans.confirmChan)
+						close(chans.rejectChan)
+					}
+				}
+			} else if strings.HasPrefix(data, "reject:") {
+				key := data[7:]
+				if val, ok := bm.confirmationChans.LoadAndDelete(key); ok {
+					chans := val.(confirmationChans)
+					parts := strings.Split(key, ":")
+					if len(parts) == 4 {
+						service, env, version, user := parts[0], parts[1], parts[2], parts[3]
+						chans.rejectChan <- models.StatusRequest{
+							Service:     service,
+							Environment: env,
+							Version:     version,
+							User:        user,
+						}
+						close(chans.confirmChan)
+						close(chans.rejectChan)
+					}
+				}
+			}
+			// 应答回调查询
+			queryID, _ := callback["id"].(string)
+			bm.answerCallbackQuery(bot, queryID)
+		}
 	}
-	var services []string
-	if err := json.Unmarshal([]byte(data), &services); err != nil {
-		b.logger.Errorf("解析服务列表失败: %v", err)
+}
+
+// answerCallbackQuery 应答回调查询
+// 向Telegram发送回调查询应答
+func (bm *BotManager) answerCallbackQuery(bot *TelegramBot, queryID string) {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery", bot.Token)
+	payload := map[string]string{"callback_query_id": queryID}
+	jsonPayload, _ := json.Marshal(payload)
+	http.Post(url, "application/json", bytes.NewBuffer(jsonPayload))
+	// 忽略错误
+}
+
+// SendConfirmation 发送确认弹窗
+// 发送部署确认弹窗到Telegram群组
+func (bm *BotManager) SendConfirmation(service, env, version, user string, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) error {
+	startTime := time.Now()
+	// 步骤1：根据服务选择机器人
+	bot, err := bm.getBotForService(service)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendConfirmation",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("选择机器人失败: %v", err))
+		return err
+	}
+
+	// 步骤2：构建@用户列表
+	var mentions strings.Builder
+	for _, uid := range bm.globalAllowedUsers {
+		mentions.WriteString("@")
+		mentions.WriteString(uid)
+		mentions.WriteString(" ")
+	}
+
+	// 步骤3：构建确认消息文本，包括@用户，并转义
+	message := fmt.Sprintf("*🛡️ 部署确认*\n\n"+
+		"**服务**: `%s`\n"+
+		"**环境**: `%s`\n"+
+		"**版本**: `%s`\n"+
+		"**用户**: `%s`\n\n"+
+		"*请选择操作*\n\n"+
+		"通知: %s", escapeMarkdownV2(service), escapeMarkdownV2(env), escapeMarkdownV2(version), escapeMarkdownV2(user), mentions.String())
+
+	// 步骤4：构建内联键盘
+	key := fmt.Sprintf("%s:%s:%s:%s", service, env, version, user)
+	callbackDataConfirm := "confirm:" + key
+	callbackDataReject := "reject:" + key
+
+	keyboard := map[string]interface{}{
+		"inline_keyboard": [][]map[string]string{
+			{
+				{"text": "✅ 确认部署", "callback_data": callbackDataConfirm},
+				{"text": "❌ 拒绝部署", "callback_data": callbackDataReject},
+			},
+		},
+	}
+
+	// 存储通道
+	bm.confirmationChans.Store(key, confirmationChans{confirmChan: confirmChan, rejectChan: rejectChan})
+
+	// 步骤5：发送带键盘的消息
+	_, err = bm.sendMessage(bot, bot.GroupID, message, keyboard)
+	if err != nil {
+		bm.confirmationChans.Delete(key) // 清理
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendConfirmation",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("发送弹窗失败: %v", err))
+		return err
+	}
+
+	// 步骤6：记录发送成功日志
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "SendConfirmation",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("确认弹窗发送成功: %s v%s [%s]", service, version, env))
+	return nil
+}
+
+// getDefaultBot 获取默认机器人
+// 返回第一个机器人作为默认
+func (bm *BotManager) getDefaultBot() *TelegramBot {
+	for _, bot := range bm.Bots {
+		return bot
+	}
+	return nil
+}
+
+// SendNotification 发送部署通知
+// 发送部署结果通知到Telegram群组
+func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
+	startTime := time.Now()
+	// 步骤1：获取匹配的机器人
+	bot, err := bm.getBotForService(service)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendNotification",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("发送通知失败: %v", err))
+		return err
+	}
+
+	// 步骤2：验证GroupID
+	if bot.GroupID == "" {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendNotification",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("发送通知失败: 机器人 [%s] 的GroupID为空", bot.Name))
+		return fmt.Errorf("GroupID为空")
+	}
+
+	// 步骤3：生成通知消息
+	message := bm.generateMarkdownMessage(service, env, user, oldVersion, newVersion, success)
+
+	// 步骤4：发送通知
+	_, err = bm.sendMessage(bot, bot.GroupID, message, nil)
+	if err != nil {
+		// 回退到纯文本
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendNotification",
+			"took":   time.Since(startTime),
+		}).Warnf(color.YellowString("MarkdownV2通知失败，尝试纯文本: %v", err))
+		message = fmt.Sprintf("部署通知\n服务: %s\n环境: %s\n操作人: %s\n旧版本: %s\n新版本: %s\n状态: %s\n时间: %s",
+			service, env, user, oldVersion, newVersion, map[bool]string{true: "成功", false: "失败"}[success], time.Now().Format("2006-01-02 15:04:05"))
+		_, err = bm.sendMessage(bot, bot.GroupID, message, nil)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "SendNotification",
+				"took":   time.Since(startTime),
+			}).Errorf(color.RedString("发送通知失败: %v", err))
+			return err
+		}
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "SendNotification",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("通知发送成功: %s v%s [%s]", service, newVersion, env))
+	return nil
+}
+
+// generateMarkdownMessage 生成美观的Markdown部署通知
+// 生成格式化的Markdown消息用于通知
+func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
+	startTime := time.Now()
+	// 步骤1：初始化字符串构建器
+	var message strings.Builder
+
+	// 步骤2：构建标题
+	message.WriteString("**部署通知**\n\n")
+
+	// 步骤3：添加详细信息
+	message.WriteString("**服务**: `")
+	message.WriteString(escapeMarkdownV2(service))
+	message.WriteString("`\n")
+
+	message.WriteString("**环境**: `")
+	message.WriteString(escapeMarkdownV2(env))
+	message.WriteString("`\n")
+
+	message.WriteString("**操作人**: `")
+	message.WriteString(escapeMarkdownV2(user))
+	message.WriteString("`\n")
+
+	message.WriteString("**旧版本**: `")
+	message.WriteString(escapeMarkdownV2(oldVersion))
+	message.WriteString("`\n")
+
+	message.WriteString("**新版本**: `")
+	message.WriteString(escapeMarkdownV2(newVersion))
+	message.WriteString("`\n")
+
+	// 步骤4：添加状态
+	message.WriteString("**状态**: ")
+	if success {
+		message.WriteString("✅ *部署成功*")
+	} else {
+		message.WriteString("❌ *部署失败*")
+	}
+	message.WriteString("\n")
+
+	// 步骤5：添加时间
+	message.WriteString("**时间**: `")
+	message.WriteString(escapeMarkdownV2(time.Now().Format("2006-01-02 15:04:05")))
+	message.WriteString("`\n\n")
+
+	// 步骤6：如果失败，添加回滚信息
+	if !success {
+		message.WriteString("*自动回滚已完成*\n\n")
+	}
+
+	// 步骤7：添加签名
+	message.WriteString("---\n")
+	message.WriteString("*由 K8s\\-CICD Agent 自动发送*")
+
+	// 步骤8：返回生成的字符串
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "generateMarkdownMessage",
+		"took":   time.Since(startTime),
+	}).Debugf(color.GreenString("生成Markdown消息成功"))
+	return message.String()
+}
+
+// escapeMarkdownV2 转义MarkdownV2特殊字符
+// 转义Telegram MarkdownV2格式中的特殊字符
+func escapeMarkdownV2(text string) string {
+	reserved := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
+	for _, char := range reserved {
+		text = strings.ReplaceAll(text, char, "\\"+char)
+	}
+	return text
+}
+
+// sendMessage 发送消息
+// 发送Telegram消息，支持可选键盘
+func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text string, replyMarkup interface{}) (map[string]interface{}, error) {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token)
+	payload := map[string]interface{}{
+		"chat_id":    chatID,
+		"text":       text,
+		"parse_mode": "MarkdownV2",
+	}
+	if replyMarkup != nil {
+		payload["reply_markup"] = replyMarkup
+	}
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
 		return nil, err
 	}
-	return services, nil
-}
-
-// getEnvironments 从 Redis 获取环境列表
-func (b *Bot) getEnvironments() ([]string, error) {
-	data, err := b.storage.Get("environments")
-	if err != nil || data == "" {
-		b.logger.Warn("从 Redis 获取环境列表失败，无数据")
-		return nil, fmt.Errorf("环境列表未初始化，请等待外部服务推送")
-	}
-	var envs []string
-	if err := json.Unmarshal([]byte(data), &envs); err != nil {
-		b.logger.Errorf("解析环境列表失败: %v", err)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonPayload))
+	if err != nil {
 		return nil, err
 	}
-	return envs, nil
-}
-
-// handleMessage 处理用户文本输入
-func (b *Bot) handleMessage(msg *tgbotapi.Message) {
-	chatID := msg.Chat.ID
-	userID := msg.From.ID
-	b.logger.Infof("收到用户 %d 的消息: %s", userID, msg.Text)
-
-	// 检查是否输入 "ai" 触发交互
-	if strings.ToLower(msg.Text) == "ai" {
-		b.logger.Infof("用户 %d 触发交互，输入: %s", userID, msg.Text)
-		b.startInteraction(chatID, userID)
-		return
-	}
-
-	// 获取用户状态，仅处理交互相关消息
-	state, err := b.getState(fmt.Sprintf("user:%d:%d", chatID, userID))
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		b.logger.Warnf("用户 %d 无交互状态，忽略消息: %s", userID, msg.Text)
-		return
+		return nil, err
 	}
-
-	switch state.Step {
-	case 3: // 输入版本号
-		b.logger.Infof("用户 %d 输入版本号: %s", userID, msg.Text)
-		if b.isVersionUnique(state.Service, msg.Text) {
-			state.Version = msg.Text
-			state.Step = 4
-			state.LastMsgID = msg.MessageID // 记录版本输入消息 ID
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-			b.showConfirmation(chatID, &state)
-		} else {
-			b.logger.Warnf("用户 %d 输入的版本号 %s 在服务 %s 下已存在", userID, msg.Text, state.Service)
-			b.SendMessage(chatID, fmt.Sprintf("此服务 %s 下版本号 %s 已存在，请输入新版本号：", state.Service, msg.Text), nil)
-		}
-	default:
-		b.logger.Warnf("用户 %d 的消息 %s 非交互相关，忽略", userID, msg.Text)
+	var result map[string]interface{}
+	json.Unmarshal(body, &result)
+	if ok, _ := result["ok"].(bool); !ok {
+		return nil, fmt.Errorf("Telegram API错误: %v", result["description"])
 	}
+	return result, nil
 }
 
-// startInteraction 开始交互流程，显示服务选择弹窗
-func (b *Bot) startInteraction(chatID, userID int64) {
-	b.logger.Infof("用户 %d (ChatID: %d) 开始交互流程", userID, chatID)
-	// 初始化用户状态
-	state := UserState{
-		Step:   1,
-		ChatID: chatID,
-		UserID: userID,
-	}
-	b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-
-	// 服务选择弹窗
-	b.showServiceSelection(chatID, &state)
-}
-
-// showServiceSelection 显示服务选择弹窗
-func (b *Bot) showServiceSelection(chatID int64, state *UserState) {
-	services, err := b.getServices()
-	if err != nil {
-		b.logger.Warnf("用户 %d 获取服务列表失败: %v", state.UserID, err)
-		b.SendMessage(chatID, err.Error(), nil)
-		b.deleteState(fmt.Sprintf("user:%d:%d", chatID, state.UserID))
-		return
-	}
-
-	cols := 3
-	if len(services) < cols {
-		cols = len(services)
-	}
-	var buttons [][]tgbotapi.InlineKeyboardButton
-	var row []tgbotapi.InlineKeyboardButton
-	for i, svc := range services {
-		displayText := svc
-		if state.Service == svc {
-			displayText = fmt.Sprintf("<b>✅ %s</b>", svc)
-		}
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, fmt.Sprintf("service:%s", svc)))
-		if len(row) == cols || i == len(services)-1 {
-			buttons = append(buttons, row)
-			row = []tgbotapi.InlineKeyboardButton{}
-		}
-	}
-	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_service"),
-		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
-	})
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msgText := fmt.Sprintf("请选择服务（单选）:\n当前选中: %s", state.Service)
-	var sentMsg tgbotapi.Message
-	if len(state.Messages) > 0 {
-		lastMsgID := state.Messages[len(state.Messages)-1]
-		editMsg := tgbotapi.NewEditMessageText(chatID, lastMsgID, msgText)
-		editMsg.ReplyMarkup = &keyboard
-		editMsg.ParseMode = "HTML"
-		var err error
-		sentMsg, err = b.bot.Send(editMsg)
-		if err != nil {
-			b.logger.Errorf("编辑服务选择消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	} else {
-		msg := tgbotapi.NewMessage(chatID, msgText)
-		msg.ReplyMarkup = keyboard
-		msg.ParseMode = "HTML"
-		var err error
-		sentMsg, err = b.bot.Send(msg)
-		if err != nil {
-			b.logger.Errorf("发送服务选择消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	}
-	b.logger.Infof("用户 %d 显示服务选择弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
-}
-
-// showEnvironmentSelection 显示环境选择弹窗
-func (b *Bot) showEnvironmentSelection(chatID int64, state *UserState) {
-	environments, err := b.getEnvironments()
-	if err != nil {
-		b.logger.Warnf("用户 %d 获取环境列表失败: %v", state.UserID, err)
-		b.SendMessage(chatID, err.Error(), nil)
-		b.deleteState(fmt.Sprintf("user:%d:%d", chatID, state.UserID))
-		return
-	}
-
-	cols := 3
-	if len(environments) < cols {
-		cols = len(environments)
-	}
-	var buttons [][]tgbotapi.InlineKeyboardButton
-	var row []tgbotapi.InlineKeyboardButton
-	for i, env := range environments {
-		displayText := env
-		if contains(state.Environments, env) {
-			displayText = fmt.Sprintf("<b>✅ %s</b>", env)
-		}
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(displayText, fmt.Sprintf("env:%s", env)))
-		if len(row) == cols || i == len(environments)-1 {
-			buttons = append(buttons, row)
-			row = []tgbotapi.InlineKeyboardButton{}
-		}
-	}
-	buttons = append(buttons, []tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardButtonData("下一步 / Next", "next_env"),
-		tgbotapi.NewInlineKeyboardButtonData("取消 / Cancel", "cancel"),
-	})
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	msgText := fmt.Sprintf("请选择环境（可多选）:\n当前选中: %s", strings.Join(state.Environments, ", "))
-	var sentMsg tgbotapi.Message
-	if len(state.Messages) > 0 {
-		lastMsgID := state.Messages[len(state.Messages)-1]
-		editMsg := tgbotapi.NewEditMessageText(chatID, lastMsgID, msgText)
-		editMsg.ReplyMarkup = &keyboard
-		editMsg.ParseMode = "HTML"
-		var err error
-		sentMsg, err = b.bot.Send(editMsg)
-		if err != nil {
-			b.logger.Errorf("编辑环境选择消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	} else {
-		msg := tgbotapi.NewMessage(chatID, msgText)
-		msg.ReplyMarkup = keyboard
-		msg.ParseMode = "HTML"
-		var err error
-		sentMsg, err = b.bot.Send(msg)
-		if err != nil {
-			b.logger.Errorf("发送环境选择消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	}
-	b.logger.Infof("用户 %d 显示环境选择弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
-}
-
-// showConfirmation 显示确认弹窗
-func (b *Bot) showConfirmation(chatID int64, state *UserState) {
-	msgText := fmt.Sprintf("请确认以下信息：\n服务: %s\n环境: %s\n版本: %s", state.Service, strings.Join(state.Environments, ", "), state.Version)
-	keyboard := b.CreateYesNoKeyboard("confirm")
-	var sentMsg tgbotapi.Message
-	msg := tgbotapi.NewMessage(chatID, msgText)
-	msg.ReplyMarkup = &keyboard
-	var err error
-	sentMsg, err = b.bot.Send(msg)
-	if err != nil {
-		b.logger.Errorf("发送确认消息失败，用户 %d: %v", state.UserID, err)
-		return
-	}
-	state.Messages = append(state.Messages, sentMsg.MessageID)
-	b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-	b.logger.Infof("用户 %d 显示确认弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
-}
-
-// askContinue 询问是否继续提交
-func (b *Bot) askContinue(chatID int64, state *UserState) {
-	msgText := "是否继续提交新数据？"
-	keyboard := b.CreateYesNoKeyboard("restart")
-	var sentMsg tgbotapi.Message
-	if len(state.Messages) > 0 {
-		lastMsgID := state.Messages[len(state.Messages)-1]
-		editMsg := tgbotapi.NewEditMessageText(chatID, lastMsgID, msgText)
-		editMsg.ReplyMarkup = &keyboard
-		var err error
-		sentMsg, err = b.bot.Send(editMsg)
-		if err != nil {
-			b.logger.Errorf("编辑继续提交消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages[len(state.Messages)-1] = sentMsg.MessageID
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	} else {
-		msg := tgbotapi.NewMessage(chatID, msgText)
-		msg.ReplyMarkup = &keyboard
-		var err error
-		sentMsg, err = b.bot.Send(msg)
-		if err != nil {
-			b.logger.Errorf("发送继续提交消息失败，用户 %d: %v", state.UserID, err)
-		} else {
-			state.Messages = append(state.Messages, sentMsg.MessageID)
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-		}
-	}
-	b.logger.Infof("用户 %d 显示继续提交弹窗，消息 ID: %d", state.UserID, sentMsg.MessageID)
-}
-
-// deleteMessages 删除所有交互消息
-func (b *Bot) deleteMessages(chatID int64, state *UserState) {
-	for _, msgID := range state.Messages {
-		deleteMsg := tgbotapi.NewDeleteMessage(chatID, msgID)
-		if _, err := b.bot.Request(deleteMsg); err != nil {
-			b.logger.Errorf("删除消息 %d 失败，用户 %d: %v", msgID, state.UserID, err)
-		} else {
-			b.logger.Infof("删除消息 %d 成功，用户 %d", msgID, state.UserID)
-		}
-	}
-	state.Messages = nil
-	b.SaveState(fmt.Sprintf("user:%d:%d", chatID, state.UserID), *state)
-}
-
-// handleCallback 处理回调查询
-func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
-	chatID := query.Message.Chat.ID
-	userID := query.From.ID
-	data := query.Data
-	b.logger.Infof("用户 %d 触发回调: %s", userID, data)
-
-	// 尝试从交互状态获取
-	state, err := b.getState(fmt.Sprintf("user:%d:%d", chatID, userID))
-	if err != nil {
-		// 尝试从部署状态获取
-		deployState, err := b.getState(fmt.Sprintf("deploy:%d:%d", chatID, userID))
-		if err == nil {
-			b.handleDeployCallback(query, &deployState)
-			return
-		}
-		b.logger.Errorf("获取用户 %d 状态失败: %v", userID, err)
-		return
-	}
-
-	switch state.Step {
-	case 1: // 服务选择
-		if strings.HasPrefix(data, "service:") {
-			state.Service = strings.TrimPrefix(data, "service:")
-			b.logger.Infof("用户 %d 选择服务: %s", userID, state.Service)
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-			b.showServiceSelection(chatID, &state)
-		} else if data == "next_service" {
-			if state.Service == "" {
-				b.logger.Warnf("用户 %d 未选择服务", userID)
-				b.SendMessage(chatID, "请先选择一个服务！", nil)
+// getBotForService 根据服务获取机器人
+// 根据服务名称匹配机器人配置，支持正则或模糊包含匹配
+func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
+	for _, bot := range bm.Bots {
+		for prefix, services := range bot.Services {
+			if bot.RegexMatch {
+				// 正则匹配
+				if matched, _ := regexp.MatchString(prefix, service); matched {
+					return bot, nil
+				}
 			} else {
-				b.logger.Infof("用户 %d 确认服务选择，继续到环境选择", userID)
-				state.Step = 2
-				b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-				b.showEnvironmentSelection(chatID, &state)
+				// 模糊包含匹配
+				if strings.Contains(service, prefix) {
+					return bot, nil
+				}
 			}
-		} else if data == "cancel" {
-			b.logger.Infof("用户 %d 取消服务选择，会话关闭", userID)
-			b.deleteMessages(chatID, &state)
-			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
-		}
-	case 2: // 环境选择
-		if strings.HasPrefix(data, "env:") {
-			env := strings.TrimPrefix(data, "env:")
-			if !contains(state.Environments, env) {
-				state.Environments = append(state.Environments, env)
-				b.logger.Infof("用户 %d 选择环境: %s", userID, env)
-				b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-			}
-			b.showEnvironmentSelection(chatID, &state)
-		} else if data == "next_env" {
-			if len(state.Environments) == 0 {
-				b.logger.Warnf("用户 %d 未选择任何环境", userID)
-				b.SendMessage(chatID, "请至少选择一个环境！", nil)
-			} else {
-				b.logger.Infof("用户 %d 完成环境选择: %v", userID, state.Environments)
-				state.Step = 3
-				b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-				b.SendMessage(chatID, "请输入版本号：", nil)
-			}
-		} else if data == "cancel" {
-			b.logger.Infof("用户 %d 取消环境选择，会话关闭", userID)
-			b.deleteMessages(chatID, &state)
-			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
-		}
-	case 4: // 确认提交
-		if data == "confirm_yes" {
-			b.logger.Infof("用户 %d 确认提交数据: 服务=%s, 环境=%v, 版本=%s", userID, state.Service, state.Environments, state.Version)
-			b.persistData(state)
-			b.deleteMessages(chatID, &state)
-			b.SendMessage(chatID, "数据提交成功！", nil)
-			state.Step = 5
-			b.SaveState(fmt.Sprintf("user:%d:%d", chatID, userID), state)
-			b.askContinue(chatID, &state)
-		} else if data == "confirm_no" {
-			b.logger.Infof("用户 %d 取消数据提交，会话关闭", userID)
-			b.deleteMessages(chatID, &state)
-			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
-		}
-	case 5: // 是否继续
-		if data == "restart_yes" {
-			b.logger.Infof("用户 %d 选择继续提交，重新开始交互", userID)
-			b.deleteMessages(chatID, &state)
-			b.startInteraction(chatID, userID)
-		} else if data == "restart_no" {
-			b.logger.Infof("用户 %d 选择结束交互，会话关闭", userID)
-			b.deleteMessages(chatID, &state)
-			b.SendMessage(chatID, "会话已关闭", nil)
-			b.deleteState(fmt.Sprintf("user:%d:%d", chatID, userID))
 		}
 	}
-
-	b.bot.Request(tgbotapi.NewCallback(query.ID, ""))
-}
-
-// handleDeployCallback 处理 /deploy 接口的确认回调
-func (b *Bot) handleDeployCallback(query *tgbotapi.CallbackQuery, state *UserState) {
-	chatID := query.Message.Chat.ID
-	userID := query.From.ID
-	data := query.Data
-	b.logger.Infof("用户 %d 触发部署回调: %s", userID, data)
-
-	if data == "deploy_confirm_yes" {
-		b.logger.Infof("用户 %d 确认部署数据: 服务=%s, 环境=%v, 版本=%s", userID, state.Service, state.Environments, state.Version)
-		b.persistData(*state)
-		b.deleteMessages(chatID, state)
-		b.SendMessage(chatID, "部署数据提交成功！", nil)
-		b.deleteState(fmt.Sprintf("deploy:%d:%d", chatID, userID))
-	} else if data == "deploy_confirm_no" {
-		b.logger.Infof("用户 %d 取消部署数据提交", userID)
-		b.deleteMessages(chatID, state)
-		b.SendMessage(chatID, "部署请求已取消", nil)
-		b.deleteState(fmt.Sprintf("deploy:%d:%d", chatID, userID))
+	// 如果未匹配，返回默认机器人
+	defaultBot := bm.getDefaultBot()
+	if defaultBot != nil {
+		logrus.WithFields(logrus.Fields{
+			"time": time.Now().Format("2006-01-02 15:04:05"),
+		}).Warnf(color.YellowString("服务 %s 未匹配特定机器人，使用默认机器人 %s", service, defaultBot.Name))
+		return defaultBot, nil
 	}
-
-	b.bot.Request(tgbotapi.NewCallback(query.ID, ""))
+	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
 }
 
-// CreateYesNoKeyboard 创建是/否键盘
-func (b *Bot) CreateYesNoKeyboard(prefix string) tgbotapi.InlineKeyboardMarkup {
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("是 / Yes", prefix+"_yes"),
-			tgbotapi.NewInlineKeyboardButtonData("否 / No", prefix+"_no"),
-		),
-	)
-}
-
-// SendMessage 发送 Telegram 消息
-func (b *Bot) SendMessage(chatID int64, text string, keyboard *tgbotapi.InlineKeyboardMarkup) {
-	b.logger.Infof("发送消息到群组 %d: %s", chatID, text)
-	msg := tgbotapi.NewMessage(chatID, text)
-	if keyboard != nil {
-		msg.ReplyMarkup = keyboard
-	}
-	if _, err := b.bot.Send(msg); err != nil {
-		b.logger.Errorf("发送消息到群组 %d 失败: %v", chatID, err)
-	}
-}
-
-// SaveState 保存用户状态到 Redis
-func (b *Bot) SaveState(key string, state UserState) {
-	data, _ := json.Marshal(state)
-	b.storage.Set(key, string(data))
-	b.logger.Infof("保存用户状态 %s: %v", key, state)
-}
-
-// getState 从 Redis 获取用户状态
-func (b *Bot) getState(key string) (UserState, error) {
-	data, err := b.storage.Get(key)
-	if err != nil {
-		b.logger.Errorf("获取状态 %s 失败: %v", key, err)
-		return UserState{}, err
-	}
-	var state UserState
-	if err := json.Unmarshal([]byte(data), &state); err != nil {
-		b.logger.Errorf("解析状态 %s 失败: %v", key, err)
-		return UserState{}, err
-	}
-	return state, nil
-}
-
-// deleteState 删除用户状态
-func (b *Bot) deleteState(key string) {
-	b.storage.Delete(key)
-	b.logger.Infof("删除状态 %s", key)
-}
-
-// persistData 持久化数据到 Redis 队列
-func (b *Bot) persistData(state UserState) {
-	data, _ := json.Marshal(state)
-	b.storage.Push("deploy_queue", string(data))
-	b.logger.Infof("持久化用户 %d 数据到队列: 服务=%s, 环境=%v, 版本=%s", state.UserID, state.Service, state.Environments, state.Version)
-}
-
-// isVersionUnique 检查版本号在同一服务下是否唯一
-func (b *Bot) isVersionUnique(service, version string) bool {
-	items, err := b.storage.List("deploy_queue")
-	if err != nil {
-		b.logger.Errorf("检查版本号唯一性失败: %v", err)
-		return true // 假设错误时允许继续
-	}
-	for _, item := range items {
-		var state UserState
-		if err := json.Unmarshal([]byte(item), &state); err != nil {
-			b.logger.Errorf("解析队列数据失败: %v", err)
-			continue
-		}
-		if state.Service == service && state.Version == version {
-			b.logger.Warnf("服务 %s 下版本号 %s 已存在", service, version)
-			return false
-		}
-	}
-	return true
-}
-
-// contains 检查字符串是否在切片中
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
+// Stop 停止Telegram轮询
+// 关闭轮询通道并停止更新更新
+func (bm *BotManager) Stop() {
+	startTime := time.Now()
+	// 步骤1：关闭停止通道
+	close(bm.stopChan)
+	close(bm.updateChan)
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "Stop",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("Telegram轮询停止"))
 }
