@@ -21,7 +21,7 @@ type DeployRequest struct {
 	User              string    `json:"user" bson:"user"`                 // 用户
 	Status            string    `json:"status" bson:"status"`             // 状态
 	CreatedAt         time.Time `json:"created_at" bson:"created_at"`     // 创建时间
-	ConfirmationStatus string   `json:"confirmation_status" bson:"confirmation_status"` // 弹窗状态: not_sent, sent, confirmed, rejected, failed
+	ConfirmationStatus string    `json:"confirmation_status" bson:"confirmation_status"` // 弹窗状态: pending, sent, confirmed, rejected, failed
 }
 
 // QueryRequest 查询请求数据结构
@@ -43,8 +43,8 @@ type StatusRequest struct {
 // Task 任务队列中的任务结构
 type Task struct {
 	DeployRequest
-	ID        string    `json:"id" bson:"_id"`           // 任务ID
-	Retries   int       `json:"retries" bson:"retries"`      // 重试次数
+	ID        string `json:"id" bson:"_id"`           // 任务ID
+	Retries   int    `json:"retries" bson:"retries"`  // 重试次数
 }
 
 // DeploymentStatus 部署状态结果

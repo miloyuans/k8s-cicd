@@ -515,6 +515,14 @@ func (m *MongoClient) GetConfirmationStatus(service, version, environment, user 
 		"user":        user,
 	}).Decode(&task)
 	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "GetConfirmationStatus",
+				"took":   time.Since(startTime),
+			}).Warnf("未找到任务记录: service=%s, version=%s, env=%s, user=%s", service, version, environment, user)
+			return "pending", nil // 默认返回pending状态
+		}
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetConfirmationStatus",

@@ -100,7 +100,7 @@ func NewAgent(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8s
 }
 
 // Start 启动Agent
-func (a *Agent) Start() {
+func Start() {
 	startTime := time.Now()
 	// 步骤1：记录启动信息
 	logrus.WithFields(logrus.Fields{
@@ -329,8 +329,8 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 		wg.Add(1)
 		go func(t models.DeployRequest) {
 			defer wg.Done()
-			for _, env := range t.Environments { // 注意：这里Environments是[]string，但代码中常取[0]，假设单环境
-				// 要求1: 弹窗前检查数据库中是否已有相同任务
+			for _, env := range t.Environments {
+				// 检查是否存在
 				exists, err := a.mongo.CheckExistingTask(t.Service, t.Version, env)
 				if err != nil {
 					logrus.WithFields(logrus.Fields{
@@ -338,7 +338,9 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
 						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env,
+							"service": t.Service,
+							"version": t.Version,
+							"env":     env,
 						},
 					}).Errorf(color.RedString("检查现有任务失败: %v", err))
 					continue
@@ -349,7 +351,9 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
 						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env,
+							"service": t.Service,
+							"version": t.Version,
+							"env":     env,
 						},
 					}).Warnf(color.YellowString("重复任务忽略，不发起弹窗: %s v%s [%s]", t.Service, t.Version, env))
 					continue
@@ -358,46 +362,78 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 				// 设置初始 ConfirmationStatus 为 "pending"
 				t.ConfirmationStatus = "pending"
 
-				// 存储任务 (已有重复检查)
+				// 存储任务
 				err = a.validateAndStoreTask(t, env)
-				if err != nil {
-					continue
-				}
-
-				// 刷新 ConfirmationStatus 从 DB
-				t.ConfirmationStatus, err = a.mongo.GetConfirmationStatus(t.Service, t.Version, env, t.User)
 				if err != nil {
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
 						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env,
+							"service": t.Service,
+							"version": t.Version,
+							"env":     env,
+						},
+					}).Errorf(color.RedString("存储任务失败: %v", err))
+					continue
+				}
+
+				// 刷新 ConfirmationStatus 从 DB
+				confirmationStatus, err := a.mongo.GetConfirmationStatus(t.Service, t.Version, env, t.User)
+				if err != nil {
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "processQueryTasks",
+						"took":   time.Since(startTime),
+						"data": logrus.Fields{
+							"service": t.Service,
+							"version": t.Version,
+							"env":     env,
 						},
 					}).Errorf(color.RedString("刷新确认状态失败: %v", err))
 					continue
 				}
+				t.ConfirmationStatus = confirmationStatus
 
-				// 要求4: 检查状态，确保只弹一次
+				// 检查状态，只有pending状态触发弹窗
 				if t.ConfirmationStatus != "pending" {
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
 						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env, "status": t.ConfirmationStatus,
+							"service": t.Service,
+							"version": t.Version,
+							"env":     env,
+							"status":  t.ConfirmationStatus,
 						},
 					}).Infof(color.GreenString("弹窗已处理，跳过: %s v%s [%s]", t.Service, t.Version, env))
 					continue
 				}
 
-				// 要求2: 如果需要弹窗，发送并设置初始状态"sent"
+				// 如果需要弹窗，发送并设置状态"sent"
 				if contains(a.config.Query.ConfirmEnvs, env) {
+					// 更新状态为"sent"
+					err = a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "sent")
+					if err != nil {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "processQueryTasks",
+							"took":   time.Since(startTime),
+							"data": logrus.Fields{
+								"service": t.Service,
+								"version": t.Version,
+								"env":     env,
+							},
+						}).Errorf(color.RedString("更新确认状态为'sent'失败: %v", err))
+						continue
+					}
+
 					confirmChan := make(chan models.DeployRequest)
 					rejectChan := make(chan models.StatusRequest)
 					err := a.botMgr.SendConfirmation(t.Service, env, t.Version, t.User, confirmChan, rejectChan)
 					if err != nil {
-						// 要求2: 发送失败，设置"failed"
+						// 发送失败，设置"failed"
 						err = a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed")
 						if err != nil {
 							logrus.WithFields(logrus.Fields{
@@ -405,42 +441,54 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 								"method": "processQueryTasks",
 								"took":   time.Since(startTime),
 								"data": logrus.Fields{
-									"service": t.Service, "version": t.Version, "env": env,
+									"service": t.Service,
+									"version": t.Version,
+									"env":     env,
 								},
-							}).Errorf(color.RedString("更新确认状态失败: %v", err))
+							}).Errorf(color.RedString("更新确认状态为'failed'失败: %v", err))
 						}
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "processQueryTasks",
 							"took":   time.Since(startTime),
 							"data": logrus.Fields{
-								"service": t.Service, "version": t.Version, "env": env,
+								"service": t.Service,
+								"version": t.Version,
+								"env":     env,
 							},
 						}).Errorf(color.RedString("弹窗发送失败: %v", err))
 						continue
-					}
-					// 发送成功，更新状态"success"
-					err = a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "success")
-					if err != nil {
-						logrus.WithFields(logrus.Fields{
-							"time":   time.Now().Format("2006-01-02 15:04:05"),
-							"method": "processQueryTasks",
-							"took":   time.Since(startTime),
-						}).Errorf(color.RedString("更新确认状态失败: %v", err))
 					}
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
 						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env,
+							"service": t.Service,
+							"version": t.Version,
+							"env":     env,
 						},
-					}).Infof(color.GreenString("弹窗发送成功并设置初始状态'success': %s v%s [%s]", t.Service, t.Version, env))
+					}).Infof(color.GreenString("弹窗发送成功并设置状态为'sent': %s v%s [%s]", t.Service, t.Version, env))
 
-					go a.handleConfirmationChannels(confirmChan, rejectChan) // 异步处理
+					go a.handleConfirmationChannels(confirmChan, rejectChan, env)
 				} else {
 					// 无需弹窗，直接入队
 					taskID := generateTaskID(t)
+					t.Status = "pending"
+					err = a.mongo.UpdateTaskStatus(t.Service, t.Version, env, t.User, "pending")
+					if err != nil {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "processQueryTasks",
+							"took":   time.Since(startTime),
+							"data": logrus.Fields{
+								"service": t.Service,
+								"version": t.Version,
+								"env":     env,
+							},
+						}).Errorf(color.RedString("更新任务状态为'pending'失败: %v", err))
+						continue
+					}
 					a.taskQ.Enqueue(&models.Task{
 						DeployRequest: t,
 						ID:            taskID,
@@ -453,7 +501,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						"data": logrus.Fields{
 							"task_id": taskID,
 						},
-					}).Infof(color.GreenString("无需弹窗，任务直接入队: %s v%s [%s]", t.Service, t.Version, env))
+					}).Infof(color.GreenString("无需弹窗，任务状态更新为'pending'并入队: %s v%s [%s]", t.Service, t.Version, env))
 				}
 			}
 		}(task)
@@ -467,21 +515,31 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 }
 
 // handleConfirmationChannels 处理确认通道
-func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployRequest, rejectChan <-chan models.StatusRequest) {
+func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployRequest, rejectChan <-chan models.StatusRequest, env string) {
 	startTime := time.Now()
 	select {
 	case task := <-confirmChan:
-		// 要求3: 确认，更新状态"pending"，入队
-		err := a.mongo.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, "pending")
+		// 用户确认，更新状态"confirmed"，入队
+		err := a.mongo.UpdateConfirmationStatus(task.Service, task.Version, env, task.User, "confirmed")
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
-			}).Errorf(color.RedString("更新任务状态失败: %v", err))
+			}).Errorf(color.RedString("更新确认状态为'confirmed'失败: %v", err))
 		}
-		// 入队执行k8s API
+		// 更新任务状态为"pending"
+		err = a.mongo.UpdateTaskStatus(task.Service, task.Version, env, task.User, "pending")
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "handleConfirmationChannels",
+				"took":   time.Since(startTime),
+			}).Errorf(color.RedString("更新任务状态为'pending'失败: %v", err))
+		}
+		// 入队
 		taskID := generateTaskID(task)
+		task.Status = "pending"
 		a.taskQ.Enqueue(&models.Task{
 			DeployRequest: task,
 			ID:            taskID,
@@ -492,24 +550,37 @@ func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployReque
 			"method": "handleConfirmationChannels",
 			"took":   time.Since(startTime),
 			"data": logrus.Fields{
-				"task_id": taskID, "service": task.Service, "version": task.Version, "env": task.Environments[0], "user": task.User, "status": "pending",
+				"task_id": taskID,
+				"service": task.Service,
+				"version": task.Version,
+				"env":     env,
+				"user":    task.User,
+				"status":  "pending",
 			},
-		}).Infof(color.GreenString("用户确认，任务状态更新为'pending'并入队: %s v%s [%s]", task.Service, task.Version, task.Environments[0]))
+		}).Infof(color.GreenString("用户确认，任务状态更新为'pending'并入队: %s v%s [%s]", task.Service, task.Version, env))
 
 	case status := <-rejectChan:
-		// 要求3: 拒绝，更新状态"no_action"，推送/status
-		err := a.mongo.UpdateTaskStatus(status.Service, status.Version, status.Environment, status.User, "no_action")
+		// 用户拒绝，更新状态"rejected"，推送no_action
+		err := a.mongo.UpdateConfirmationStatus(status.Service, status.Version, env, status.User, "rejected")
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
-			}).Errorf(color.RedString("更新任务状态失败: %v", err))
+			}).Errorf(color.RedString("更新确认状态为'rejected'失败: %v", err))
+		}
+		err = a.mongo.UpdateTaskStatus(status.Service, status.Version, env, status.User, "no_action")
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "handleConfirmationChannels",
+				"took":   time.Since(startTime),
+			}).Errorf(color.RedString("更新任务状态为'no_action'失败: %v", err))
 		}
 		err = a.apiClient.UpdateStatus(models.StatusRequest{
 			Service:     status.Service,
 			Version:     status.Version,
-			Environment: status.Environment,
+			Environment: env,
 			User:        status.User,
 			Status:      "no_action",
 		})
@@ -519,7 +590,11 @@ func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployReque
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
 				"data": logrus.Fields{
-					"service": status.Service, "version": status.Version, "env": status.Environment, "user": status.User, "status": "no_action",
+					"service": status.Service,
+					"version": status.Version,
+					"env":     env,
+					"user":    status.User,
+					"status":  "no_action",
 				},
 			}).Errorf(color.RedString("推送no_action状态失败: %v", err))
 		} else {
@@ -528,18 +603,25 @@ func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployReque
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
 				"data": logrus.Fields{
-					"service": status.Service, "version": status.Version, "env": status.Environment, "user": status.User, "status": "no_action",
+					"service": status.Service,
+					"version": status.Version,
+					"env":     env,
+					"user":    status.User,
+					"status":  "no_action",
 				},
-			}).Infof(color.GreenString("用户拒绝，任务状态更新为'no_action'并推送: %s v%s [%s]", status.Service, status.Version, status.Environment))
+			}).Infof(color.GreenString("用户拒绝，任务状态更新为'no_action'并推送: %s v%s [%s]", status.Service, status.Version, env))
 		}
-		err = a.mongo.DeleteTask(status.Service, status.Version, status.Environment, status.User)
+		err = a.mongo.DeleteTask(status.Service, status.Version, env, status.User)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
 				"data": logrus.Fields{
-					"service": status.Service, "version": status.Version, "env": status.Environment, "user": status.User,
+					"service": status.Service,
+					"version": status.Version,
+					"env":     env,
+					"user":    status.User,
 				},
 			}).Errorf(color.RedString("拒绝任务删除失败: %v", err))
 		} else {
@@ -548,9 +630,12 @@ func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployReque
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
 				"data": logrus.Fields{
-					"service": status.Service, "version": status.Version, "env": status.Environment, "user": status.User,
+					"service": status.Service,
+					"version": status.Version,
+					"env":     env,
+					"user":    status.User,
 				},
-			}).Infof(color.GreenString("拒绝任务删除成功: %s v%s [%s]", status.Service, status.Version, status.Environment))
+			}).Infof(color.GreenString("拒绝任务删除成功: %s v%s [%s]", status.Service, status.Version, env))
 		}
 	}
 }
@@ -571,7 +656,8 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 		}).Errorf(color.RedString("环境 [%s] 无命名空间配置", env))
 		return nil
 	}
-	task.Environments = []string{namespace}
+	task.Namespace = namespace // 设置命名空间
+	task.Environments = []string{env} // 保留原始环境名称
 	// 步骤2：检查任务重复
 	isDuplicate, err := a.mongo.CheckDuplicateTask(task)
 	if err != nil {
@@ -638,7 +724,7 @@ func (a *Agent) Stop() {
 	}).Infof(color.GreenString("Agent关闭完成"))
 }
 
-// generateTaskID 生成任务ID（假设实现）
+// generateTaskID 生成任务ID
 func generateTaskID(task models.DeployRequest) string {
 	return task.Service + "-" + task.Version // 简单实现，实际可使用UUID
 }
