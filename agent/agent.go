@@ -100,7 +100,7 @@ func NewAgent(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8s
 }
 
 // Start 启动Agent
-func Start() {
+func (a *Agent) Start() {
 	startTime := time.Now()
 	// 步骤1：记录启动信息
 	logrus.WithFields(logrus.Fields{
