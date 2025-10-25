@@ -18,6 +18,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // Agent 主代理结构，协调各组件
@@ -156,8 +157,18 @@ func (a *Agent) performPushDiscovery() {
 	ctx := context.Background()
 	versionsColl := a.mongo.GetClient().Database("cicd").Collection("versions")
 	currentData := make(map[string]string) // 服务 -> 版本
-	for _, dep := range req.Deployments {
-		currentData[dep.Service] = dep.Version
+	for _, service := range req.Services {
+		// 获取每个服务的当前版本
+		for env := range a.config.EnvMapping.Mappings {
+			namespace, ok := a.envMapper.GetNamespace(env)
+			if !ok {
+				continue
+			}
+			version := a.k8s.GetCurrentImage(namespace, service)
+			if version != "unknown" {
+				currentData[service] = version
+			}
+		}
 	}
 	dbServices, err := a.getServicesFromMongo(ctx)
 	if err != nil {
@@ -181,7 +192,11 @@ func (a *Agent) performPushDiscovery() {
 	}
 
 	// 步骤3：比较数据是否相同
-	if reflect.DeepEqual(currentData, dbData) && reflect.DeepEqual(req.Environments, a.config.EnvMapping.Mappings) {
+	uniqueEnvs := make(map[string]string)
+	for env, ns := range a.config.EnvMapping.Mappings {
+		uniqueEnvs[env] = ns
+	}
+	if reflect.DeepEqual(req.Services, dbServices) && reflect.DeepEqual(req.Environments, a.config.EnvMapping.Mappings) {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "performPushDiscovery",
@@ -189,8 +204,8 @@ func (a *Agent) performPushDiscovery() {
 			"data": logrus.Fields{
 				"services":      req.Services,
 				"service_count": len(req.Services),
-				"env_mappings":  a.config.EnvMapping.Mappings,
-				"env_count":     len(a.config.EnvMapping.Mappings),
+				"env_mappings":  uniqueEnvs,
+				"env_count":     len(uniqueEnvs),
 			},
 		}).Infof(color.GreenString("数据无变化，无需推送 /push 接口"))
 		return
@@ -240,10 +255,6 @@ func (a *Agent) performPushDiscovery() {
 	uniqueServices := make(map[string]struct{})
 	for _, s := range req.Services {
 		uniqueServices[s] = struct{}{}
-	}
-	uniqueEnvs := make(map[string]string)
-	for env, ns := range a.config.EnvMapping.Mappings {
-		uniqueEnvs[env] = ns
 	}
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
