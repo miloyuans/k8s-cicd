@@ -200,24 +200,41 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 		return
 	}
 
-	// 步骤3：构造确认消息并转义
-	message := fmt.Sprintf("确认部署 `%s` 到 `%s`? 用户: `%s`, 版本: `%s`",
+	// 步骤3：构建@用户列表
+	var mentions strings.Builder
+	for _, uid := range bot.AllowedUsers {
+		mentions.WriteString("@")
+		mentions.WriteString(escapeMarkdownV2(uid))
+		mentions.WriteString(" ")
+	}
+
+	// 步骤4：构建确认消息文本
+	message := fmt.Sprintf("**部署确认**\n\n" +
+		"**服务**: `%s`\n" +
+		"**环境**: `%s`\n" +
+		"**版本**: `%s`\n" +
+		"**用户**: `%s`\n" +
+		"**时间**: `%s`\n\n" +
+		"**通知**: %s\n\n" +
+		"**请选择操作**",
 		escapeMarkdownV2(service),
 		escapeMarkdownV2(env),
+		escapeMarkdownV2(version),
 		escapeMarkdownV2(user),
-		escapeMarkdownV2(version))
+		escapeMarkdownV2(time.Now().Format("2006-01-02 15:04:05")),
+		escapeMarkdownV2(mentions.String()))
+
+	// 步骤5：构建内联键盘
 	keyboard := map[string]interface{}{
 		"inline_keyboard": [][]map[string]string{
 			{
-				{"text": "确认", "callback_data": fmt.Sprintf("confirm:%s:%s:%s:%s",
-					service, env, user, version)}, // 不转义callback_data
-				{"text": "拒绝", "callback_data": fmt.Sprintf("reject:%s:%s:%s:%s",
-					service, env, user, version)},
+				{"text": "✅ 确认部署", "callback_data": fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, version, user)},
+				{"text": "❌ 拒绝部署", "callback_data": fmt.Sprintf("reject:%s:%s:%s:%s", service, env, version, user)},
 			},
 		},
 	}
 
-	// 步骤4：发送确认消息并记录发送的文本
+	// 步骤6：发送确认消息并记录发送的文本
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "SendConfirmation",
@@ -227,16 +244,17 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 			"callback_data": keyboard["inline_keyboard"].([][]map[string]string)[0][0]["callback_data"],
 		},
 	}).Debugf(color.GreenString("准备发送确认消息"))
-	respMessageID, err := bm.sendMessage(bot, bot.GroupID, message, keyboard, "MarkdownV2")
+	respMessageID, err := bm.sendMessage(bot, bot.GroupID, message, keyboard)
 	if err != nil {
-		// 步骤5：回退到纯文本
+		// 回退到纯文本
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "SendConfirmation",
 			"took":   time.Since(startTime),
 		}).Warnf(color.YellowString("MarkdownV2失败，尝试纯文本: %v", err))
-		message = fmt.Sprintf("确认部署 %s 到 %s? 用户: %s, 版本: %s", service, env, user, version)
-		respMessageID, err = bm.sendMessage(bot, bot.GroupID, message, keyboard, "")
+		message = fmt.Sprintf("部署确认\n\n服务: %s\n环境: %s\n版本: %s\n用户: %s\n时间: %s\n\n通知: %s\n\n请选择操作",
+			service, env, version, user, time.Now().Format("2006-01-02 15:04:05"), mentions.String())
+		respMessageID, err = bm.sendMessage(bot, bot.GroupID, message, keyboard)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -247,7 +265,7 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 		}
 	}
 
-	// 步骤6：处理回调
+	// 步骤7：处理回调
 	go func() {
 		update := <-bm.updateChan
 		if callback, ok := update["callback_query"].(map[string]interface{}); ok {
@@ -271,7 +289,7 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 			}
 			action := parts[0]
 
-			// 步骤7：删除确认消息
+			// 步骤8：删除确认消息
 			if err := bm.DeleteMessage(bot, bot.GroupID, respMessageID); err != nil {
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -280,8 +298,10 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 				}).Errorf(color.RedString("删除确认消息失败: %v", err))
 			}
 
-			// 步骤8：根据动作处理
+			// 步骤9：根据动作处理
+			var feedbackText string
 			if action == "confirm" {
+				feedbackText = fmt.Sprintf("部署确认\n服务: %s\n环境: %s\n版本: %s", service, env, version)
 				confirmChan <- models.DeployRequest{
 					Service:      service,
 					Environments: []string{env},
@@ -289,20 +309,8 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 					User:         user,
 					Status:       "pending",
 				}
-				feedbackID, err := bm.sendMessage(bot, bot.GroupID, "部署确认", nil, "")
-				if err != nil {
-					logrus.WithFields(logrus.Fields{
-						"time":   time.Now().Format("2006-01-02 15:04:05"),
-						"method": "SendConfirmation",
-						"took":   time.Since(startTime),
-					}).Errorf(color.RedString("发送确认反馈失败: %v", err))
-				} else {
-					// 自动删除反馈消息
-					time.AfterFunc(30*time.Second, func() {
-						bm.DeleteMessage(bot, bot.GroupID, feedbackID)
-					})
-				}
 			} else if action == "reject" {
+				feedbackText = fmt.Sprintf("部署拒绝\n服务: %s\n环境: %s\n版本: %s", service, env, version)
 				rejectChan <- models.StatusRequest{
 					Service:     service,
 					Environment: env,
@@ -310,19 +318,19 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 					User:        user,
 					Status:      "no_action",
 				}
-				feedbackID, err := bm.sendMessage(bot, bot.GroupID, "部署拒绝", nil, "")
-				if err != nil {
-					logrus.WithFields(logrus.Fields{
-						"time":   time.Now().Format("2006-01-02 15:04:05"),
-						"method": "SendConfirmation",
-						"took":   time.Since(startTime),
-					}).Errorf(color.RedString("发送拒绝反馈失败: %v", err))
-				} else {
-					// 自动删除反馈消息
-					time.AfterFunc(30*time.Second, func() {
-						bm.DeleteMessage(bot, bot.GroupID, feedbackID)
-					})
-				}
+			}
+			feedbackID, err := bm.sendMessage(bot, bot.GroupID, feedbackText, nil)
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "SendConfirmation",
+					"took":   time.Since(startTime),
+				}).Errorf(color.RedString("发送反馈消息失败: %v", err))
+			} else {
+				// 自动删除反馈消息
+				time.AfterFunc(30*time.Second, func() {
+					bm.DeleteMessage(bot, bot.GroupID, feedbackID)
+				})
 			}
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -334,7 +342,7 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 }
 
 // sendMessage 发送Telegram消息
-func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text string, replyMarkup map[string]interface{}, parseMode string) (int, error) {
+func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text string, replyMarkup map[string]interface{}) (int, error) {
 	startTime := time.Now()
 	// 步骤1：验证chatID
 	if chatID == "" {
@@ -346,13 +354,11 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text string, replyMa
 		return 0, fmt.Errorf("chatID为空")
 	}
 
-	// 步骤2：构造请求数据
+	// 步骤2：构造请求数据并转义文本
 	reqData := map[string]interface{}{
-		"chat_id": chatID,
-		"text":    text,
-	}
-	if parseMode != "" {
-		reqData["parse_mode"] = parseMode
+		"chat_id":    chatID,
+		"text":       escapeMarkdownV2(text),
+		"parse_mode": "MarkdownV2",
 	}
 	if replyMarkup != nil {
 		reqData["reply_markup"] = replyMarkup
@@ -577,7 +583,7 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 	message := bm.generateMarkdownMessage(service, env, user, oldVersion, newVersion, success)
 
 	// 步骤4：发送通知
-	_, err = bm.sendMessage(bot, bot.GroupID, message, nil, "MarkdownV2")
+	_, err = bm.sendMessage(bot, bot.GroupID, message, nil)
 	if err != nil {
 		// 回退到纯文本
 		logrus.WithFields(logrus.Fields{
@@ -585,9 +591,9 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 			"method": "SendNotification",
 			"took":   time.Since(startTime),
 		}).Warnf(color.YellowString("MarkdownV2通知失败，尝试纯文本: %v", err))
-		message = fmt.Sprintf("部署通知: %s\n环境: %s\n操作人: %s\n旧版本: %s\n新版本: %s\n状态: %s\n时间: %s",
+		message = fmt.Sprintf("部署通知\n服务: %s\n环境: %s\n操作人: %s\n旧版本: %s\n新版本: %s\n状态: %s\n时间: %s",
 			service, env, user, oldVersion, newVersion, map[bool]string{true: "成功", false: "失败"}[success], time.Now().Format("2006-01-02 15:04:05"))
-		_, err = bm.sendMessage(bot, bot.GroupID, message, nil, "")
+		_, err = bm.sendMessage(bot, bot.GroupID, message, nil)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -613,7 +619,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 	var message strings.Builder
 
 	// 步骤2：构建标题
-	message.WriteString("*部署通知*\n\n")
+	message.WriteString("**部署通知**\n\n")
 
 	// 步骤3：添加详细信息
 	message.WriteString("**服务**: `")
