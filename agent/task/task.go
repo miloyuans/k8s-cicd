@@ -137,13 +137,15 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 	}
 }
 
-// executeTask 执行单个任务
+// executeTask 执行任务
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task *models.Task, botMgr *telegram.BotManager) error {
 	startTime := time.Now()
+	success := false
+	// 步骤1：获取命名空间
 	namespace := task.Environments[0]
-
-	// 步骤1：检查工作负载是否运行
-	if !k8s.IsWorkloadRunning(namespace, task.Service) {
+	// 步骤2：获取旧版本
+	oldVersion := k8s.GetCurrentImage(namespace, task.Service)
+	if oldVersion == "unknown" {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "executeTask",
@@ -151,50 +153,9 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"data": logrus.Fields{
 				"task_id": task.ID,
 			},
-		}).Infof(color.GreenString("无Pod运行，跳过更新"))
-		// 更新状态为no_action
-		err := mongo.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, "no_action")
-		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "executeTask",
-				"took":   time.Since(startTime),
-				"data": logrus.Fields{
-					"task_id": task.ID,
-				},
-			}).Errorf(color.RedString("更新MongoDB状态失败: %v", err))
-		}
-		err = apiClient.UpdateStatus(models.StatusRequest{
-			Service:     task.Service,
-			Version:     task.Version,
-			Environment: namespace,
-			User:        task.User,
-			Status:      "no_action",
-		})
-		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "executeTask",
-				"took":   time.Since(startTime),
-				"data": logrus.Fields{
-					"task_id": task.ID,
-				},
-			}).Errorf(color.RedString("推送状态失败: %v", err))
-		}
-		return nil
+		}).Errorf(color.RedString("获取旧版本失败"))
+		return fmt.Errorf("获取旧版本失败")
 	}
-
-	// 步骤2：记录旧版本
-	oldVersion := k8s.GetCurrentImage(namespace, task.Service)
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "executeTask",
-		"took":   time.Since(startTime),
-		"data": logrus.Fields{
-			"task_id":    task.ID,
-			"old_version": oldVersion,
-		},
-	}).Infof(color.GreenString("记录旧版本: %s", oldVersion))
 
 	// 步骤3：更新镜像
 	err := k8s.UpdateWorkloadImage(namespace, task.Service, task.Version)
@@ -207,13 +168,14 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 				"task_id": task.ID,
 			},
 		}).Errorf(color.RedString("更新镜像失败: %v", err))
+		// 回滚
+		k8s.RollbackWorkload(namespace, task.Service, oldVersion)
 		return err
 	}
 
-	// 步骤4：等待就绪
-	var success bool
-	err = k8s.WaitForWorkloadReady(namespace, task.Service)
-	if err != nil {
+	// 步骤4：等待新版本就绪
+	ready, err := k8s.WaitForRolloutComplete(namespace, task.Service, cfg.Deploy.WaitTimeout)
+	if err != nil || !ready {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "executeTask",
@@ -221,30 +183,9 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"data": logrus.Fields{
 				"task_id": task.ID,
 			},
-		}).Errorf(color.RedString("部署超时: %v", err))
-		success = false
-		rollbackErr := k8s.RollbackWorkload(namespace, task.Service, oldVersion)
-		if rollbackErr != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "executeTask",
-				"took":   time.Since(startTime),
-				"data": logrus.Fields{
-					"task_id":    task.ID,
-					"old_version": oldVersion,
-				},
-			}).Errorf(color.RedString("回滚失败: %v", rollbackErr))
-		} else {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "executeTask",
-				"took":   time.Since(startTime),
-				"data": logrus.Fields{
-					"task_id":    task.ID,
-					"old_version": oldVersion,
-				},
-			}).Infof(color.GreenString("回滚成功: %s", oldVersion))
-		}
+		}).Errorf(color.RedString("新版本就绪失败: %v", err))
+		// 回滚
+		k8s.RollbackWorkload(namespace, task.Service, oldVersion)
 	} else {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
