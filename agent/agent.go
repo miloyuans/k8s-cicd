@@ -14,6 +14,7 @@ import (
 	"k8s-cicd/agent/task"
 	"k8s-cicd/agent/telegram"
 
+	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -57,14 +58,14 @@ func (m *EnvMapper) GetNamespace(env string) (string, bool) {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetNamespace",
 			"took":   time.Since(startTime),
-		}).Errorf("未配置环境 [%s] 的命名空间", env)
+		}).Errorf(color.RedString("未配置环境 [%s] 的命名空间", env))
 		return "", false
 	}
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "GetNamespace",
 		"took":   time.Since(startTime),
-	}).Infof("环境 [%s] 映射到命名空间 [%s]", env, ns)
+	}).Infof(color.GreenString("环境 [%s] 映射到命名空间 [%s]", env, ns))
 	return ns, true
 }
 
@@ -95,7 +96,7 @@ func NewAgent(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8s
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "NewAgent",
 		"took":   time.Since(startTime),
-	}).Info("Agent创建成功")
+	}).Info(color.GreenString("Agent创建成功"))
 	return agent
 }
 
@@ -107,9 +108,9 @@ func (a *Agent) Start() {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "Start",
 		"took":   time.Since(startTime),
-	}).Infof("Agent启动成功，API=%s, 用户=%s, 推送间隔=%v, 查询间隔=%v, 弹窗环境=%v, 允许用户=%v",
+	}).Infof(color.GreenString("Agent启动成功，API=%s, 用户=%s, 推送间隔=%v, 查询间隔=%v, 弹窗环境=%v, 允许用户=%v",
 		a.config.API.BaseURL, a.config.User.Default, a.config.API.PushInterval, a.config.API.QueryInterval,
-		a.config.Query.ConfirmEnvs, a.config.Telegram.AllowedUsers)
+		a.config.Query.ConfirmEnvs, a.config.Telegram.AllowedUsers))
 	// 步骤2：启动任务队列Worker
 	go a.taskQ.StartWorkers(a.config, a.mongo, a.k8s, a.botMgr, a.apiClient)
 	// 步骤3：启动周期性推送
@@ -152,7 +153,7 @@ func (a *Agent) performPushDiscovery() {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "performPushDiscovery",
 			"took":   time.Since(startTime),
-		}).Errorf("服务发现失败: %v", err)
+		}).Errorf(color.RedString("服务发现失败: %v", err))
 		return
 	}
 	// 步骤3：记录发现的服务和环境
@@ -160,7 +161,7 @@ func (a *Agent) performPushDiscovery() {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "performPushDiscovery",
 		"took":   time.Since(startTime),
-	}).Infof("发现 %d 个服务，%d 个环境", len(req.Services), len(req.Environments))
+	}).Infof(color.GreenString("发现 %d 个服务，%d 个环境", len(req.Services), len(req.Environments)))
 	// 步骤4：按服务逐个推送
 	for _, service := range req.Services {
 		var serviceDeployments []models.DeployRequest
@@ -180,14 +181,14 @@ func (a *Agent) performPushDiscovery() {
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "performPushDiscovery",
 				"took":   time.Since(startTime),
-			}).Errorf("推送失败 [%s]: %v", service, err)
+			}).Errorf(color.RedString("推送失败 [%s]: %v", service, err))
 			continue
 		}
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "performPushDiscovery",
 			"took":   time.Since(startTime),
-		}).Infof("推送成功 [%s] -> %d 环境", service, len(req.Environments))
+		}).Infof(color.GreenString("推送成功 [%s] -> %d 环境", service, len(req.Environments)))
 		time.Sleep(100 * time.Millisecond) // 避免请求过快
 	}
 }
@@ -196,17 +197,17 @@ func (a *Agent) performPushDiscovery() {
 func (a *Agent) getServicesFromMongo(ctx context.Context) ([]string, error) {
 	startTime := time.Now()
 	// 步骤1：查询版本集合
-	versionsColl := a.mongo.client.Database("cicd").Collection("versions")
+	versionsColl := a.mongo.GetClient().Database("cicd").Collection("versions")
 	cursor, err := versionsColl.Find(ctx, bson.M{})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "getServicesFromMongo",
 			"took":   time.Since(startTime),
-		}).Errorf("查询版本集合失败: %v", err)
+		}).Errorf(color.RedString("查询版本集合失败: %v", err))
 		return nil, err
 	}
-defer cursor.Close(ctx)
+	defer cursor.Close(ctx)
 
 	// 步骤2：收集服务名
 	var services []string
@@ -228,7 +229,7 @@ defer cursor.Close(ctx)
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "getServicesFromMongo",
 		"took":   time.Since(startTime),
-	}).Infof("从MongoDB获取 %d 个服务", len(services))
+	}).Infof(color.GreenString("从MongoDB获取 %d 个服务", len(services)))
 	return services, nil
 }
 
@@ -262,7 +263,7 @@ func (a *Agent) periodicQueryTasks() {
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "periodicQueryTasks",
 				"took":   time.Since(startTime),
-			}).Errorf("获取服务列表失败: %v", err)
+			}).Errorf(color.RedString("获取服务列表失败: %v", err))
 			continue
 		}
 
@@ -280,14 +281,14 @@ func (a *Agent) periodicQueryTasks() {
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "periodicQueryTasks",
 						"took":   time.Since(startTime),
-					}).Errorf("查询失败 [%s/%s]: %v", env, service, err)
+					}).Errorf(color.RedString("查询失败 [%s/%s]: %v", env, service, err))
 					continue
 				}
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "periodicQueryTasks",
 					"took":   time.Since(startTime),
-				}).Infof("/query 结果 [%s/%s]: %d 个任务", env, service, len(tasks))
+				}).Infof(color.GreenString("/query 结果 [%s/%s]: %d 个任务", env, service, len(tasks)))
 				// 步骤8：处理任务
 				for _, task := range tasks {
 					a.processTask(task, env)
@@ -334,14 +335,14 @@ func (a *Agent) processTask(task models.DeployRequest, queryEnv string) {
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "processTask",
 				"took":   time.Since(startTime),
-			}).Errorf("发送确认弹窗失败 [%s]: %v", task.Service, err)
+			}).Errorf(color.RedString("发送确认弹窗失败 [%s]: %v", task.Service, err))
 			return
 		}
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "processTask",
 			"took":   time.Since(startTime),
-		}).Infof("已发送确认弹窗: %s v%s [%s]", task.Service, task.Version, queryEnv)
+		}).Infof(color.GreenString("已发送确认弹窗: %s v%s [%s]", task.Service, task.Version, queryEnv))
 	} else {
 		// 步骤5：直接存储并入队
 		if err := a.validateAndStoreTask(task, queryEnv); err != nil {
@@ -363,7 +364,7 @@ func (a *Agent) processTask(task models.DeployRequest, queryEnv string) {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "processTask",
 			"took":   time.Since(startTime),
-		}).Infof("任务直接入队: %s v%s [%s]", task.Service, task.Version, queryEnv)
+		}).Infof(color.GreenString("任务直接入队: %s v%s [%s]", task.Service, task.Version, queryEnv))
 	}
 }
 
@@ -379,7 +380,7 @@ func (a *Agent) handleConfirmationChannels(confirmChan chan models.DeployRequest
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "handleConfirmationChannels",
 					"took":   time.Since(startTime),
-				}).Error(err.Error())
+				}).Errorf(color.RedString("校验任务失败: %v", err))
 				continue
 			}
 			taskID := fmt.Sprintf("%s-%s-%d", task.Service, task.Version, time.Now().UnixNano())
@@ -393,7 +394,7 @@ func (a *Agent) handleConfirmationChannels(confirmChan chan models.DeployRequest
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
-			}).Infof("确认任务入队: %s v%s [%s]", task.Service, task.Version, task.Environments[0])
+			}).Infof(color.GreenString("确认任务入队: %s v%s [%s]", task.Service, task.Version, task.Environments[0]))
 		case status := <-rejectChan:
 			// 步骤2：处理拒绝任务
 			err := a.apiClient.UpdateStatus(status)
@@ -402,13 +403,13 @@ func (a *Agent) handleConfirmationChannels(confirmChan chan models.DeployRequest
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "handleConfirmationChannels",
 					"took":   time.Since(startTime),
-				}).Errorf("拒绝状态更新失败: %v", err)
+				}).Errorf(color.RedString("拒绝状态更新失败: %v", err))
 			} else {
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "handleConfirmationChannels",
 					"took":   time.Since(startTime),
-				}).Infof("任务拒绝: %s v%s [%s]", status.Service, status.Version, status.Environment)
+				}).Infof(color.GreenString("任务拒绝: %s v%s [%s]", status.Service, status.Version, status.Environment))
 				// 步骤3：更新MongoDB状态
 				err = a.mongo.UpdateTaskStatus(status.Service, status.Version, status.Environment, status.User, "rejected")
 				if err != nil {
@@ -416,7 +417,7 @@ func (a *Agent) handleConfirmationChannels(confirmChan chan models.DeployRequest
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "handleConfirmationChannels",
 						"took":   time.Since(startTime),
-					}).Errorf("MongoDB状态更新失败: %v", err)
+					}).Errorf(color.RedString("MongoDB状态更新失败: %v", err))
 				}
 			}
 		}
@@ -433,7 +434,7 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "validateAndStoreTask",
 			"took":   time.Since(startTime),
-		}).Errorf("环境 [%s] 无命名空间配置", env)
+		}).Errorf(color.RedString("环境 [%s] 无命名空间配置", env))
 		return fmt.Errorf("环境 [%s] 无命名空间配置", env)
 	}
 	task.Environments = []string{namespace}
@@ -444,7 +445,7 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "validateAndStoreTask",
 			"took":   time.Since(startTime),
-		}).Errorf("检查任务重复失败: %v", err)
+		}).Errorf(color.RedString("检查任务重复失败: %v", err))
 		return fmt.Errorf("检查任务重复失败: %v", err)
 	}
 	if isDuplicate {
@@ -462,14 +463,14 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "validateAndStoreTask",
 			"took":   time.Since(startTime),
-		}).Errorf("存储任务失败: %v", err)
+		}).Errorf(color.RedString("存储任务失败: %v", err))
 		return fmt.Errorf("存储任务失败: %v", err)
 	}
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "validateAndStoreTask",
 		"took":   time.Since(startTime),
-	}).Infof("任务校验并存储成功: %s v%s [%s -> %s]", task.Service, task.Version, env, namespace)
+	}).Infof(color.GreenString("任务校验并存储成功: %s v%s [%s -> %s]", task.Service, task.Version, env, namespace))
 	return nil
 }
 
@@ -488,5 +489,5 @@ func (a *Agent) Stop() {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "Stop",
 		"took":   time.Since(startTime),
-	}).Info("Agent关闭完成")
+	}).Info(color.GreenString("Agent关闭完成"))
 }

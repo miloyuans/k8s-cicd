@@ -23,7 +23,7 @@ type TelegramBot struct {
 // TelegramConfig Telegram多机器人配置
 type TelegramConfig struct {
 	Bots           []TelegramBot    `yaml:"bots"`            // 机器人列表
-	AllowedUsers   []int64          `yaml:"allowed_users"`   // 有效用户ID
+	AllowedUsers   []string         `yaml:"allowed_users"`   // 有效用户ID（字符串类型）
 	ConfirmTimeout time.Duration    `yaml:"confirm_timeout"` // 弹窗超时
 }
 
@@ -229,6 +229,7 @@ func (c *Config) setDefaults() {
 		c.EnvMapping.Mappings = map[string]string{
 			"eks":     "ns",
 			"eks-pro": "bs",
+			"prod":    "international", // 基于Ingress添加
 		}
 	}
 }

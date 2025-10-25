@@ -139,7 +139,7 @@ func (bm *BotManager) getDefaultBot() *TelegramBot {
 }
 
 // PollUpdates 阻塞式处理Updates（供Agent调用）
-func (bm *BotManager) PollUpdates(allowedUsers []int64, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
+func (bm *BotManager) PollUpdates(allowedUsers []string, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
 	// 步骤1：记录启动日志
 	logrus.Info("📡 开始处理Telegram回调")
 	for {
@@ -155,7 +155,7 @@ func (bm *BotManager) PollUpdates(allowedUsers []int64, confirmChan chan models.
 }
 
 // HandleCallback 处理回调查询
-func (bm *BotManager) HandleCallback(update map[string]interface{}, allowedUsers []int64, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
+func (bm *BotManager) HandleCallback(update map[string]interface{}, allowedUsers []string, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
 	// 步骤1：检查是否为callback_query
 	if _, ok := update["callback_query"]; !ok {
 		return
@@ -163,14 +163,19 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, allowedUsers
 
 	// 步骤2：提取回调数据
 	callback := update["callback_query"].(map[string]interface{})
-	userIDFloat := callback["from"].(map[string]interface{})["id"].(float64)
-	userID := int64(userIDFloat)
-	data := callback["data"].(string)
+	userIDFloat, ok := callback["from"].(map[string]interface{})["id"]
+	if !ok {
+		return
+	}
+	userID := fmt.Sprintf("%v", userIDFloat)
+	data, ok := callback["data"].(string)
+	if !ok {
+		return
+	}
 
-	// 步骤3：记录回调日志
-	logrus.Infof("🔘 收到回调: user=%d, data=%s", userID, data)
+	logrus.Infof("🔘 收到回调: user=%s, data=%s", userID, data)
 
-	// 步骤4：用户ID过滤
+	// 步骤3：用户ID过滤
 	allowed := false
 	for _, uid := range allowedUsers {
 		if uid == userID {
@@ -179,36 +184,33 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, allowedUsers
 		}
 	}
 	if !allowed {
-		// 不允许的用户，记录警告日志
-		logrus.Warnf("⚠️ 无效用户ID: %d", userID)
+		logrus.Warnf("⚠️ 无效用户ID: %s", userID)
 		return
 	}
 
-	// 步骤5：解析回调数据
+	// 步骤4：解析回调数据
 	parts := strings.Split(data, ":")
 	if len(parts) != 5 {
-		// 格式错误，记录错误日志
 		logrus.Errorf("❌ 回调数据格式错误: %s", data)
 		return
 	}
 
-	// 步骤6：提取行动和服务信息
 	action, service, env, version, user := parts[0], parts[1], parts[2], parts[3], parts[4]
 
-	// 步骤7：删除原弹窗消息
+	// 步骤5：删除原弹窗
 	message := callback["message"].(map[string]interface{})
 	messageID := int(message["message_id"].(float64))
 	chatID := fmt.Sprintf("%v", message["chat"].(map[string]interface{})["id"])
 	bm.DeleteMessage(bm.getDefaultBot(), chatID, messageID)
 
-	// 步骤8：构建反馈消息文本
-	resultText := fmt.Sprintf("✅ 用户 @%d %s 部署请求: *%s* v`%s` 在 `%s`",
+	// 步骤6：构建反馈消息文本
+	resultText := fmt.Sprintf("✅ 用户 @%s %s 部署请求: *%s* v`%s` 在 `%s`",
 		userID, action, service, version, env)
 
-	// 步骤9：发送反馈消息
+	// 步骤7：发送反馈消息
 	bm.SendSimpleMessage(bm.getDefaultBot(), chatID, resultText, "Markdown")
 
-	// 步骤10：根据行动处理确认或拒绝
+	// 步骤8：根据行动处理确认或拒绝
 	if action == "confirm" {
 		task := models.DeployRequest{
 			Service:      service,
@@ -231,22 +233,31 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, allowedUsers
 }
 
 // SendConfirmation 发送确认弹窗
-func (bm *BotManager) SendConfirmation(service, env, user, version string, allowedUsers []int64) error {
+func (bm *BotManager) SendConfirmation(service, env, user, version string, allowedUsers []string) error {
 	// 步骤1：根据服务选择机器人
 	bot, err := bm.getBotForService(service)
 	if err != nil {
 		return err
 	}
 
-	// 步骤2：构建确认消息文本
+	// 步骤2：构建@用户列表
+	var mentions strings.Builder
+	for _, uid := range allowedUsers {
+		mentions.WriteString("@")
+		mentions.WriteString(uid)
+		mentions.WriteString(" ")
+	}
+
+	// 步骤3：构建确认消息文本，包括@用户
 	message := fmt.Sprintf("*🛡️ 部署确认*\n\n"+
 		"**服务**: `%s`\n"+
 		"**环境**: `%s`\n"+
 		"**版本**: `%s`\n"+
 		"**用户**: `%s`\n\n"+
-		"*请选择操作*", service, env, version, user)
+		"*请选择操作*\n\n"+
+		"通知: %s", service, env, version, user, mentions.String())
 
-	// 步骤3：构建内联键盘
+	// 步骤4：构建内联键盘
 	callbackDataConfirm := fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, version, user)
 	callbackDataReject := fmt.Sprintf("reject:%s:%s:%s:%s", service, env, version, user)
 
@@ -259,13 +270,13 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, allow
 		},
 	}
 
-	// 步骤4：发送带键盘的消息
+	// 步骤5：发送带键盘的消息
 	_, err = bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2")
 	if err != nil {
 		return err
 	}
 
-	// 步骤5：记录发送成功日志
+	// 步骤6：记录发送成功日志
 	green := color.New(color.FgGreen)
 	green.Printf("✅ 确认弹窗发送成功: %s v%s [%s]\n", service, version, env)
 	return nil
@@ -389,19 +400,13 @@ func (bm *BotManager) DeleteMessage(bot *TelegramBot, chatID string, messageID i
 	jsonData, _ := json.Marshal(payload)
 
 	// 步骤3：发送POST请求
-	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage", bot.Token),
+	resp, _ := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage", bot.Token),
 		"application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	// 步骤4：检查响应状态（避免未使用resp）
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("删除消息失败，状态码: %d", resp.StatusCode)
 	}
 
-	// 步骤5：返回nil表示成功
+	// 步骤4：返回nil表示成功
 	return nil
 }
 

@@ -18,8 +18,13 @@ import (
 
 // MongoClient MongoDB客户端
 type MongoClient struct {
-	client *mongo.Client      // MongoDB客户端
+	client *mongo.Client      // MongoDB客户端（未导出）
 	cfg    *config.MongoConfig // MongoDB配置
+}
+
+// GetClient 获取MongoDB客户端
+func (m *MongoClient) GetClient() *mongo.Client {
+	return m.client
 }
 
 // NewMongoClient 创建MongoDB客户端
@@ -199,11 +204,11 @@ func (m *MongoClient) QueryPendingTasks(environment, user string) ([]models.Depl
 	// 步骤2：反序列化任务
 	for cursor.Next(ctx) {
 		var task struct {
-			Service      string   `bson:"service"`
-			Environment  string   `bson:"environment"`
-			Version      string   `bson:"version"`
-			User         string   `bson:"user"`
-			Status       string   `bson:"status"`
+			Service      string    `bson:"service"`
+			Environment  string    `bson:"environment"`
+			Version      string    `bson:"version"`
+			User         string    `bson:"user"`
+			Status       string    `bson:"status"`
 			CreatedAt    time.Time `bson:"created_at"`
 			Retries      int       `bson:"retries"`
 		}
@@ -236,10 +241,10 @@ func (m *MongoClient) UpdateTaskStatus(service, version, environment, user, stat
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
 	_, err := collection.UpdateOne(ctx,
 		bson.M{
-			"service":    service,
-			"version":    version,
+			"service":     service,
+			"version":     version,
 			"environment": environment,
-			"user":       user,
+			"user":        user,
 		},
 		bson.M{
 			"$set": bson.M{
@@ -294,11 +299,11 @@ func (m *MongoClient) CheckDuplicateTask(deploy models.DeployRequest) (bool, err
 	// 步骤1：查询任务集合
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
 	count, err := collection.CountDocuments(ctx, bson.M{
-		"service":    deploy.Service,
-		"version":    deploy.Version,
+		"service":     deploy.Service,
+		"version":     deploy.Version,
 		"environment": deploy.Environments[0],
-		"user":       deploy.User,
-		"status":     deploy.Status,
+		"user":        deploy.User,
+		"status":      deploy.Status,
 	})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -376,11 +381,11 @@ func (m *MongoClient) CleanCompletedTasks() error {
 		// 删除任务记录
 		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", task.Environment))
 		_, err := collection.DeleteOne(ctx, bson.M{
-			"service":    task.Service,
-			"version":    task.Version,
+			"service":     task.Service,
+			"version":     task.Version,
 			"environment": task.Environment,
-			"user":       task.User,
-			"status":     task.Status,
+			"user":        task.User,
+			"status":      task.Status,
 		})
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
@@ -393,11 +398,11 @@ func (m *MongoClient) CleanCompletedTasks() error {
 
 		// 删除待删除记录
 		_, err = deleteTasksColl.DeleteOne(ctx, bson.M{
-			"service":    task.Service,
-			"version":    task.Version,
+			"service":     task.Service,
+			"version":     task.Version,
 			"environment": task.Environment,
 			"user":        task.User,
-			"status":     task.Status,
+			"status":      task.Status,
 		})
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
