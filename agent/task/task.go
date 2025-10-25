@@ -1,3 +1,4 @@
+//
 package task
 
 import (
@@ -13,6 +14,7 @@ import (
 	"k8s-cicd/agent/models"
 	"k8s-cicd/agent/telegram"
 
+	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
 
@@ -38,7 +40,7 @@ func NewTaskQueue(workers int) *TaskQueue {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "NewTaskQueue",
 		"took":   time.Since(startTime),
-	}).Infof("任务队列初始化完成，worker数量: %d", workers)
+	}).Infof(color.GreenString("任务队列初始化完成，worker数量: %d", workers))
 	return q
 }
 
@@ -57,7 +59,7 @@ func (q *TaskQueue) StartWorkers(cfg *config.Config, mongo *client.MongoClient, 
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "StartWorkers",
 		"took":   time.Since(startTime),
-	}).Infof("启动 %d 个任务worker", q.workers)
+	}).Infof(color.GreenString("启动 %d 个任务worker", q.workers))
 }
 
 // worker 任务worker
@@ -69,7 +71,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "worker",
 		"took":   time.Since(startTime),
-	}).Infof("Worker-%d 启动", workerID)
+	}).Infof(color.GreenString("Worker-%d 启动", workerID))
 
 	for {
 		select {
@@ -78,7 +80,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "worker",
 				"took":   time.Since(startTime),
-			}).Infof("Worker-%d 停止", workerID)
+			}).Infof(color.GreenString("Worker-%d 停止", workerID))
 			return
 		default:
 			task, ok := q.Dequeue()
@@ -91,7 +93,15 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "worker",
 				"took":   time.Since(startTime),
-			}).Infof("Worker-%d 执行任务: %s", workerID, task.ID)
+				"data": logrus.Fields{
+					"task_id": task.ID,
+					"service": task.Service,
+					"version": task.Version,
+					"environment": task.Environments,
+					"user":    task.User,
+					"status":  task.Status,
+				},
+			}).Infof(color.GreenString("Worker-%d 开始执行任务: %s", workerID, task.ID))
 
 			err := q.executeTask(cfg, mongo, k8s, apiClient, task, botMgr)
 			if err != nil {
@@ -99,7 +109,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "worker",
 					"took":   time.Since(startTime),
-				}).Errorf("Worker-%d 任务失败: %v", workerID, err)
+				}).Errorf(color.RedString("Worker-%d 任务失败: %s, 错误: %v", workerID, task.ID, err))
 				if task.Retries < cfg.Task.MaxRetries {
 					task.Retries++
 					retryDelay := time.Duration(cfg.Task.RetryDelay*task.Retries) * time.Second
@@ -107,7 +117,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "worker",
 						"took":   time.Since(startTime),
-					}).Infof("Worker-%d 任务重试 [%d/%d]，%ds后重试: %s", workerID, task.Retries, cfg.Task.MaxRetries, int(retryDelay.Seconds()), task.ID)
+					}).Infof(color.GreenString("Worker-%d 任务重试 [%d/%d]，%ds后重试: %s", workerID, task.Retries, cfg.Task.MaxRetries, int(retryDelay.Seconds()), task.ID))
 					time.Sleep(retryDelay)
 					q.Enqueue(task)
 				} else {
@@ -115,14 +125,14 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "worker",
 						"took":   time.Since(startTime),
-					}).Errorf("Worker-%d 任务永久失败: %s", workerID, task.ID)
+					}).Errorf(color.RedString("Worker-%d 任务永久失败: %s", workerID, task.ID))
 				}
 			} else {
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "worker",
 					"took":   time.Since(startTime),
-				}).Infof("Worker-%d 任务成功: %s", workerID, task.ID)
+				}).Infof(color.GreenString("Worker-%d 任务成功: %s", workerID, task.ID))
 			}
 		}
 	}
@@ -139,7 +149,7 @@ func (q *TaskQueue) Enqueue(task models.Task) {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "Enqueue",
 		"took":   time.Since(startTime),
-	}).Debugf("任务入队: %s (队列长度: %d)", task.ID, q.queue.Len())
+	}).Infof(color.GreenString("任务入队: %s (队列长度: %d)", task.ID, q.queue.Len()))
 }
 
 // Dequeue 任务出队
@@ -159,7 +169,7 @@ func (q *TaskQueue) Dequeue() (models.Task, bool) {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "Dequeue",
 		"took":   time.Since(startTime),
-	}).Debugf("任务出队: %s (剩余: %d)", task.ID, q.queue.Len())
+	}).Infof(color.GreenString("任务出队: %s (剩余: %d)", task.ID, q.queue.Len()))
 	return task, true
 }
 
@@ -186,7 +196,7 @@ func (q *TaskQueue) Stop() {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "Stop",
 		"took":   time.Since(startTime),
-	}).Infof("任务队列停止 (剩余任务: %d)", q.Len())
+	}).Infof(color.GreenString("任务队列停止 (剩余任务: %d)", q.Len()))
 }
 
 // executeTask 执行部署任务
@@ -198,7 +208,15 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "executeTask",
 			"took":   time.Since(startTime),
-		}).Infof("任务非pending状态，跳过执行: %s, 状态: %s", task.ID, task.Status)
+			"data": logrus.Fields{
+				"task_id": task.ID,
+				"service": task.Service,
+				"version": task.Version,
+				"environment": task.Environments,
+				"user":    task.User,
+				"status":  task.Status,
+			},
+		}).Infof(color.GreenString("任务非pending状态，跳过执行: %s", task.ID))
 		return nil
 	}
 
@@ -208,10 +226,26 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "executeTask",
 		"took":   time.Since(startTime),
-	}).Infof("执行部署任务: 服务=%s, 环境=%s, 版本=%s, 用户=%s", task.Service, namespace, task.Version, task.User)
+		"data": logrus.Fields{
+			"task_id": task.ID,
+			"service": task.Service,
+			"version": task.Version,
+			"environment": namespace,
+			"user":    task.User,
+		},
+	}).Infof(color.GreenString("开始执行任务: %s", task.ID))
 
 	// 步骤3：获取旧版本
 	oldVersion := k8s.GetCurrentImage(namespace, task.Service)
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "executeTask",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"task_id": task.ID,
+			"old_version": oldVersion,
+		},
+	}).Infof(color.GreenString("获取旧版本: %s", oldVersion))
 
 	// 步骤4：更新镜像
 	newImage := task.Version
@@ -221,18 +255,48 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "executeTask",
 			"took":   time.Since(startTime),
-		}).Errorf("更新镜像失败: %v", err)
-		mongo.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, "failure")
-		botMgr.SendNotification(task.Service, namespace, task.User, oldVersion, task.Version, false)
+			"data": logrus.Fields{
+				"task_id": task.ID,
+				"service": task.Service,
+				"version": newImage,
+			},
+		}).Errorf(color.RedString("更新镜像失败: %v", err))
+		if updateErr := mongo.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, "failure"); updateErr != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"took":   time.Since(startTime),
+			}).Errorf(color.RedString("更新MongoDB状态失败: %v", updateErr))
+		}
+		if notifyErr := botMgr.SendNotification(task.Service, namespace, task.User, oldVersion, task.Version, false); notifyErr != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"took":   time.Since(startTime),
+			}).Errorf(color.RedString("发送失败通知失败: %v", notifyErr))
+		}
 		return fmt.Errorf("更新镜像失败: %v", err)
 	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "executeTask",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"task_id": task.ID,
+			"service": task.Service,
+			"version": newImage,
+		},
+	}).Infof(color.GreenString("镜像更新成功: %s", newImage))
 
 	// 步骤5：等待就绪
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "executeTask",
 		"took":   time.Since(startTime),
-	}).Info("等待新版本就绪")
+		"data": logrus.Fields{
+			"task_id": task.ID,
+		},
+	}).Infof(color.GreenString("等待新版本就绪"))
 	success := true
 	err = k8s.WaitForDeploymentReady(namespace, task.Service, task.Version)
 	if err != nil {
@@ -240,16 +304,42 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "executeTask",
 			"took":   time.Since(startTime),
-		}).Errorf("部署超时: %v", err)
+			"data": logrus.Fields{
+				"task_id": task.ID,
+			},
+		}).Errorf(color.RedString("部署超时: %v", err))
 		success = false
-		err = k8s.RollbackDeployment(namespace, task.Service, oldVersion)
-		if err != nil {
+		rollbackErr := k8s.RollbackDeployment(namespace, task.Service, oldVersion)
+		if rollbackErr != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "executeTask",
 				"took":   time.Since(startTime),
-			}).Errorf("回滚失败: %v", err)
+				"data": logrus.Fields{
+					"task_id": task.ID,
+					"old_version": oldVersion,
+				},
+			}).Errorf(color.RedString("回滚失败: %v", rollbackErr))
+		} else {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"took":   time.Since(startTime),
+				"data": logrus.Fields{
+					"task_id": task.ID,
+					"old_version": oldVersion,
+				},
+			}).Infof(color.GreenString("回滚成功: %s", oldVersion))
 		}
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"task_id": task.ID,
+			},
+		}).Infof(color.GreenString("新版本就绪"))
 	}
 
 	// 步骤6：发送通知
@@ -259,7 +349,19 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "executeTask",
 			"took":   time.Since(startTime),
-		}).Errorf("发送通知失败: %v", err)
+			"data": logrus.Fields{
+				"task_id": task.ID,
+			},
+		}).Errorf(color.RedString("发送通知失败: %v", err))
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"task_id": task.ID,
+			},
+		}).Infof(color.GreenString("通知发送成功"))
 	}
 
 	// 步骤7：更新状态
@@ -273,7 +375,20 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "executeTask",
 			"took":   time.Since(startTime),
-		}).Errorf("更新状态失败: %v", err)
+			"data": logrus.Fields{
+				"task_id": task.ID,
+			},
+		}).Errorf(color.RedString("更新MongoDB状态失败: %v", err))
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"task_id": task.ID,
+				"status":  status,
+			},
+		}).Infof(color.GreenString("MongoDB状态更新成功: %s", status))
 	}
 
 	// 步骤8：推送状态
@@ -290,14 +405,35 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "executeTask",
 			"took":   time.Since(startTime),
-		}).Errorf("推送状态失败: %v", err)
+			"data": logrus.Fields{
+				"task_id": task.ID,
+			},
+		}).Errorf(color.RedString("推送状态失败: %v", err))
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"task_id": task.ID,
+				"status":  status,
+			},
+		}).Infof(color.GreenString("状态推送成功"))
 	}
 
-	// 步骤9：记录总结
+	// 步骤9：总结任务执行结果
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "executeTask",
 		"took":   time.Since(startTime),
-	}).Infof("任务完成: 服务=%s, 状态=%s, 耗时=%v", task.Service, status, time.Since(startTime))
+		"data": logrus.Fields{
+			"task_id": task.ID,
+			"service": task.Service,
+			"version": task.Version,
+			"environment": namespace,
+			"user":    task.User,
+			"status":  status,
+		},
+	}).Infof(color.GreenString("任务执行完成: %s, 状态: %s, 耗时: %v", task.ID, status, time.Since(startTime)))
 	return nil
 }

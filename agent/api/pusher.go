@@ -26,7 +26,6 @@ type APIClient struct {
 // NewAPIClient 创建API客户端
 func NewAPIClient(cfg *config.APIConfig) *APIClient {
 	startTime := time.Now()
-	// 步骤1：初始化客户端结构
 	client := &APIClient{
 		cfg:     cfg,
 		client:  &http.Client{Timeout: 10 * time.Second},
@@ -36,7 +35,7 @@ func NewAPIClient(cfg *config.APIConfig) *APIClient {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "NewAPIClient",
 		"took":   time.Since(startTime),
-	}).Info("API客户端创建成功")
+	}).Infof(color.GreenString("API客户端创建成功"))
 	return client
 }
 
@@ -50,59 +49,68 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "PushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("JSON序列化失败: %v", err))
+		}).Errorf(color.RedString("推送失败: JSON序列化错误: %v", err))
 		return fmt.Errorf("JSON序列化失败: %v", err)
 	}
 
-	// 步骤2：记录请求日志
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "PushData",
-		"took":   time.Since(startTime),
-		"data": logrus.Fields{
-			"method":  "POST",
-			"url":     c.baseURL + "/push",
-			"headers": map[string]string{"Content-Type": "application/json"},
-			"body":    string(jsonData),
-		},
-	}).Info("发送HTTP请求")
-
-	// 步骤3：发送POST请求
+	// 步骤2：发送POST请求
 	resp, err := c.client.Post(c.baseURL+"/push", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "PushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("HTTP请求失败: %v", err))
+		}).Errorf(color.RedString("推送失败: HTTP请求错误: %v", err))
 		return err
 	}
 	defer resp.Body.Close()
 
-	// 步骤4：读取响应体
-	body, _ := io.ReadAll(resp.Body)
+	// 步骤3：读取响应体
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "PushData",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("推送失败: 读取响应错误: %v", err))
+		return err
+	}
 
-	// 步骤5：记录响应日志
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "PushData",
-		"took":   time.Since(startTime),
-		"data": logrus.Fields{
-			"status": resp.StatusCode,
-			"body":   string(body),
-		},
-	}).Infof(color.GreenString("收到HTTP响应"))
-
-	// 步骤6：检查响应状态
+	// 步骤4：检查响应状态
 	if resp.StatusCode != http.StatusOK {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "PushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("HTTP错误: %d - %s", resp.StatusCode, string(body)))
+			"data": logrus.Fields{
+				"status": resp.StatusCode,
+				"body":   string(body),
+			},
+		}).Errorf(color.RedString("推送失败: HTTP错误: %d", resp.StatusCode))
 		return fmt.Errorf("HTTP错误: %d - %s", resp.StatusCode, string(body))
 	}
 
+	// 步骤5：总结推送结果
+	uniqueServices := make(map[string]struct{})
+	for _, s := range req.Services {
+		uniqueServices[s] = struct{}{}
+	}
+	uniqueEnvs := make(map[string]struct{})
+	for _, e := range req.Environments {
+		uniqueEnvs[e] = struct{}{}
+	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "PushData",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"services":        uniqueServices,
+			"service_count":   len(uniqueServices),
+			"environments":    uniqueEnvs,
+			"environment_count": len(uniqueEnvs),
+			"deployments_count": len(req.Deployments),
+		},
+	}).Infof(color.GreenString("推送 /push 接口成功，完成数据交互，服务数: %d, 环境数: %d, 部署数: %d", len(uniqueServices), len(uniqueEnvs), len(req.Deployments)))
 	return nil
 }
 
@@ -115,7 +123,7 @@ func (c *APIClient) QueryTasks(req models.QueryRequest) ([]models.DeployRequest,
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "QueryTasks",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("查询请求缺少environment或service参数"))
+		}).Errorf(color.RedString("查询失败: 缺少environment或service参数"))
 		return nil, fmt.Errorf("查询请求缺少environment或service参数")
 	}
 
@@ -126,40 +134,35 @@ func (c *APIClient) QueryTasks(req models.QueryRequest) ([]models.DeployRequest,
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "QueryTasks",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("JSON序列化失败: %v", err))
+		}).Errorf(color.RedString("查询失败: JSON序列化错误: %v", err))
 		return nil, fmt.Errorf("JSON序列化失败: %v", err)
 	}
 
-	// 步骤3：记录请求日志
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "QueryTasks",
-		"took":   time.Since(startTime),
-		"data": logrus.Fields{
-			"method":  "POST",
-			"url":     c.baseURL + "/query",
-			"headers": map[string]string{"Content-Type": "application/json"},
-			"body":    string(jsonData),
-		},
-	}).Info("发送HTTP请求")
-
-	// 步骤4：发送POST请求
+	// 步骤3：发送POST请求
 	resp, err := c.client.Post(c.baseURL+"/query", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "QueryTasks",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("HTTP请求失败: %v", err))
+		}).Errorf(color.RedString("查询失败: HTTP请求错误: %v", err))
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	// 步骤5：读取响应体
-	body, _ := io.ReadAll(resp.Body)
+	// 步骤4：读取响应体
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "QueryTasks",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("查询失败: 读取响应错误: %v", err))
+		return nil, err
+	}
 
-	// 步骤6：记录响应日志
-	if resp.StatusCode == http.StatusOK {
+	// 步骤5：检查响应状态并解析
+	if resp.StatusCode != http.StatusOK {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "QueryTasks",
@@ -168,39 +171,33 @@ func (c *APIClient) QueryTasks(req models.QueryRequest) ([]models.DeployRequest,
 				"status": resp.StatusCode,
 				"body":   string(body),
 			},
-		}).Infof(color.GreenString("收到HTTP响应"))
-	} else {
+		}).Errorf(color.RedString("查询失败: HTTP错误: %d", resp.StatusCode))
+		return nil, fmt.Errorf("HTTP %d - %s", resp.StatusCode, string(body))
+	}
+
+	var tasks []models.DeployRequest
+	if err := json.Unmarshal(body, &tasks); err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "QueryTasks",
 			"took":   time.Since(startTime),
-			"data": logrus.Fields{
-				"status": resp.StatusCode,
-				"body":   string(body),
-			},
-		}).Errorf(color.RedString("HTTP错误: %d - %s", resp.StatusCode, string(body)))
+		}).Infof(color.GreenString("查询 /query 接口成功，无任务返回"))
+		return []models.DeployRequest{}, nil
 	}
 
-	// 步骤7：解析响应
-	if resp.StatusCode == http.StatusOK {
-		var tasks []models.DeployRequest
-		if err := json.Unmarshal(body, &tasks); err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "QueryTasks",
-				"took":   time.Since(startTime),
-			}).Infof(color.GreenString("无任务返回"))
-			return []models.DeployRequest{}, nil
-		}
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "QueryTasks",
-			"took":   time.Since(startTime),
-		}).Infof(color.GreenString("查询到 %d 个任务", len(tasks)))
-		return tasks, nil
-	}
-
-	return nil, fmt.Errorf("HTTP %d - %s", resp.StatusCode, string(body))
+	// 步骤6：总结查询结果
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "QueryTasks",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"service":     req.Service,
+			"environment": req.Environment,
+			"task_count":  len(tasks),
+			"tasks":       tasks,
+		},
+	}).Infof(color.GreenString("查询 /query 接口成功，收到 %d 个任务", len(tasks)))
+	return tasks, nil
 }
 
 // UpdateStatus POST /status - 更新部署状态
@@ -213,65 +210,60 @@ func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateStatus",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("JSON序列化失败: %v", err))
+		}).Errorf(color.RedString("状态更新失败: JSON序列化错误: %v", err))
 		return fmt.Errorf("JSON序列化失败: %v", err)
 	}
 
-	// 步骤2：记录请求日志
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "UpdateStatus",
-		"took":   time.Since(startTime),
-		"data": logrus.Fields{
-			"method":  "POST",
-			"url":     c.baseURL + "/status",
-			"headers": map[string]string{"Content-Type": "application/json"},
-			"body":    string(jsonData),
-		},
-	}).Info("发送HTTP请求")
-
-	// 步骤3：发送POST请求
+	// 步骤2：发送POST请求
 	resp, err := c.client.Post(c.baseURL+"/status", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateStatus",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("HTTP请求失败: %v", err))
+		}).Errorf(color.RedString("状态更新失败: HTTP请求错误: %v", err))
 		return err
 	}
 	defer resp.Body.Close()
 
-	// 步骤4：读取响应体
-	body, _ := io.ReadAll(resp.Body)
-
-	// 步骤5：记录响应日志
-	if resp.StatusCode == http.StatusOK {
+	// 步骤3：读取响应体
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateStatus",
 			"took":   time.Since(startTime),
-			"data": logrus.Fields{
-				"status": resp.StatusCode,
-				"body":   string(body),
-			},
-		}).Infof(color.GreenString("收到HTTP响应"))
-	} else {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "UpdateStatus",
-			"took":   time.Since(startTime),
-			"data": logrus.Fields{
-				"status": resp.StatusCode,
-				"body":   string(body),
-			},
-		}).Errorf(color.RedString("HTTP错误: %d - %s", resp.StatusCode, string(body)))
+		}).Errorf(color.RedString("状态更新失败: 读取响应错误: %v", err))
+		return err
 	}
 
-	// 步骤6：检查响应状态
+	// 步骤4：检查响应状态
 	if resp.StatusCode != http.StatusOK {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "UpdateStatus",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"status": resp.StatusCode,
+				"body":   string(body),
+				"request": req,
+			},
+		}).Errorf(color.RedString("状态更新失败: HTTP错误: %d", resp.StatusCode))
 		return fmt.Errorf("HTTP错误: %d - %s", resp.StatusCode, string(body))
 	}
 
+	// 步骤5：总结状态更新结果
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "UpdateStatus",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"service":     req.Service,
+			"environment": req.Environment,
+			"version":     req.Version,
+			"status":      req.Status,
+			"user":        req.User,
+		},
+	}).Infof(color.GreenString("状态更新 /status 接口成功"))
 	return nil
 }
