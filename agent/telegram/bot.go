@@ -201,7 +201,11 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 	}
 
 	// 步骤3：构造确认消息并转义
-	message := escapeMarkdownV2(fmt.Sprintf("确认部署 %s 到 %s? (用户: %s, 版本: %s)", service, env, user, version))
+	message := fmt.Sprintf("确认部署 %s 到 %s? (用户: %s, 版本: %s)",
+		escapeMarkdownV2(service),
+		escapeMarkdownV2(env),
+		escapeMarkdownV2(user),
+		escapeMarkdownV2(version))
 	keyboard := map[string]interface{}{
 		"inline_keyboard": [][]map[string]string{
 			{
