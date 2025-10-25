@@ -1,4 +1,4 @@
-//
+//types.go
 package models
 
 import (
@@ -14,11 +14,13 @@ type PushRequest struct {
 
 // DeployRequest 单个部署任务请求
 type DeployRequest struct {
-	Service      string   `json:"service" bson:"service"`           // 服务名
-	Environments []string `json:"environments" bson:"environments"` // 环境列表
-	Version      string   `json:"version" bson:"version"`           // 版本（完整image:tag）
-	User         string   `json:"user" bson:"user"`                 // 用户
-	Status       string   `json:"status" bson:"status"`             // 状态
+	Service           string   `json:"service" bson:"service"`           // 服务名
+	Environments      []string `json:"environments" bson:"environments"` // 环境列表
+	Version           string   `json:"version" bson:"version"`           // 版本（完整image:tag）
+	User              string   `json:"user" bson:"user"`                 // 用户
+	Status            string   `json:"status" bson:"status"`             // 状态
+	CreatedAt         time.Time `json:"created_at" bson:"created_at"`     // 创建时间
+	ConfirmationSent  bool     `json:"confirmation_sent" bson:"confirmation_sent"` // 是否已发送确认
 }
 
 // QueryRequest 查询请求数据结构
@@ -41,7 +43,6 @@ type StatusRequest struct {
 type Task struct {
 	DeployRequest
 	ID        string    `json:"id" bson:"_id"`           // 任务ID
-	CreatedAt time.Time `json:"created_at" bson:"created_at"` // 创建时间
 	Retries   int       `json:"retries" bson:"retries"`      // 重试次数
 }
 

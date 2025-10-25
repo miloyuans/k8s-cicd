@@ -1,4 +1,4 @@
-//.go
+//k8s_client.go
 package kubernetes
 
 import (
@@ -100,32 +100,45 @@ func NewK8sClient(k8sCfg *config.K8sAuthConfig, deployCfg *config.DeployConfig) 
 	return client, nil
 }
 
-// UpdateDeploymentImage 滚动更新Deployment镜像
-func (k *K8sClient) UpdateDeploymentImage(namespace, deploymentName, newImage string) error {
+// UpdateWorkloadImage 滚动更新Deployment或DaemonSet镜像
+func (k *K8sClient) UpdateWorkloadImage(namespace, name, newImage string) error {
 	startTime := time.Now()
-	// 步骤1：获取Deployment
-	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "UpdateDeploymentImage",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("获取Deployment失败: %v", err))
-		return fmt.Errorf("获取Deployment失败: %v", err)
+	// 步骤1：尝试获取Deployment
+	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+	if err == nil {
+		// 是Deployment
+		return k.updateDeploymentImage(deploy, newImage, namespace, name, startTime)
 	}
 
-	// 步骤2：记录旧镜像
-	oldImage := k.GetCurrentImage(namespace, deploymentName)
+	// 步骤2：尝试获取DaemonSet
+	ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+	if err == nil {
+		// 是DaemonSet
+		return k.updateDaemonSetImage(ds, newImage, namespace, name, startTime)
+	}
+
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "UpdateDeploymentImage",
+		"method": "UpdateWorkloadImage",
+		"took":   time.Since(startTime),
+	}).Errorf(color.RedString("获取工作负载失败: %v", err))
+	return fmt.Errorf("获取工作负载失败: %v", err)
+}
+
+// updateDeploymentImage 更新Deployment镜像
+func (k *K8sClient) updateDeploymentImage(deploy *appsv1.Deployment, newImage, namespace, name string, startTime time.Time) error {
+	// 步骤1：记录旧镜像
+	oldImage := k.GetCurrentImage(namespace, name)
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "updateDeploymentImage",
 		"took":   time.Since(startTime),
 	}).Infof(color.GreenString("当前镜像: %s", oldImage))
 
-	// 步骤3：确保滚动更新策略
+	// 步骤2：确保滚动更新策略
 	k.ensureRollingUpdateStrategy(deploy)
 
-	// 步骤4：更新镜像
+	// 步骤3：更新镜像
 	updated := false
 	for i := range deploy.Spec.Template.Spec.Containers {
 		if strings.Contains(deploy.Spec.Template.Spec.Containers[i].Image, ":") {
@@ -136,32 +149,18 @@ func (k *K8sClient) UpdateDeploymentImage(namespace, deploymentName, newImage st
 	if !updated {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "UpdateDeploymentImage",
+			"method": "updateDeploymentImage",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("未找到可更新的容器镜像"))
-		return fmt.Errorf("未找到可更新的容器镜像")
+		}).Errorf(color.RedString("未找到镜像可更新"))
+		return fmt.Errorf("未找到镜像可更新")
 	}
 
-	// 步骤5：添加版本追踪注解
-	if deploy.Annotations == nil {
-		deploy.Annotations = make(map[string]string)
-	}
-	deploy.Annotations["deployment.cicd.k8s/version"] = newImage
-	deploy.Annotations["deployment.cicd.k8s/updated-at"] = time.Now().Format(time.RFC3339)
-
-	// 步骤6：更新Deployment
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		result, err := k.Clientset.AppsV1().Deployments(namespace).Update(context.TODO(), deploy, metav1.UpdateOptions{})
-		if err != nil {
-			return err
-		}
-		*deploy = *result
-		return nil
-	})
+	// 步骤4：更新Deployment
+	_, err := k.Clientset.AppsV1().Deployments(namespace).Update(context.TODO(), deploy, metav1.UpdateOptions{})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "UpdateDeploymentImage",
+			"method": "updateDeploymentImage",
 			"took":   time.Since(startTime),
 		}).Errorf(color.RedString("更新Deployment失败: %v", err))
 		return fmt.Errorf("更新Deployment失败: %v", err)
@@ -169,247 +168,145 @@ func (k *K8sClient) UpdateDeploymentImage(namespace, deploymentName, newImage st
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "UpdateDeploymentImage",
+		"method": "updateDeploymentImage",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("滚动更新成功: %s -> %s", oldImage, newImage))
+	}).Infof(color.GreenString("Deployment镜像更新成功: %s -> %s", oldImage, newImage))
 	return nil
 }
 
-// ensureRollingUpdateStrategy 确保滚动更新策略
-func (k *K8sClient) ensureRollingUpdateStrategy(deploy *appsv1.Deployment) {
-	startTime := time.Now()
-	// 步骤1：设置策略类型
-	if deploy.Spec.Strategy.Type == "" {
-		deploy.Spec.Strategy.Type = appsv1.RollingUpdateDeploymentStrategyType
-	}
+// updateDaemonSetImage 更新DaemonSet镜像
+func (k *K8sClient) updateDaemonSetImage(ds *appsv1.DaemonSet, newImage, namespace, name string, startTime time.Time) error {
+	// 步骤1：记录旧镜像
+	oldImage := k.GetCurrentImage(namespace, name)
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "updateDaemonSetImage",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("当前镜像: %s", oldImage))
 
-	// 步骤2：初始化滚动更新参数
-	if deploy.Spec.Strategy.RollingUpdate == nil {
-		deploy.Spec.Strategy.RollingUpdate = &appsv1.RollingUpdateDeployment{}
-	}
-
-	// 步骤3：设置MaxUnavailable
-	if deploy.Spec.Strategy.RollingUpdate.MaxUnavailable == nil {
-		deploy.Spec.Strategy.RollingUpdate.MaxUnavailable = &intstr.IntOrString{
-			Type:   intstr.String,
-			StrVal: "25%",
+	// 步骤2：更新镜像
+	updated := false
+	for i := range ds.Spec.Template.Spec.Containers {
+		if strings.Contains(ds.Spec.Template.Spec.Containers[i].Image, ":") {
+			ds.Spec.Template.Spec.Containers[i].Image = newImage
+			updated = true
 		}
 	}
+	if !updated {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "updateDaemonSetImage",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("未找到镜像可更新"))
+		return fmt.Errorf("未找到镜像可更新")
+	}
 
-	// 步骤4：设置MaxSurge
-	if deploy.Spec.Strategy.RollingUpdate.MaxSurge == nil {
-		deploy.Spec.Strategy.RollingUpdate.MaxSurge = &intstr.IntOrString{
-			Type:   intstr.String,
-			StrVal: "25%",
-		}
+	// 步骤3：更新DaemonSet
+	_, err := k.Clientset.AppsV1().DaemonSets(namespace).Update(context.TODO(), ds, metav1.UpdateOptions{})
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "updateDaemonSetImage",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("更新DaemonSet失败: %v", err))
+		return fmt.Errorf("更新DaemonSet失败: %v", err)
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "ensureRollingUpdateStrategy",
+		"method": "updateDaemonSetImage",
 		"took":   time.Since(startTime),
-	}).Debugf(color.GreenString("滚动更新策略设置完成"))
+	}).Infof(color.GreenString("DaemonSet镜像更新成功: %s -> %s", oldImage, newImage))
+	return nil
 }
 
 // GetCurrentImage 获取当前镜像
-func (k *K8sClient) GetCurrentImage(namespace, deploymentName string) string {
-	startTime := time.Now()
-	// 步骤1：获取Deployment
-	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetCurrentImage",
-			"took":   time.Since(startTime),
-		}).Warnf(color.RedString("获取Deployment失败: %v", err))
-		return "unknown"
+func (k *K8sClient) GetCurrentImage(namespace, name string) string {
+	// 尝试Deployment
+	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+	if err == nil && len(deploy.Spec.Template.Spec.Containers) > 0 {
+		return deploy.Spec.Template.Spec.Containers[0].Image
 	}
 
-	// 步骤2：查找镜像
-	for _, container := range deploy.Spec.Template.Spec.Containers {
-		if strings.Contains(container.Image, ":") {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "GetCurrentImage",
-				"took":   time.Since(startTime),
-			}).Debugf(color.GreenString("获取镜像: %s", container.Image))
-			return container.Image
-		}
+	// 尝试DaemonSet
+	ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+	if err == nil && len(ds.Spec.Template.Spec.Containers) > 0 {
+		return ds.Spec.Template.Spec.Containers[0].Image
 	}
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetCurrentImage",
-		"took":   time.Since(startTime),
-	}).Warn("未找到有效镜像")
+
 	return "unknown"
 }
 
-// WaitForDeploymentReady 等待新版本Deployment就绪
-func (k *K8sClient) WaitForDeploymentReady(namespace, deploymentName, newImageTag string) error {
+// WaitForWorkloadReady 等待Deployment或DaemonSet就绪
+func (k *K8sClient) WaitForWorkloadReady(namespace, name string) error {
 	startTime := time.Now()
-	// 步骤1：使用Poll等待Deployment就绪
-	err := wait.Poll(k.cfg.PollInterval, k.cfg.WaitTimeout, func() (bool, error) {
-		// 步骤1.1：获取Deployment
-		deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
+	// 步骤1：尝试Deployment
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "WaitForDeploymentReady",
-				"took":   time.Since(startTime),
-			}).Errorf(color.RedString("获取Deployment失败: %v", err))
-			return false, err
+			return err
 		}
-
-		// 步骤1.2：检查可用副本
-		if deploy.Status.AvailableReplicas != *deploy.Spec.Replicas {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "WaitForDeploymentReady",
-				"took":   time.Since(startTime),
-			}).Debug("副本未完全就绪")
-			return false, nil
+		if deploy.Status.AvailableReplicas == *deploy.Spec.Replicas {
+			return nil
 		}
+		return fmt.Errorf("Deployment未就绪")
+	})
+	if err == nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "WaitForWorkloadReady",
+			"took":   time.Since(startTime),
+		}).Infof(color.GreenString("Deployment就绪"))
+		return nil
+	}
 
-		// 步骤1.3：检查新版本Pod就绪
-		ready, err := k.checkNewVersionPodsReady(deploy, newImageTag)
+	// 步骤2：尝试DaemonSet
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "WaitForDeploymentReady",
-				"took":   time.Since(startTime),
-			}).Errorf(color.RedString("检查Pod就绪失败: %v", err))
-			return false, err
+			return err
 		}
-		return ready, nil
-	})
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "WaitForDeploymentReady",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("等待Deployment就绪失败: %v", err))
-		return err
-	}
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "WaitForDeploymentReady",
-		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("Deployment就绪"))
-	return nil
-}
-
-// checkNewVersionPodsReady 检查新版本Pod是否就绪
-func (k *K8sClient) checkNewVersionPodsReady(deploy *appsv1.Deployment, newImageTag string) (bool, error) {
-	startTime := time.Now()
-	// 步骤1：获取Pod列表
-	labelSelector := metav1.LabelSelector{MatchLabels: deploy.Spec.Selector.MatchLabels}
-	pods, err := k.Clientset.CoreV1().Pods(deploy.Namespace).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: labels.Set(labelSelector.MatchLabels).String(),
-	})
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "checkNewVersionPodsReady",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("获取Pod列表失败: %v", err))
-		return false, err
-	}
-
-	// 步骤2：检查Pod状态和镜像
-	newVersionReady := 0
-	for _, pod := range pods.Items {
-		if pod.Status.Phase == corev1.PodRunning {
-			for _, container := range pod.Spec.Containers {
-				if strings.HasSuffix(container.Image, newImageTag) {
-					newVersionReady++
-					break
-				}
-			}
+		if ds.Status.NumberAvailable == ds.Status.DesiredNumberScheduled {
+			return nil
 		}
-	}
-
-	// 步骤3：检查副本是否就绪
-	ready := newVersionReady == int(*deploy.Spec.Replicas)
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "checkNewVersionPodsReady",
-		"took":   time.Since(startTime),
-	}).Debugf(color.GreenString("新版本Pod就绪: %d/%d", newVersionReady, *deploy.Spec.Replicas))
-	return ready, nil
-}
-
-// RollbackDeployment 回滚Deployment到旧版本
-func (k *K8sClient) RollbackDeployment(namespace, deploymentName, oldImage string) error {
-	startTime := time.Now()
-	// 步骤1：更新镜像为旧版本
-	err := k.UpdateDeploymentImage(namespace, deploymentName, oldImage)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "RollbackDeployment",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("回滚镜像失败: %v", err))
-		return err
-	}
-
-	// 步骤2：等待回滚完成
-	err = k.WaitForRollbackReady(namespace, deploymentName)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "RollbackDeployment",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("等待回滚失败: %v", err))
-		return err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "RollbackDeployment",
-		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("回滚成功"))
-	return nil
-}
-
-// WaitForRollbackReady 等待回滚后Deployment就绪
-func (k *K8sClient) WaitForRollbackReady(namespace, deploymentName string) error {
-	startTime := time.Now()
-	// 步骤1：使用Poll等待就绪
-	err := wait.Poll(k.cfg.PollInterval, k.cfg.RollbackTimeout, func() (bool, error) {
-		deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
-		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "WaitForRollbackReady",
-				"took":   time.Since(startTime),
-			}).Errorf(color.RedString("获取Deployment失败: %v", err))
-			return false, err
-		}
-		ready := deploy.Status.ReadyReplicas == *deploy.Spec.Replicas
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "WaitForRollbackReady",
-			"took":   time.Since(startTime),
-		}).Debugf("回滚副本状态: %d/%d", deploy.Status.ReadyReplicas, *deploy.Spec.Replicas)
-		return ready, nil
+		return fmt.Errorf("DaemonSet未就绪")
 	})
-	if err != nil {
+	if err == nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "WaitForRollbackReady",
+			"method": "WaitForWorkloadReady",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("等待回滚就绪失败: %v", err))
-		return err
+		}).Infof(color.GreenString("DaemonSet就绪"))
+		return nil
 	}
+
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "WaitForRollbackReady",
+		"method": "WaitForWorkloadReady",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("回滚就绪"))
-	return nil
+	}).Errorf(color.RedString("等待工作负载就绪失败: %v", err))
+	return err
 }
 
-// DiscoverServicesFromNamespace 发现命名空间中的服务
+// RollbackWorkload 回滚Deployment或DaemonSet
+func (k *K8sClient) RollbackWorkload(namespace, name, oldImage string) error {
+	// 类似UpdateWorkloadImage，但设置回oldImage
+	return k.UpdateWorkloadImage(namespace, name, oldImage)
+}
+
+// IsWorkloadRunning 检查是否有Pod运行
+func (k *K8sClient) IsWorkloadRunning(namespace, name string) bool {
+	// 获取Pod列表
+	pods, err := k.Clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: labels.SelectorFromSet(map[string]string{"app": name}).String(),
+	})
+	if err != nil || len(pods.Items) == 0 {
+		return false
+	}
+	return true
+}
+
+// DiscoverServicesFromNamespace 发现命名空间中的服务（Deployment和DaemonSet）
 func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, error) {
 	startTime := time.Now()
 	// 步骤1：列出Deployment
@@ -429,7 +326,18 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 		return nil, fmt.Errorf("列出Deployment失败: %v", err)
 	}
 
-	// 步骤2：收集服务和版本
+	// 步骤2：列出DaemonSet
+	dss, err := k.Clientset.AppsV1().DaemonSets(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "DiscoverServicesFromNamespace",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("列出DaemonSet失败: %v", err))
+		return nil, fmt.Errorf("列出DaemonSet失败: %v", err)
+	}
+
+	// 步骤3：收集服务和版本
 	var services []string
 	for _, deploy := range deploys.Items {
 		serviceName := deploy.Name
@@ -437,7 +345,7 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "DiscoverServicesFromNamespace",
 			"took":   time.Since(startTime),
-		}).Debugf("发现服务: %s", serviceName)
+		}).Debugf("发现Deployment服务: %s", serviceName)
 
 		image := k.GetCurrentImage(namespace, serviceName)
 		if image == "unknown" {
@@ -445,7 +353,27 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "DiscoverServicesFromNamespace",
 				"took":   time.Since(startTime),
-			}).Warnf(color.RedString("获取服务 [%s] 版本失败", serviceName))
+			}).Warnf(color.RedString("获取Deployment服务 [%s] 版本失败", serviceName))
+			continue
+		}
+		services = append(services, fmt.Sprintf("%s:%s", serviceName, image))
+	}
+
+	for _, ds := range dss.Items {
+		serviceName := ds.Name
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "DiscoverServicesFromNamespace",
+			"took":   time.Since(startTime),
+		}).Debugf("发现DaemonSet服务: %s", serviceName)
+
+		image := k.GetCurrentImage(namespace, serviceName)
+		if image == "unknown" {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "DiscoverServicesFromNamespace",
+				"took":   time.Since(startTime),
+			}).Warnf(color.RedString("获取DaemonSet服务 [%s] 版本失败", serviceName))
 			continue
 		}
 		services = append(services, fmt.Sprintf("%s:%s", serviceName, image))
@@ -537,4 +465,17 @@ func (k *K8sClient) BuildPushRequest(cfg *config.Config) (models.PushRequest, er
 		"took":   time.Since(startTime),
 	}).Infof(color.GreenString("构建完成: %d 服务, %d 环境", len(services), len(environments)))
 	return pushReq, nil
+}
+
+// ensureRollingUpdateStrategy 确保滚动更新策略（仅Deployment）
+func (k *K8sClient) ensureRollingUpdateStrategy(deploy *appsv1.Deployment) {
+	if deploy.Spec.Strategy.Type == "" {
+		deploy.Spec.Strategy.Type = appsv1.RollingUpdateDeploymentStrategyType
+	}
+	if deploy.Spec.Strategy.RollingUpdate == nil {
+		deploy.Spec.Strategy.RollingUpdate = &appsv1.RollingUpdateDeployment{
+			MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+			MaxSurge:       &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+		}
+	}
 }

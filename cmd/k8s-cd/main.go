@@ -1,4 +1,4 @@
-//main.go
+//k8s-cicd/cmd/k8s-cd/main.go
 package main
 
 import (
