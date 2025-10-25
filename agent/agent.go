@@ -122,12 +122,12 @@ func (a *Agent) Start() {
 func (a *Agent) periodicPushDiscovery() {
 	startTime := time.Now()
 	// 步骤1：立即执行一次推送
-	a.performPushDiscovery(true) // 首次推送强制执行
+	a.performPushDiscovery(true) // 首次强制推送
 	// 步骤2：设置定时器进行周期性推送
 	ticker := time.NewTicker(a.config.API.PushInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		a.performPushDiscovery(false) // 后续推送根据对比
+		a.performPushDiscovery(false) // 后续根据对比
 	}
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),

@@ -501,3 +501,34 @@ func (m *MongoClient) StoreLastPushRequest(req models.PushRequest) error {
 	}).Info("推送数据存储成功")
 	return nil
 }
+
+// GetConfirmationStatus 获取任务的确认状态
+func (m *MongoClient) GetConfirmationStatus(service, version, environment, user string) (string, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
+	var task models.DeployRequest
+	err := collection.FindOne(ctx, bson.M{
+		"service":     service,
+		"version":     version,
+		"environment": environment,
+		"user":        user,
+	}).Decode(&task)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetConfirmationStatus",
+			"took":   time.Since(startTime),
+		}).Errorf("查询确认状态失败: %v", err)
+		return "", err
+	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetConfirmationStatus",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"status": task.ConfirmationStatus,
+		},
+	}).Infof("查询确认状态成功")
+	return task.ConfirmationStatus, nil
+}
