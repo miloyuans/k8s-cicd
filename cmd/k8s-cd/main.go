@@ -4,7 +4,6 @@ package main
 
 import (
 	"flag"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,30 +17,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// AcquireLock ensures only one instance is running
-func AcquireLock() (*os.File, error) {
-	lockFilePath := "/tmp/k8s-cicd-agent.lock"
-	f, err := os.OpenFile(lockFilePath, os.O_WRONLY|os.O_CREATE, 0600)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		return nil, err
-	}
-	return f, nil
-}
-
 // main 程序入口
 func main() {
 	startTime := time.Now()
-	// Acquire lock to ensure single instance
-	lockFile, err := AcquireLock()
-	if err != nil {
-		log.Fatalf("Another instance is already running: %v", err)
-	}
-	defer lockFile.Close()
-
 	// 步骤1：解析命令行参数
 	configFile := flag.String("config", "config.yaml", "配置文件路径")
 	flag.Parse()
@@ -71,7 +49,15 @@ func main() {
 			"took":   time.Since(startTime),
 		}).Fatalf("MongoDB连接失败: %v", err)
 	}
-	defer mongoClient.Close()
+	defer func() {
+		if err := mongoClient.Close(); err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "main",
+				"took":   time.Since(startTime),
+			}).Errorf("关闭MongoDB失败: %v", err)
+		}
+	}()
 
 	// 步骤4：创建Kubernetes客户端
 	k8sClient, err := kubernetes.NewK8sClient(&cfg.Kubernetes, &cfg.Deploy)

@@ -144,7 +144,7 @@ func (m *MongoClient) PushDeployments(deploys []models.DeployRequest) error {
 
 		// 步骤2：存储到环境特定任务集合，并添加confirmation_status字段
 		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
-		deploy.ConfirmationStatus = "not_sent" // 初始状态
+		deploy.ConfirmationStatus = "pending" // 初始状态为pending
 		_, err = collection.InsertOne(ctx, deploy)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
@@ -348,6 +348,9 @@ func (m *MongoClient) CleanCompletedTasks() error {
 // Close 关闭MongoDB连接
 func (m *MongoClient) Close() error {
 	startTime := time.Now()
+	if m.client == nil {
+		return nil
+	}
 	err := m.client.Disconnect(context.Background())
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -357,6 +360,7 @@ func (m *MongoClient) Close() error {
 		}).Errorf("关闭MongoDB连接失败: %v", err)
 		return err
 	}
+	m.client = nil // 防止重复关闭
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "Close",
