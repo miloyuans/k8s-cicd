@@ -187,23 +187,40 @@ func (a *Agent) periodicQueryTasks() {
 // performQueryTasks 执行单次任务查询
 func (a *Agent) performQueryTasks() {
 	startTime := time.Now()
-	// 步骤1：构建查询请求
-	req := models.QueryRequest{
-		Environment: a.config.User.Default, // 假设默认环境，或根据配置调整
-		Service:     "",                    // 查询所有服务
-	}
-	// 步骤2：查询任务
-	tasks, err := a.apiClient.QueryTasks(req)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "performQueryTasks",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("查询任务失败: %v", err))
-		return
+	// 步骤1：遍历所有配置的环境
+	var allTasks []models.DeployRequest
+	for env := range a.config.EnvMapping.Mappings {
+		// 步骤2：为每个环境查询任务
+		req := models.QueryRequest{
+			Environment: env,
+			Service:     "all", // 使用占位符表示查询所有服务
+		}
+		tasks, err := a.apiClient.QueryTasks(req)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "performQueryTasks",
+				"took":   time.Since(startTime),
+				"data": logrus.Fields{
+					"environment": env,
+				},
+			}).Errorf(color.RedString("查询任务失败: %v", err))
+			continue
+		}
+		allTasks = append(allTasks, tasks...)
 	}
 	// 步骤3：处理查询到的任务
-	a.processQueryTasks(tasks)
+	if len(allTasks) > 0 {
+		a.processQueryTasks(allTasks)
+	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "performQueryTasks",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"task_count": len(allTasks),
+		},
+	}).Infof(color.GreenString("查询到 %d 个任务", len(allTasks)))
 }
 
 // processQueryTasks 处理查询到的任务
@@ -272,10 +289,20 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 				if contains(a.config.Query.ConfirmEnvs, env) {
 					confirmChan := make(chan models.DeployRequest)
 					rejectChan := make(chan models.StatusRequest)
-					err = a.botMgr.SendConfirmation(t.Service, env, t.Version, t.User, confirmChan, rejectChan)
+					err := a.botMgr.SendConfirmation(t.Service, env, t.Version, t.User, confirmChan, rejectChan)
 					if err != nil {
 						// 要求2: 发送失败，设置"failed"
-						a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed")
+						err = a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed")
+						if err != nil {
+							logrus.WithFields(logrus.Fields{
+								"time":   time.Now().Format("2006-01-02 15:04:05"),
+								"method": "processQueryTasks",
+								"took":   time.Since(startTime),
+								"data": logrus.Fields{
+									"service": t.Service, "version": t.Version, "env": env,
+								},
+							}).Errorf(color.RedString("更新确认状态失败: %v", err))
+						}
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "processQueryTasks",
