@@ -187,29 +187,53 @@ func (a *Agent) periodicQueryTasks() {
 // performQueryTasks 执行单次任务查询
 func (a *Agent) performQueryTasks() {
 	startTime := time.Now()
-	// 步骤1：遍历所有配置的环境
-	var allTasks []models.DeployRequest
-	for env := range a.config.EnvMapping.Mappings {
-		// 步骤2：为每个环境查询任务
-		req := models.QueryRequest{
-			Environment: env,
-			Service:     "all", // 使用占位符表示查询所有服务
-		}
-		tasks, err := a.apiClient.QueryTasks(req)
-		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "performQueryTasks",
-				"took":   time.Since(startTime),
-				"data": logrus.Fields{
-					"environment": env,
-				},
-			}).Errorf(color.RedString("查询任务失败: %v", err))
-			continue
-		}
-		allTasks = append(allTasks, tasks...)
+	// 获取服务列表
+	pushReq, err := a.k8s.BuildPushRequest(a.config)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "performQueryTasks",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("获取服务列表失败: %v", err))
+		return
 	}
-	// 步骤3：处理查询到的任务
+
+	var allTasks []models.DeployRequest
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	// 对于每个环境和每个服务，并发查询
+	for env := range a.config.EnvMapping.Mappings {
+		for _, service := range pushReq.Services {
+			wg.Add(1)
+			go func(e string, s string) {
+				defer wg.Done()
+				req := models.QueryRequest{
+					Environment: e,
+					Service:     s,
+				}
+				tasks, err := a.apiClient.QueryTasks(req)
+				if err != nil {
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "performQueryTasks",
+						"took":   time.Since(startTime),
+						"data": logrus.Fields{
+							"environment": e,
+							"service":     s,
+						},
+					}).Errorf(color.RedString("查询任务失败: %v", err))
+					return
+				}
+				mu.Lock()
+				allTasks = append(allTasks, tasks...)
+				mu.Unlock()
+			}(env, service)
+		}
+	}
+	wg.Wait()
+
+	// 处理所有任务
 	if len(allTasks) > 0 {
 		a.processQueryTasks(allTasks)
 	}
