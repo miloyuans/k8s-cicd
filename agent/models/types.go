@@ -20,7 +20,7 @@ type DeployRequest struct {
 	User              string    `json:"user" bson:"user"`                 // 用户
 	Status            string    `json:"status" bson:"status"`             // 状态
 	CreatedAt         time.Time `json:"created_at" bson:"created_at"`     // 创建时间
-	ConfirmationSent  bool      `json:"confirmation_sent" bson:"confirmation_sent"` // 是否已发送确认
+	ConfirmationStatus string   `json:"confirmation_status" bson:"confirmation_status"` // 弹窗状态: not_sent, sent, confirmed, rejected, failed
 }
 
 // QueryRequest 查询请求数据结构

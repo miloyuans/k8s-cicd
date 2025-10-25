@@ -142,8 +142,9 @@ func (m *MongoClient) PushDeployments(deploys []models.DeployRequest) error {
 			return err
 		}
 
-		// 步骤2：存储到环境特定任务集合，并添加confirmation_sent字段
+		// 步骤2：存储到环境特定任务集合，并添加confirmation_status字段
 		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
+		deploy.ConfirmationStatus = "not_sent" // 初始状态
 		_, err = collection.InsertOne(ctx, deploy)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
@@ -153,124 +154,32 @@ func (m *MongoClient) PushDeployments(deploys []models.DeployRequest) error {
 			}).Errorf("存储任务失败: %v", err)
 			return err
 		}
-	}
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "PushDeployments",
-		"took":   time.Since(startTime),
-	}).Infof("推送 %d 个部署任务成功", len(deploys))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "PushDeployments",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"service":     deploy.Service,
+				"version":     deploy.Version,
+				"environment": deploy.Environments[0],
+				"user":        deploy.User,
+			},
+		}).Infof("推送任务成功: %s v%s [%s]", deploy.Service, deploy.Version, deploy.Environments[0])
+	}
 	return nil
 }
 
-// UpdateTaskStatus 更新任务状态
-func (m *MongoClient) UpdateTaskStatus(service, version, environment, user, status string) error {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
-	_, err := collection.UpdateOne(ctx,
-		bson.M{"service": service, "version": version, "environment": environment, "user": user},
-		bson.M{"$set": bson.M{"status": status}},
-	)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "UpdateTaskStatus",
-			"took":   time.Since(startTime),
-		}).Errorf("更新任务状态失败: %v", err)
-		return err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "UpdateTaskStatus",
-		"took":   time.Since(startTime),
-	}).Infof("任务状态更新成功: %s v%s [%s/%s] -> %s", service, version, environment, user, status)
-	return nil
-}
-
-// UpdateConfirmationSent 更新确认发送状态
-func (m *MongoClient) UpdateConfirmationSent(service, version, environment, user string) error {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
-	_, err := collection.UpdateOne(ctx,
-		bson.M{"service": service, "version": version, "environment": environment, "user": user},
-		bson.M{"$set": bson.M{"confirmation_sent": true}},
-	)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "UpdateConfirmationSent",
-			"took":   time.Since(startTime),
-		}).Errorf("更新确认发送状态失败: %v", err)
-		return err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "UpdateConfirmationSent",
-		"took":   time.Since(startTime),
-	}).Infof("确认发送状态更新成功: %s v%s [%s/%s]", service, version, environment, user)
-	return nil
-}
-
-// IsConfirmationSent 检查确认是否已发送
-func (m *MongoClient) IsConfirmationSent(deploy models.DeployRequest) (bool, error) {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	const maxRetries = 3
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
-		var task models.DeployRequest
-		err := collection.FindOne(ctx, bson.M{
-			"service":     deploy.Service,
-			"version":     deploy.Version,
-			"environment": deploy.Environments[0],
-			"user":        deploy.User,
-		}).Decode(&task)
-		if err == nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "IsConfirmationSent",
-				"took":   time.Since(startTime),
-			}).Infof("确认发送状态: %s v%s [%s/%s] -> %v", deploy.Service, deploy.Version, deploy.Environments[0], deploy.User, task.ConfirmationSent)
-			return task.ConfirmationSent, nil
-		}
-		if err != mongo.ErrNoDocuments {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "IsConfirmationSent",
-				"took":   time.Since(startTime),
-			}).Errorf("检查确认发送状态失败 (尝试 %d/%d): %v", attempt, maxRetries, err)
-			return false, err
-		}
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "IsConfirmationSent",
-			"took":   time.Since(startTime),
-		}).Warnf("未找到任务 (尝试 %d/%d): %s v%s [%s/%s]", attempt, maxRetries, deploy.Service, deploy.Version, deploy.Environments[0], deploy.User)
-		if attempt < maxRetries {
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-	return false, nil
-}
-
-// CheckDuplicateTask 检查任务是否已存在
+// CheckDuplicateTask 检查任务是否重复
 func (m *MongoClient) CheckDuplicateTask(deploy models.DeployRequest) (bool, error) {
 	startTime := time.Now()
 	ctx := context.Background()
-
-	// 步骤1：查询任务集合
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
 	count, err := collection.CountDocuments(ctx, bson.M{
 		"service":     deploy.Service,
 		"version":     deploy.Version,
 		"environment": deploy.Environments[0],
+		"user":        deploy.User,
 	})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -280,20 +189,19 @@ func (m *MongoClient) CheckDuplicateTask(deploy models.DeployRequest) (bool, err
 		}).Errorf("检查重复任务失败: %v", err)
 		return false, err
 	}
-
-	if count > 0 {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "CheckDuplicateTask",
-			"took":   time.Since(startTime),
-		}).Warnf("任务重复: %s v%s [%s]", deploy.Service, deploy.Version, deploy.Environments[0])
-		return true, nil
-	}
-
-	return false, nil
+	isDuplicate := count > 0
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "CheckDuplicateTask",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"is_duplicate": isDuplicate,
+		},
+	}).Infof("重复检查结果: %v", isDuplicate)
+	return isDuplicate, nil
 }
 
-// StoreTaskWithDeduplication 存储任务（带去重）
+// StoreTaskWithDeduplication 存储任务并去重
 func (m *MongoClient) StoreTaskWithDeduplication(deploy models.DeployRequest) error {
 	startTime := time.Now()
 	// 步骤1：检查重复
@@ -378,6 +286,7 @@ func (m *MongoClient) CleanCompletedTasks() error {
 			Environment string `bson:"environment"`
 			User        string `bson:"user"`
 			Status      string `bson:"status"`
+			ConfirmationStatus string `bson:"confirmation_status"`
 		}
 		if err := cursor.Decode(&task); err != nil {
 			continue
@@ -399,6 +308,15 @@ func (m *MongoClient) CleanCompletedTasks() error {
 				"took":   time.Since(startTime),
 			}).Errorf("删除任务记录失败: %v", err)
 			continue
+		}
+
+		// 如果状态为completed/rejected/failed，删除（状态已包含在任务中）
+		if task.ConfirmationStatus == "confirmed" || task.ConfirmationStatus == "rejected" || task.ConfirmationStatus == "failed" {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "CleanCompletedTasks",
+				"took":   time.Since(startTime),
+			}).Infof("清理完成状态任务: %s v%s [%s]", task.Service, task.Version, task.Environment)
 		}
 
 		// 删除待删除记录
@@ -445,4 +363,19 @@ func (m *MongoClient) Close() error {
 		"took":   time.Since(startTime),
 	}).Info("MongoDB连接关闭成功")
 	return nil
+}
+
+// CheckExistingTask 检查数据库中是否已有相同service/env/version的任务
+func (m *MongoClient) CheckExistingTask(service, version, environment string) (bool, error) {
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
+	count, err := collection.CountDocuments(ctx, bson.M{
+		"service":     service,
+		"version":     version,
+		"environment": environment,
+	})
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
