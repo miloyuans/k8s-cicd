@@ -167,6 +167,15 @@ func (bm *BotManager) pollUpdates() {
 	}).Infof(color.GreenString("轮询完成，收到 %d 个更新", len(result.Result)))
 }
 
+// escapeMarkdownV2 转义MarkdownV2的保留字符
+func escapeMarkdownV2(text string) string {
+	reservedChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
+	for _, char := range reservedChars {
+		text = strings.ReplaceAll(text, char, "\\"+char)
+	}
+	return text
+}
+
 // SendConfirmation 发送确认弹窗
 func (bm *BotManager) SendConfirmation(service, env, user, version string, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
 	startTime := time.Now()
@@ -191,8 +200,8 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 		return
 	}
 
-	// 步骤3：构造确认消息
-	message := fmt.Sprintf("确认部署 %s 到 %s? (用户: %s, 版本: %s)", service, env, user, version)
+	// 步骤3：构造确认消息并转义
+	message := escapeMarkdownV2(fmt.Sprintf("确认部署 %s 到 %s? (用户: %s, 版本: %s)", service, env, user, version))
 	keyboard := map[string]interface{}{
 		"inline_keyboard": [][]map[string]string{
 			{
@@ -274,7 +283,7 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, confi
 					Environment: env,
 					Version:     version,
 					User:        user,
-					Status:      "rejected",
+					Status:      "no_action",
 				}
 				feedbackID, err := bm.sendMessage(bot, bot.GroupID, "部署拒绝", nil)
 				if err != nil {
@@ -312,10 +321,10 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text string, replyMa
 		return 0, fmt.Errorf("chatID为空")
 	}
 
-	// 步骤2：构造请求数据
+	// 步骤2：构造请求数据并转义文本
 	reqData := map[string]interface{}{
 		"chat_id":    chatID,
-		"text":       text,
+		"text":       escapeMarkdownV2(text),
 		"parse_mode": "MarkdownV2",
 	}
 	if replyMarkup != nil {
@@ -567,7 +576,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 
 	// 步骤2：构建标题
 	message.WriteString("*🚀 ")
-	message.WriteString(service)
+	message.WriteString(escapeMarkdownV2(service))
 	message.WriteString(" 部署 ")
 	if success {
 		message.WriteString("成功*")
@@ -578,23 +587,23 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 
 	// 步骤3：添加详细信息
 	message.WriteString("**服务**: `")
-	message.WriteString(service)
+	message.WriteString(escapeMarkdownV2(service))
 	message.WriteString("`\n")
 
 	message.WriteString("**环境**: `")
-	message.WriteString(env)
+	message.WriteString(escapeMarkdownV2(env))
 	message.WriteString("`\n")
 
 	message.WriteString("**操作人**: `")
-	message.WriteString(user)
+	message.WriteString(escapeMarkdownV2(user))
 	message.WriteString("`\n")
 
 	message.WriteString("**旧版本**: `")
-	message.WriteString(oldVersion)
+	message.WriteString(escapeMarkdownV2(oldVersion))
 	message.WriteString("`\n")
 
 	message.WriteString("**新版本**: `")
-	message.WriteString(newVersion)
+	message.WriteString(escapeMarkdownV2(newVersion))
 	message.WriteString("`\n")
 
 	// 步骤4：添加状态
@@ -608,7 +617,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 
 	// 步骤5：添加时间
 	message.WriteString("**时间**: `")
-	message.WriteString(time.Now().Format("2006-01-02 15:04:05"))
+	message.WriteString(escapeMarkdownV2(time.Now().Format("2006-01-02 15:04:05")))
 	message.WriteString("`\n\n")
 
 	// 步骤6：如果失败，添加回滚信息

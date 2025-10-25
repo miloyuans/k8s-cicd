@@ -222,37 +222,42 @@ func (m *MongoClient) IsConfirmationSent(deploy models.DeployRequest) (bool, err
 	startTime := time.Now()
 	ctx := context.Background()
 
-	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
-	var task models.DeployRequest
-	err := collection.FindOne(ctx, bson.M{
-		"service":     deploy.Service,
-		"version":     deploy.Version,
-		"environment": deploy.Environments[0],
-		"user":        deploy.User,
-	}).Decode(&task)
-	if err == mongo.ErrNoDocuments {
+	const maxRetries = 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
+		var task models.DeployRequest
+		err := collection.FindOne(ctx, bson.M{
+			"service":     deploy.Service,
+			"version":     deploy.Version,
+			"environment": deploy.Environments[0],
+			"user":        deploy.User,
+		}).Decode(&task)
+		if err == nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "IsConfirmationSent",
+				"took":   time.Since(startTime),
+			}).Infof("确认发送状态: %s v%s [%s/%s] -> %v", deploy.Service, deploy.Version, deploy.Environments[0], deploy.User, task.ConfirmationSent)
+			return task.ConfirmationSent, nil
+		}
+		if err != mongo.ErrNoDocuments {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "IsConfirmationSent",
+				"took":   time.Since(startTime),
+			}).Errorf("检查确认发送状态失败 (尝试 %d/%d): %v", attempt, maxRetries, err)
+			return false, err
+		}
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "IsConfirmationSent",
 			"took":   time.Since(startTime),
-		}).Warnf("未找到任务: %s v%s [%s/%s]", deploy.Service, deploy.Version, deploy.Environments[0], deploy.User)
-		return false, nil
+		}).Warnf("未找到任务 (尝试 %d/%d): %s v%s [%s/%s]", attempt, maxRetries, deploy.Service, deploy.Version, deploy.Environments[0], deploy.User)
+		if attempt < maxRetries {
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "IsConfirmationSent",
-			"took":   time.Since(startTime),
-		}).Errorf("检查确认发送状态失败: %v", err)
-		return false, err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "IsConfirmationSent",
-		"took":   time.Since(startTime),
-	}).Infof("确认发送状态: %s v%s [%s/%s] -> %v", deploy.Service, deploy.Version, deploy.Environments[0], deploy.User, task.ConfirmationSent)
-	return task.ConfirmationSent, nil
+	return false, nil
 }
 
 // CheckDuplicateTask 检查任务是否已存在
