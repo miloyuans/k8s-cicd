@@ -2,7 +2,6 @@
 package agent
 
 import (
-	"strings"
 	"sync"
 	"time"
 
