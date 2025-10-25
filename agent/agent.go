@@ -213,6 +213,7 @@ func (a *Agent) performQueryTasks() {
 
 		// 步骤3：并发查询每个服务的任务
 		var wg sync.WaitGroup
+		processedTasks := make(map[string]struct{}) // 跟踪已处理的任务以避免重复
 		for _, serviceWithVersion := range services {
 			parts := strings.SplitN(serviceWithVersion, ":", 2)
 			if len(parts) < 1 {
@@ -242,12 +243,40 @@ func (a *Agent) performQueryTasks() {
 				}
 
 				for _, task := range tasks {
-					// 步骤4：设置任务状态为pending_confirmation
+					// 步骤4：验证版本格式
+					if strings.HasPrefix(task.Version, "vv") {
+						task.Version = strings.TrimPrefix(task.Version, "v")
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "performQueryTasks",
+							"took":   time.Since(startTime),
+							"data": logrus.Fields{
+								"task": task,
+							},
+						}).Warnf(color.YellowString("修复无效版本格式: %s -> %s", task.Version, strings.TrimPrefix(task.Version, "v")))
+					}
+
+					// 步骤5：设置任务状态为pending_confirmation
 					task.Status = "pending_confirmation"
 					task.Environments = []string{namespace}
 					task.CreatedAt = time.Now()
 
-					// 步骤5：校验并存储任务
+					// 步骤6：生成任务标识以避免重复处理
+					taskKey := task.Service + "-" + task.Version + "-" + namespace
+					if _, exists := processedTasks[taskKey]; exists {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "performQueryTasks",
+							"took":   time.Since(startTime),
+							"data": logrus.Fields{
+								"task": task,
+							},
+						}).Warnf(color.YellowString("跳过重复任务: %s v%s [%s]", task.Service, task.Version, env))
+						continue
+					}
+					processedTasks[taskKey] = struct{}{}
+
+					// 步骤7：校验并存储任务
 					err := a.validateAndStoreTask(task, env)
 					if err != nil {
 						logrus.WithFields(logrus.Fields{
@@ -261,8 +290,10 @@ func (a *Agent) performQueryTasks() {
 						continue
 					}
 
-					// 步骤6：检查是否需要确认并发送弹窗
+					// 步骤8：检查是否需要确认并发送弹窗
 					if a.needsConfirmation(env) {
+						// 延迟以确保MongoDB写入完成
+						time.Sleep(100 * time.Millisecond)
 						sent, err := a.mongo.IsConfirmationSent(task)
 						if err != nil {
 							logrus.WithFields(logrus.Fields{
@@ -294,7 +325,7 @@ func (a *Agent) performQueryTasks() {
 							go a.handleConfirmationChannels(confirmChan, rejectChan)
 						}
 					} else {
-						// 步骤7：无需确认，直接更新为pending并入队
+						// 步骤9：无需确认，直接更新为pending并入队
 						err := a.mongo.UpdateTaskStatus(task.Service, task.Version, namespace, task.User, "pending")
 						if err != nil {
 							logrus.WithFields(logrus.Fields{

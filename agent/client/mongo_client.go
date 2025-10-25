@@ -144,8 +144,6 @@ func (m *MongoClient) PushDeployments(deploys []models.DeployRequest) error {
 
 		// 步骤2：存储到环境特定任务集合，并添加confirmation_sent字段
 		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
-		deploy.CreatedAt = time.Now()
-		deploy.ConfirmationSent = false // 新增字段
 		_, err = collection.InsertOne(ctx, deploy)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
@@ -232,6 +230,14 @@ func (m *MongoClient) IsConfirmationSent(deploy models.DeployRequest) (bool, err
 		"environment": deploy.Environments[0],
 		"user":        deploy.User,
 	}).Decode(&task)
+	if err == mongo.ErrNoDocuments {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "IsConfirmationSent",
+			"took":   time.Since(startTime),
+		}).Warnf("未找到任务: %s v%s [%s/%s]", deploy.Service, deploy.Version, deploy.Environments[0], deploy.User)
+		return false, nil
+	}
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -241,6 +247,11 @@ func (m *MongoClient) IsConfirmationSent(deploy models.DeployRequest) (bool, err
 		return false, err
 	}
 
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "IsConfirmationSent",
+		"took":   time.Since(startTime),
+	}).Infof("确认发送状态: %s v%s [%s/%s] -> %v", deploy.Service, deploy.Version, deploy.Environments[0], deploy.User, task.ConfirmationSent)
 	return task.ConfirmationSent, nil
 }
 
