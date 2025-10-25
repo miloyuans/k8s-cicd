@@ -1,9 +1,7 @@
-//agent.go
+// agent.go
 package agent
 
 import (
-	"context"
-	"fmt"
 	"time"
 
 	"k8s-cicd/agent/api"
@@ -16,8 +14,6 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // Agent 主代理结构，协调各组件
@@ -207,18 +203,56 @@ func (a *Agent) performQueryTasks() {
 		}
 
 		for _, task := range tasks {
-			a.validateAndStoreTask(task, env)
+			err := a.validateAndStoreTask(task, env)
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "performQueryTasks",
+					"took":   time.Since(startTime),
+					"data": logrus.Fields{
+						"task": task,
+					},
+				}).Errorf(color.RedString("任务校验或存储失败: %v", err))
+				continue
+			}
 			if a.needsConfirmation(env) {
-				sent, _ := a.mongo.IsConfirmationSent(task)
+				sent, err := a.mongo.IsConfirmationSent(task)
+				if err != nil {
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "performQueryTasks",
+						"took":   time.Since(startTime),
+						"data": logrus.Fields{
+							"task": task,
+						},
+					}).Errorf(color.RedString("检查确认发送状态失败: %v", err))
+					continue
+				}
 				if !sent {
 					confirmChan := make(chan models.DeployRequest)
 					rejectChan := make(chan models.StatusRequest)
-					a.botMgr.SendConfirmation(task.Service, env, task.User, task.Version, confirmChan, rejectChan)
-					a.mongo.UpdateConfirmationSent(task.Service, task.Version, env, task.User)
+					go a.botMgr.SendConfirmation(task.Service, env, task.User, task.Version, confirmChan, rejectChan)
+					err = a.mongo.UpdateConfirmationSent(task.Service, task.Version, env, task.User)
+					if err != nil {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "performQueryTasks",
+							"took":   time.Since(startTime),
+							"data": logrus.Fields{
+								"task": task,
+							},
+						}).Errorf(color.RedString("更新确认发送状态失败: %v", err))
+						continue
+					}
 					go a.handleConfirmationChannels(confirmChan, rejectChan)
 				}
 			} else {
-				a.taskQ.Enqueue(&models.Task{DeployRequest: task})
+				a.taskQ.Enqueue(&models.Task{
+					DeployRequest: task,
+					ID:            task.Service + "-" + task.Version + "-" + env, // 简单生成任务ID
+					CreatedAt:     time.Now(),
+					Retries:       0,
+				})
 			}
 		}
 	}
@@ -236,15 +270,60 @@ func (a *Agent) needsConfirmation(env string) bool {
 
 // handleConfirmationChannels 处理确认通道
 func (a *Agent) handleConfirmationChannels(confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
+	startTime := time.Now()
 	select {
 	case task := <-confirmChan:
-		a.taskQ.Enqueue(&models.Task{DeployRequest: task})
+		// 步骤1：处理确认任务
+		taskID := task.Service + "-" + task.Version + "-" + task.Environments[0]
+		a.taskQ.Enqueue(&models.Task{
+			DeployRequest: task,
+			ID:            taskID,
+			CreatedAt:     time.Now(),
+			Retries:       0,
+		})
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "handleConfirmationChannels",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"task_id": taskID,
+				"task":    task,
+			},
+		}).Infof(color.GreenString("确认任务入队: %s v%s [%s]", task.Service, task.Version, task.Environments[0]))
 	case status := <-rejectChan:
+		// 步骤2：处理拒绝任务
 		err := a.apiClient.UpdateStatus(status)
 		if err != nil {
-			logrus.Error(color.RedString("拒绝状态更新失败: %v", err))
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "handleConfirmationChannels",
+				"took":   time.Since(startTime),
+				"data": logrus.Fields{
+					"status_request": status,
+				},
+			}).Errorf(color.RedString("拒绝状态更新失败: %v", err))
+		} else {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "handleConfirmationChannels",
+				"took":   time.Since(startTime),
+				"data": logrus.Fields{
+					"status_request": status,
+				},
+			}).Infof(color.GreenString("任务拒绝: %s v%s [%s]", status.Service, status.Version, status.Environment))
+			// 步骤3：更新MongoDB状态
+			err = a.mongo.UpdateTaskStatus(status.Service, status.Version, status.Environment, status.User, "rejected")
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "handleConfirmationChannels",
+					"took":   time.Since(startTime),
+					"data": logrus.Fields{
+						"status_request": status,
+					},
+				}).Errorf(color.RedString("MongoDB状态更新失败: %v", err))
+			}
 		}
-		a.mongo.UpdateTaskStatus(status.Service, status.Version, status.Environment, status.User, "rejected")
 	}
 }
 
