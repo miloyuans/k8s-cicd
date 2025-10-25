@@ -272,7 +272,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 				if contains(a.config.Query.ConfirmEnvs, env) {
 					confirmChan := make(chan models.DeployRequest)
 					rejectChan := make(chan models.StatusRequest)
-					err := a.botMgr.SendConfirmation(t.Service, env, t.Version, t.User, confirmChan, rejectChan)
+					err = a.botMgr.SendConfirmation(t.Service, env, t.Version, t.User, confirmChan, rejectChan)
 					if err != nil {
 						// 要求2: 发送失败，设置"failed"
 						a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed")
