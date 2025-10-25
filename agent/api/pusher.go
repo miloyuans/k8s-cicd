@@ -1,3 +1,4 @@
+//
 package api
 
 import (
@@ -11,6 +12,7 @@ import (
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
 
+	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
 
@@ -48,7 +50,7 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "PushData",
 			"took":   time.Since(startTime),
-		}).Errorf("JSON序列化失败: %v", err)
+		}).Errorf(color.RedString("JSON序列化失败: %v", err))
 		return fmt.Errorf("JSON序列化失败: %v", err)
 	}
 
@@ -57,7 +59,7 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "PushData",
 		"took":   time.Since(startTime),
-		"data":   logrus.Fields{
+		"data": logrus.Fields{
 			"method":  "POST",
 			"url":     c.baseURL + "/push",
 			"headers": map[string]string{"Content-Type": "application/json"},
@@ -72,7 +74,7 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "PushData",
 			"took":   time.Since(startTime),
-		}).Errorf("HTTP请求失败: %v", err)
+		}).Errorf(color.RedString("HTTP请求失败: %v", err))
 		return err
 	}
 	defer resp.Body.Close()
@@ -85,14 +87,19 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "PushData",
 		"took":   time.Since(startTime),
-		"data":   logrus.Fields{
+		"data": logrus.Fields{
 			"status": resp.StatusCode,
 			"body":   string(body),
 		},
-	}).Info("收到HTTP响应")
+	}).Infof(color.GreenString("收到HTTP响应"))
 
 	// 步骤6：检查响应状态
 	if resp.StatusCode != http.StatusOK {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "PushData",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("HTTP错误: %d - %s", resp.StatusCode, string(body)))
 		return fmt.Errorf("HTTP错误: %d - %s", resp.StatusCode, string(body))
 	}
 
@@ -102,23 +109,33 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 // QueryTasks POST /query - 查询待处理任务
 func (c *APIClient) QueryTasks(req models.QueryRequest) ([]models.DeployRequest, error) {
 	startTime := time.Now()
-	// 步骤1：序列化请求数据
+	// 步骤1：验证请求数据
+	if req.Environment == "" || req.Service == "" {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "QueryTasks",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("查询请求缺少environment或service参数"))
+		return nil, fmt.Errorf("查询请求缺少environment或service参数")
+	}
+
+	// 步骤2：序列化请求数据
 	jsonData, err := json.Marshal(req)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "QueryTasks",
 			"took":   time.Since(startTime),
-		}).Errorf("JSON序列化失败: %v", err)
+		}).Errorf(color.RedString("JSON序列化失败: %v", err))
 		return nil, fmt.Errorf("JSON序列化失败: %v", err)
 	}
 
-	// 步骤2：记录请求日志
+	// 步骤3：记录请求日志
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "QueryTasks",
 		"took":   time.Since(startTime),
-		"data":   logrus.Fields{
+		"data": logrus.Fields{
 			"method":  "POST",
 			"url":     c.baseURL + "/query",
 			"headers": map[string]string{"Content-Type": "application/json"},
@@ -126,33 +143,45 @@ func (c *APIClient) QueryTasks(req models.QueryRequest) ([]models.DeployRequest,
 		},
 	}).Info("发送HTTP请求")
 
-	// 步骤3：发送POST请求
+	// 步骤4：发送POST请求
 	resp, err := c.client.Post(c.baseURL+"/query", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "QueryTasks",
 			"took":   time.Since(startTime),
-		}).Errorf("HTTP请求失败: %v", err)
+		}).Errorf(color.RedString("HTTP请求失败: %v", err))
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	// 步骤4：读取响应体
+	// 步骤5：读取响应体
 	body, _ := io.ReadAll(resp.Body)
 
-	// 步骤5：记录响应日志
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "QueryTasks",
-		"took":   time.Since(startTime),
-		"data":   logrus.Fields{
-			"status": resp.StatusCode,
-			"body":   string(body),
-		},
-	}).Info("收到HTTP响应")
+	// 步骤6：记录响应日志
+	if resp.StatusCode == http.StatusOK {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "QueryTasks",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"status": resp.StatusCode,
+				"body":   string(body),
+			},
+		}).Infof(color.GreenString("收到HTTP响应"))
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "QueryTasks",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"status": resp.StatusCode,
+				"body":   string(body),
+			},
+		}).Errorf(color.RedString("HTTP错误: %d - %s", resp.StatusCode, string(body)))
+	}
 
-	// 步骤6：解析响应
+	// 步骤7：解析响应
 	if resp.StatusCode == http.StatusOK {
 		var tasks []models.DeployRequest
 		if err := json.Unmarshal(body, &tasks); err != nil {
@@ -160,18 +189,18 @@ func (c *APIClient) QueryTasks(req models.QueryRequest) ([]models.DeployRequest,
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "QueryTasks",
 				"took":   time.Since(startTime),
-			}).Info("无任务返回")
+			}).Infof(color.GreenString("无任务返回"))
 			return []models.DeployRequest{}, nil
 		}
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "QueryTasks",
+			"took":   time.Since(startTime),
+		}).Infof(color.GreenString("查询到 %d 个任务", len(tasks)))
 		return tasks, nil
 	}
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "QueryTasks",
-		"took":   time.Since(startTime),
-	}).Errorf("HTTP错误: %d - %s", resp.StatusCode, string(body))
-	return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	return nil, fmt.Errorf("HTTP %d - %s", resp.StatusCode, string(body))
 }
 
 // UpdateStatus POST /status - 更新部署状态
@@ -184,7 +213,7 @@ func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateStatus",
 			"took":   time.Since(startTime),
-		}).Errorf("JSON序列化失败: %v", err)
+		}).Errorf(color.RedString("JSON序列化失败: %v", err))
 		return fmt.Errorf("JSON序列化失败: %v", err)
 	}
 
@@ -193,7 +222,7 @@ func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "UpdateStatus",
 		"took":   time.Since(startTime),
-		"data":   logrus.Fields{
+		"data": logrus.Fields{
 			"method":  "POST",
 			"url":     c.baseURL + "/status",
 			"headers": map[string]string{"Content-Type": "application/json"},
@@ -208,7 +237,7 @@ func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateStatus",
 			"took":   time.Since(startTime),
-		}).Errorf("HTTP请求失败: %v", err)
+		}).Errorf(color.RedString("HTTP请求失败: %v", err))
 		return err
 	}
 	defer resp.Body.Close()
@@ -217,15 +246,27 @@ func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 	body, _ := io.ReadAll(resp.Body)
 
 	// 步骤5：记录响应日志
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "UpdateStatus",
-		"took":   time.Since(startTime),
-		"data":   logrus.Fields{
-			"status": resp.StatusCode,
-			"body":   string(body),
-		},
-	}).Info("收到HTTP响应")
+	if resp.StatusCode == http.StatusOK {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "UpdateStatus",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"status": resp.StatusCode,
+				"body":   string(body),
+			},
+		}).Infof(color.GreenString("收到HTTP响应"))
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "UpdateStatus",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"status": resp.StatusCode,
+				"body":   string(body),
+			},
+		}).Errorf(color.RedString("HTTP错误: %d - %s", resp.StatusCode, string(body)))
+	}
 
 	// 步骤6：检查响应状态
 	if resp.StatusCode != http.StatusOK {

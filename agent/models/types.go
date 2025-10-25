@@ -1,3 +1,4 @@
+//go
 package models
 
 import (
@@ -25,6 +26,7 @@ type DeployRequest struct {
 type QueryRequest struct {
 	Environment string `json:"environment" bson:"environment"` // 环境
 	User        string `json:"user" bson:"user"`               // 用户
+	Service     string `json:"service" bson:"service"`         // 服务名
 }
 
 // StatusRequest 状态更新请求数据结构

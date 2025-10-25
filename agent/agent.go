@@ -1,7 +1,8 @@
-// agent.go
+//agent.go
 package agent
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"k8s-cicd/agent/telegram"
 
 	"github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 // Agent 主代理结构，协调各组件
@@ -190,6 +192,46 @@ func (a *Agent) performPushDiscovery() {
 	}
 }
 
+// getServicesFromMongo 从MongoDB获取服务列表
+func (a *Agent) getServicesFromMongo(ctx context.Context) ([]string, error) {
+	startTime := time.Now()
+	// 步骤1：查询版本集合
+	versionsColl := a.mongo.client.Database("cicd").Collection("versions")
+	cursor, err := versionsColl.Find(ctx, bson.M{})
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "getServicesFromMongo",
+			"took":   time.Since(startTime),
+		}).Errorf("查询版本集合失败: %v", err)
+		return nil, err
+	}
+defer cursor.Close(ctx)
+
+	// 步骤2：收集服务名
+	var services []string
+	seen := make(map[string]struct{})
+	for cursor.Next(ctx) {
+		var version struct {
+			Service string `bson:"service"`
+		}
+		if err := cursor.Decode(&version); err != nil {
+			continue
+		}
+		if _, exists := seen[version.Service]; !exists {
+			seen[version.Service] = struct{}{}
+			services = append(services, version.Service)
+		}
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "getServicesFromMongo",
+		"took":   time.Since(startTime),
+	}).Infof("从MongoDB获取 %d 个服务", len(services))
+	return services, nil
+}
+
 // periodicQueryTasks 周期性查询任务和弹窗确认
 func (a *Agent) periodicQueryTasks() {
 	startTime := time.Now()
@@ -210,27 +252,46 @@ func (a *Agent) periodicQueryTasks() {
 			"method": "periodicQueryTasks",
 			"took":   time.Since(startTime),
 		}).Info("开始 /query 轮询")
+
 		user := a.config.User.Default
-		for env := range a.config.EnvMapping.Mappings {
-			// 步骤6：构建查询请求
-			queryReq := models.QueryRequest{Environment: env, User: user}
-			tasks, err := a.apiClient.QueryTasks(queryReq)
-			if err != nil {
-				logrus.WithFields(logrus.Fields{
-					"time":   time.Now().Format("2006-01-02 15:04:05"),
-					"method": "periodicQueryTasks",
-					"took":   time.Since(startTime),
-				}).Errorf("/query 失败 [%s]: %v", env, err)
-				continue
-			}
+		ctx := context.Background()
+		// 步骤6：从MongoDB获取服务列表
+		services, err := a.getServicesFromMongo(ctx)
+		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "periodicQueryTasks",
 				"took":   time.Since(startTime),
-			}).Infof("/query 结果 [%s]: %d 个任务", env, len(tasks))
-			// 步骤7：处理任务
-			for _, task := range tasks {
-				a.processTask(task, env)
+			}).Errorf("获取服务列表失败: %v", err)
+			continue
+		}
+
+		// 步骤7：对每个环境和服务执行查询
+		for env := range a.config.EnvMapping.Mappings {
+			for _, service := range services {
+				queryReq := models.QueryRequest{
+					Environment: env,
+					User:        user,
+					Service:     service,
+				}
+				tasks, err := a.apiClient.QueryTasks(queryReq)
+				if err != nil {
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "periodicQueryTasks",
+						"took":   time.Since(startTime),
+					}).Errorf("查询失败 [%s/%s]: %v", env, service, err)
+					continue
+				}
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "periodicQueryTasks",
+					"took":   time.Since(startTime),
+				}).Infof("/query 结果 [%s/%s]: %d 个任务", env, service, len(tasks))
+				// 步骤8：处理任务
+				for _, task := range tasks {
+					a.processTask(task, env)
+				}
 			}
 		}
 	}
