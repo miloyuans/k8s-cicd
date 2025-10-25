@@ -1,4 +1,4 @@
-//mongo_client.go
+// mongo_client.go
 package client
 
 import (
@@ -255,8 +255,6 @@ func (m *MongoClient) CheckDuplicateTask(deploy models.DeployRequest) (bool, err
 		"service":     deploy.Service,
 		"version":     deploy.Version,
 		"environment": deploy.Environments[0],
-		"user":        deploy.User,
-		"status":      deploy.Status,
 	})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -272,7 +270,7 @@ func (m *MongoClient) CheckDuplicateTask(deploy models.DeployRequest) (bool, err
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "CheckDuplicateTask",
 			"took":   time.Since(startTime),
-		}).Warnf("任务重复: %s v%s [%s/%s/%s]", deploy.Service, deploy.Version, deploy.Environments[0], deploy.User, deploy.Status)
+		}).Warnf("任务重复: %s v%s [%s]", deploy.Service, deploy.Version, deploy.Environments[0])
 		return true, nil
 	}
 
@@ -293,11 +291,49 @@ func (m *MongoClient) StoreTaskWithDeduplication(deploy models.DeployRequest) er
 		return err
 	}
 	if isDuplicate {
-		return fmt.Errorf("任务已存在，忽略")
+		return nil // 重复任务直接返回
 	}
 
 	// 步骤2：存储任务
 	return m.PushDeployments([]models.DeployRequest{deploy})
+}
+
+// DeleteTask 删除任务
+func (m *MongoClient) DeleteTask(service, version, environment, user string) error {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	// 步骤1：删除任务记录
+	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
+	result, err := collection.DeleteOne(ctx, bson.M{
+		"service":     service,
+		"version":     version,
+		"environment": environment,
+		"user":        user,
+	})
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "DeleteTask",
+			"took":   time.Since(startTime),
+		}).Errorf("删除任务失败: %v", err)
+		return err
+	}
+
+	if result.DeletedCount == 0 {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "DeleteTask",
+			"took":   time.Since(startTime),
+		}).Warnf("未找到任务: %s v%s [%s/%s]", service, version, environment, user)
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "DeleteTask",
+			"took":   time.Since(startTime),
+		}).Infof("任务删除成功: %s v%s [%s/%s]", service, version, environment, user)
+	}
+	return nil
 }
 
 // CleanCompletedTasks 清理已完成的任务
