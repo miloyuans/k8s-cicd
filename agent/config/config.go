@@ -1,10 +1,10 @@
-//config.go
+// config.go
 package config
 
 import (
 	"os"
-	"time"
 	"strconv"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
@@ -12,18 +12,19 @@ import (
 
 // TelegramBot 配置单个Telegram机器人
 type TelegramBot struct {
-	Name        string              `yaml:"name"`          // 机器人名称
-	Token       string              `yaml:"token"`         // Bot Token
-	GroupID     string              `yaml:"group_id"`      // 群组ID
-	Services    map[string][]string `yaml:"services"`      // 服务匹配规则
-	RegexMatch  bool                `yaml:"regex_match"`   // 是否使用正则匹配
-	IsEnabled   bool                `yaml:"enabled"`       // 是否启用
+	Name         string              `yaml:"name"`          // 机器人名称
+	Token        string              `yaml:"token"`         // Bot Token
+	GroupID      string              `yaml:"group_id"`      // 群组ID
+	Services     map[string][]string `yaml:"services"`      // 服务匹配规则
+	RegexMatch   bool                `yaml:"regex_match"`   // 是否使用正则匹配
+	IsEnabled    bool                `yaml:"enabled"`       // 是否启用
+	AllowedUsers []string            `yaml:"allowed_users"` // 机器人特定的允许用户
 }
 
 // TelegramConfig Telegram多机器人配置
 type TelegramConfig struct {
 	Bots           []TelegramBot    `yaml:"bots"`            // 机器人列表
-	AllowedUsers   []string         `yaml:"allowed_users"`   // 有效用户ID（字符串类型）
+	AllowedUsers   []string         `yaml:"allowed_users"`   // 全局允许用户ID
 	ConfirmTimeout time.Duration    `yaml:"confirm_timeout"` // 弹窗超时
 }
 
@@ -229,7 +230,7 @@ func (c *Config) setDefaults() {
 		c.EnvMapping.Mappings = map[string]string{
 			"eks":     "ns",
 			"eks-pro": "bs",
-			"prod":    "international", // 基于Ingress添加
+			"prod":    "international",
 		}
 	}
 }
