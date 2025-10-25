@@ -1,4 +1,3 @@
-//
 package api
 
 import (
@@ -26,6 +25,7 @@ type APIClient struct {
 // NewAPIClient 创建API客户端
 func NewAPIClient(cfg *config.APIConfig) *APIClient {
 	startTime := time.Now()
+	// 步骤1：初始化客户端结构
 	client := &APIClient{
 		cfg:     cfg,
 		client:  &http.Client{Timeout: 10 * time.Second},
@@ -35,7 +35,7 @@ func NewAPIClient(cfg *config.APIConfig) *APIClient {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "NewAPIClient",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("API客户端创建成功"))
+	}).Info(color.GreenString("API客户端创建成功"))
 	return client
 }
 
