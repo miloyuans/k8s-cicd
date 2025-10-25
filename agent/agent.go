@@ -248,10 +248,16 @@ func (a *Agent) performQueryTasks() {
 				}
 			} else {
 				a.taskQ.Enqueue(&models.Task{
-					DeployRequest: task,
-					ID:            task.Service + "-" + task.Version + "-" + env, // 简单生成任务ID
-					CreatedAt:     time.Now(),
-					Retries:       0,
+					DeployRequest: models.DeployRequest{
+						Service:      task.Service,
+						Environments: task.Environments,
+						Version:      task.Version,
+						User:         task.User,
+						Status:       task.Status,
+						CreatedAt:    time.Now(),
+					},
+					ID:      task.Service + "-" + task.Version + "-" + env,
+					Retries: 0,
 				})
 			}
 		}
@@ -276,10 +282,16 @@ func (a *Agent) handleConfirmationChannels(confirmChan chan models.DeployRequest
 		// 步骤1：处理确认任务
 		taskID := task.Service + "-" + task.Version + "-" + task.Environments[0]
 		a.taskQ.Enqueue(&models.Task{
-			DeployRequest: task,
-			ID:            taskID,
-			CreatedAt:     time.Now(),
-			Retries:       0,
+			DeployRequest: models.DeployRequest{
+				Service:      task.Service,
+				Environments: task.Environments,
+				Version:      task.Version,
+				User:         task.User,
+				Status:       task.Status,
+				CreatedAt:    time.Now(),
+			},
+			ID:      taskID,
+			Retries: 0,
 		})
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -341,7 +353,7 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 				"task": task,
 			},
 		}).Errorf(color.RedString("环境 [%s] 无命名空间配置", env))
-		return fmt.Errorf("环境 [%s] 无命名空间配置", env)
+		return nil
 	}
 	task.Environments = []string{namespace}
 	// 步骤2：检查任务重复
@@ -355,7 +367,7 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 				"task": task,
 			},
 		}).Errorf(color.RedString("检查任务重复失败: %v", err))
-		return fmt.Errorf("检查任务重复失败: %v", err)
+		return nil
 	}
 	if isDuplicate {
 		logrus.WithFields(logrus.Fields{
@@ -365,8 +377,8 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 			"data": logrus.Fields{
 				"task": task,
 			},
-		}).Warnf("任务重复，忽略: %s v%s [%s]", task.Service, task.Version, env)
-		return fmt.Errorf("任务重复，忽略: %s v%s", task.Service, task.Version)
+		}).Warnf(color.GreenString("任务重复，忽略: %s v%s [%s]", task.Service, task.Version, env))
+		return nil
 	}
 	// 步骤3：存储任务到MongoDB
 	err = a.mongo.StoreTaskWithDeduplication(task)
@@ -379,7 +391,7 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 				"task": task,
 			},
 		}).Errorf(color.RedString("存储任务失败: %v", err))
-		return fmt.Errorf("存储任务失败: %v", err)
+		return nil
 	}
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
