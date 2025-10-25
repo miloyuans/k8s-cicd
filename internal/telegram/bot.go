@@ -274,7 +274,7 @@ func (bm *BotManager) answerCallbackQuery(bot *TelegramBot, queryID string) {
 }
 
 // SendConfirmation 发送确认弹窗
-// 发送部署确认弹窗到Telegram群组
+// 发送Telegram确认弹窗，并存储通道等待用户响应
 func (bm *BotManager) SendConfirmation(service, env, version, user string, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) error {
 	startTime := time.Now()
 	// 步骤1：根据服务选择机器人
@@ -516,37 +516,52 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text string, replyMa
 	return result, nil
 }
 
-// getBotForService 根据服务获取机器人
-// 根据服务名称匹配机器人配置，支持正则或模糊包含匹配
+// getBotForService 根据服务名选择机器人
+// 根据服务名称匹配机器人配置，支持正则或前缀匹配
 func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
+	startTime := time.Now()
+	// 步骤1：遍历所有机器人
 	for _, bot := range bm.Bots {
-		for prefix, services := range bot.Services {
-			if bot.RegexMatch {
-				// 正则匹配
-				if matched, _ := regexp.MatchString(prefix, service); matched {
-					return bot, nil
-				}
-			} else {
-				// 模糊包含匹配
-				if strings.Contains(service, prefix) {
-					return bot, nil
+		// 步骤2：遍历服务的匹配规则
+		for _, serviceList := range bot.Services {
+			// 步骤3：遍历服务列表中的模式
+			for _, pattern := range serviceList {
+				if bot.RegexMatch {
+					// 使用正则匹配
+					matched, err := regexp.MatchString(pattern, service)
+					if err == nil && matched {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "getBotForService",
+							"took":   time.Since(startTime),
+						}).Infof(color.GreenString("服务 %s 匹配机器人 %s", service, bot.Name))
+						return bot, nil
+					}
+				} else {
+					// 使用前缀匹配（忽略大小写）
+					if strings.HasPrefix(strings.ToUpper(service), strings.ToUpper(pattern)) {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "getBotForService",
+							"took":   time.Since(startTime),
+						}).Infof(color.GreenString("服务 %s 匹配机器人 %s", service, bot.Name))
+						return bot, nil
+					}
 				}
 			}
 		}
 	}
-	// 如果未匹配，返回默认机器人
-	defaultBot := bm.getDefaultBot()
-	if defaultBot != nil {
-		logrus.WithFields(logrus.Fields{
-			"time": time.Now().Format("2006-01-02 15:04:05"),
-		}).Warnf(color.YellowString("服务 %s 未匹配特定机器人，使用默认机器人 %s", service, defaultBot.Name))
-		return defaultBot, nil
-	}
+	// 步骤4：未匹配，返回错误
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "getBotForService",
+		"took":   time.Since(startTime),
+	}).Errorf(color.RedString("服务 %s 未匹配任何机器人", service))
 	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
 }
 
 // Stop 停止Telegram轮询
-// 关闭轮询通道并停止更新更新
+// 关闭轮询通道并停止更新处理
 func (bm *BotManager) Stop() {
 	startTime := time.Now()
 	// 步骤1：关闭停止通道
