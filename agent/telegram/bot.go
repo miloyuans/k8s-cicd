@@ -20,6 +20,7 @@ import (
 )
 
 // TelegramBot 单个Telegram机器人配置
+// 用于存储单个机器人的配置信息，从配置文件加载
 type TelegramBot struct {
 	Name         string              // 机器人名称
 	Token        string              // Bot Token
@@ -31,6 +32,7 @@ type TelegramBot struct {
 }
 
 // BotManager 多机器人管理器
+// 管理多个Telegram机器人，实现匹配选择和消息处理
 type BotManager struct {
 	Bots               map[string]*TelegramBot // 机器人映射
 	offset             int64                   // Telegram updates offset
@@ -205,7 +207,13 @@ func (bm *BotManager) pollUpdates() {
 	updates, _ := result["result"].([]interface{})
 	for _, u := range updates {
 		update, _ := u.(map[string]interface{})
-		bm.updateChan <- update
+		select {
+		case bm.updateChan <- update:
+			// 发送成功
+		default:
+			// 通道关闭，退出
+			return
+		}
 		if updateID, _ := update["update_id"].(float64); updateID >= float64(bm.offset) {
 			bm.offset = int64(updateID) + 1
 		}
@@ -514,8 +522,8 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text string, replyMa
 	return result, nil
 }
 
-// 根据服务名称匹配机器人配置，支持正则或前缀匹配
 // getBotForService 根据服务名选择机器人
+// 根据服务名称匹配机器人配置，支持正则或前缀匹配
 func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 	startTime := time.Now()
 	// 步骤1：遍历所有机器人
@@ -558,13 +566,14 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
 }
 
-
 // Stop 停止Telegram轮询
 // 关闭轮询通道并停止更新处理
 func (bm *BotManager) Stop() {
 	startTime := time.Now()
 	// 步骤1：关闭停止通道
 	close(bm.stopChan)
+	// 等待轮询goroutine退出
+	time.Sleep(1 * time.Second) // 给予时间退出
 	close(bm.updateChan)
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
