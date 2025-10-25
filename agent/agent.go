@@ -122,12 +122,12 @@ func (a *Agent) Start() {
 func (a *Agent) periodicPushDiscovery() {
 	startTime := time.Now()
 	// 步骤1：立即执行一次推送
-	a.performPushDiscovery()
+	a.performPushDiscovery(true) // 首次推送强制执行
 	// 步骤2：设置定时器进行周期性推送
 	ticker := time.NewTicker(a.config.API.PushInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		a.performPushDiscovery()
+		a.performPushDiscovery(false) // 后续推送根据对比
 	}
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -137,7 +137,7 @@ func (a *Agent) periodicPushDiscovery() {
 }
 
 // performPushDiscovery 执行单次服务发现和推送
-func (a *Agent) performPushDiscovery() {
+func (a *Agent) performPushDiscovery(force bool) {
 	startTime := time.Now()
 	// 步骤1：构建推送请求
 	req, err := a.k8s.BuildPushRequest(a.config)
@@ -150,16 +150,18 @@ func (a *Agent) performPushDiscovery() {
 		return
 	}
 
-	// 步骤2：获取上次推送的数据
-	lastReq, err := a.mongo.GetLastPushRequest()
-	if err == nil && equalPushRequests(req, lastReq) {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "performPushDiscovery",
-			"took":   time.Since(startTime),
-		}).Infof(color.GreenString("数据无更新，忽略推送"))
-		time.Sleep(5 * time.Minute) // 静默5分钟
-		return
+	if !force {
+		// 步骤2：获取上次推送的数据
+		lastReq, err := a.mongo.GetLastPushRequest()
+		if err == nil && equalPushRequests(req, lastReq) {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "performPushDiscovery",
+				"took":   time.Since(startTime),
+			}).Infof(color.GreenString("数据无更新，忽略推送"))
+			time.Sleep(5 * time.Minute) // 静默5分钟
+			return
+		}
 	}
 
 	// 步骤3：推送数据
@@ -353,9 +355,26 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					continue
 				}
 
-				// 存储任务 (已有重复检查，并设置ConfirmationStatus = "pending")
+				// 设置初始 ConfirmationStatus 为 "pending"
+				t.ConfirmationStatus = "pending"
+
+				// 存储任务 (已有重复检查)
 				err = a.validateAndStoreTask(t, env)
 				if err != nil {
+					continue
+				}
+
+				// 刷新 ConfirmationStatus 从 DB
+				t.ConfirmationStatus, err = a.mongo.GetConfirmationStatus(t.Service, t.Version, env, t.User)
+				if err != nil {
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "processQueryTasks",
+						"took":   time.Since(startTime),
+						"data": logrus.Fields{
+							"service": t.Service, "version": t.Version, "env": env,
+						},
+					}).Errorf(color.RedString("刷新确认状态失败: %v", err))
 					continue
 				}
 
