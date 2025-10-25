@@ -149,7 +149,19 @@ func (a *Agent) performPushDiscovery() {
 		}).Errorf(color.RedString("构建推送请求失败: %v", err))
 		return
 	}
-	// 步骤2：推送数据
+
+	// 步骤2：获取上次推送的数据
+	lastReq, err := a.mongo.GetLastPushRequest()
+	if err == nil && equalPushRequests(req, lastReq) {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "performPushDiscovery",
+			"took":   time.Since(startTime),
+		}).Infof(color.GreenString("数据无更新，忽略推送"))
+		return
+	}
+
+	// 步骤3：推送数据
 	err = a.apiClient.PushData(req)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -159,11 +171,49 @@ func (a *Agent) performPushDiscovery() {
 		}).Errorf(color.RedString("推送数据失败: %v", err))
 		return
 	}
+
+	// 步骤4：存储本次推送数据
+	err = a.mongo.StoreLastPushRequest(req)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "performPushDiscovery",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("存储推送数据失败: %v", err))
+		return
+	}
+
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "performPushDiscovery",
 		"took":   time.Since(startTime),
 	}).Infof(color.GreenString("服务发现推送成功"))
+}
+
+// equalPushRequests 对比两个PushRequest是否相同
+func equalPushRequests(a, b models.PushRequest) bool {
+	if len(a.Services) != len(b.Services) || len(a.Environments) != len(b.Environments) {
+		return false
+	}
+	aServices := make(map[string]struct{})
+	for _, s := range a.Services {
+		aServices[s] = struct{}{}
+	}
+	for _, s := range b.Services {
+		if _, ok := aServices[s]; !ok {
+			return false
+		}
+	}
+	aEnvs := make(map[string]struct{})
+	for _, e := range a.Environments {
+		aEnvs[e] = struct{}{}
+	}
+	for _, e := range b.Environments {
+		if _, ok := aEnvs[e]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // periodicQueryTasks 周期性查询任务
@@ -223,6 +273,18 @@ func (a *Agent) performQueryTasks() {
 							"service":     s,
 						},
 					}).Errorf(color.RedString("查询任务失败: %v", err))
+					return
+				}
+				if len(tasks) == 0 {
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "performQueryTasks",
+						"took":   time.Since(startTime),
+						"data": logrus.Fields{
+							"environment": e,
+							"service":     s,
+						},
+					}).Infof(color.GreenString("未查询到pending任务: service=%s, env=%s", s, e))
 					return
 				}
 				mu.Lock()
@@ -290,8 +352,14 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					continue
 				}
 
+				// 存储任务 (已有重复检查，并设置ConfirmationStatus = "pending")
+				err = a.validateAndStoreTask(t, env)
+				if err != nil {
+					continue
+				}
+
 				// 要求4: 检查状态，确保只弹一次
-				if t.ConfirmationStatus != "not_sent" {
+				if t.ConfirmationStatus != "pending" {
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "processQueryTasks",
@@ -300,12 +368,6 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 							"service": t.Service, "version": t.Version, "env": env, "status": t.ConfirmationStatus,
 						},
 					}).Infof(color.GreenString("弹窗已处理，跳过: %s v%s [%s]", t.Service, t.Version, env))
-					continue
-				}
-
-				// 存储任务 (已有重复检查)
-				err = a.validateAndStoreTask(t, env)
-				if err != nil {
 					continue
 				}
 
@@ -337,8 +399,8 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						}).Errorf(color.RedString("弹窗发送失败: %v", err))
 						continue
 					}
-					// 发送成功，更新状态"sent"
-					err = a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "sent")
+					// 发送成功，更新状态"success"
+					err = a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "success")
 					if err != nil {
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -353,7 +415,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						"data": logrus.Fields{
 							"service": t.Service, "version": t.Version, "env": env,
 						},
-					}).Infof(color.GreenString("弹窗发送成功并设置初始状态'sent': %s v%s [%s]", t.Service, t.Version, env))
+					}).Infof(color.GreenString("弹窗发送成功并设置初始状态'success': %s v%s [%s]", t.Service, t.Version, env))
 
 					go a.handleConfirmationChannels(confirmChan, rejectChan) // 异步处理
 				} else {
