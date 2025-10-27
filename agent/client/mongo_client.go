@@ -145,6 +145,7 @@ func (m *MongoClient) PushDeployments(deploys []models.DeployRequest) error {
 		// 步骤2：存储到环境特定任务集合，并添加confirmation_status字段
 		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
 		deploy.ConfirmationStatus = "pending" // 初始状态
+		deploy.PopupRetries = 0 // 初始化重试次数
 		_, err = collection.InsertOne(ctx, deploy)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
