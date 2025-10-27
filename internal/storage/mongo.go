@@ -151,14 +151,17 @@ func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 	return err
 }
 
-// QueryDeployQueueByServiceEnv 查询pending任务（重新设计：基于service模糊和environment精确）
-func (s *MongoStorage) QueryDeployQueueByServiceEnv(service, environment string) ([]DeployRequest, error) {
+// QueryDeployQueueByServiceEnv 查询pending任务（支持多环境查询，服务精确，user可选）
+func (s *MongoStorage) QueryDeployQueueByServiceEnv(service string, environments []string, user string) ([]DeployRequest, error) {
 	coll := s.db.Collection("deploy_queue")
-	// 模糊查询service（使用正则），environment精确在environments数组中，status=pending
+	// 精确查询service，environments数组匹配任意一个，status=pending，user可选
 	filter := bson.D{
-		{"service", bson.D{{"$regex", regexp.QuoteMeta(service)}}},
-		{"environments", bson.D{{"$in", []string{environment}}}},
+		{"service", service},
+		{"environments", bson.D{{"$in", environments}}},
 		{"status", "pending"},
+	}
+	if user != "" {
+		filter = append(filter, bson.E{"user", user})
 	}
 	cursor, err := coll.Find(s.ctx, filter)
 	if err != nil {
@@ -173,7 +176,7 @@ func (s *MongoStorage) QueryDeployQueueByServiceEnv(service, environment string)
 	return results, nil
 }
 
-// UpdateStatus 更新任务状态
+// UpdateStatus 更新任务状态（添加状态检查）
 func (s *MongoStorage) UpdateStatus(req StatusRequest) (bool, error) {
 	coll := s.db.Collection("deploy_queue")
 	filter := bson.D{
@@ -181,6 +184,7 @@ func (s *MongoStorage) UpdateStatus(req StatusRequest) (bool, error) {
 		{"version", req.Version},
 		{"user", req.User},
 		{"environments", bson.D{{"$in", []string{req.Environment}}}},
+		{"status", "assigned"}, // 必须是assigned才能更新
 	}
 	update := bson.D{{"$set", bson.D{{"status", req.Status}}}}
 	result, err := coll.UpdateOne(s.ctx, filter, update)
@@ -188,4 +192,25 @@ func (s *MongoStorage) UpdateStatus(req StatusRequest) (bool, error) {
 		return false, err
 	}
 	return result.ModifiedCount > 0, nil
+}
+
+// GetDeployByFilter 获取匹配的部署请求（用于日志）
+func (s *MongoStorage) GetDeployByFilter(service, version, environment string) ([]DeployRequest, error) {
+	coll := s.db.Collection("deploy_queue")
+	filter := bson.D{
+		{"service", service},
+		{"version", version},
+		{"environments", bson.D{{"$in", []string{environment}}}},
+	}
+	cursor, err := coll.Find(s.ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(s.ctx)
+
+	var results []DeployRequest
+	if err := cursor.All(s.ctx, &results); err != nil {
+		return nil, err
+	}
+	return results, nil
 }

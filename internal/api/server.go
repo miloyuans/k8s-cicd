@@ -124,10 +124,11 @@ type PushRequest struct {
 	Environments []string `json:"environments"`
 }
 
-// QueryRequest 查询请求结构（重新设计：基于service和environment）
+// QueryRequest 查询请求结构（重新设计：基于service和environments）
 type QueryRequest struct {
-	Service     string `json:"service"`     // 服务名字（必须）
-	Environment string `json:"environment"` // 环境（必须）
+	Service      string   `json:"service"`      // 服务名字（必须）
+	Environments []string `json:"environments"` // 环境列表（必须）
+	User         string   `json:"user"`         // 用户名（可选）
 }
 
 // NewServer 创建 Server 实例
@@ -338,7 +339,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleQuery 处理查询请求（重新设计：基于service和environment查询pending任务，支持模糊查询）
+// handleQuery 处理查询请求（支持多环境查询，服务名单一，user可选）
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -352,17 +353,22 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	var req QueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.WithError(err).Error("解析查询请求失败")
 		http.Error(w, "无效的请求数据", http.StatusBadRequest)
 		return
 	}
 
-	if req.Service == "" || req.Environment == "" {
-		http.Error(w, "缺少必填字段：服务名、环境", http.StatusBadRequest)
+	if req.Service == "" || len(req.Environments) == 0 {
+		s.logger.WithFields(logrus.Fields{
+			"service":      req.Service,
+			"environments": req.Environments,
+		}).Error("缺少必填字段：服务名或环境列表")
+		http.Error(w, "缺少必填字段：服务名或环境列表", http.StatusBadRequest)
 		return
 	}
 
-	// 查询pending状态的任务（模糊查询：服务使用正则，environment精确在environments数组中，status=pending）
-	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, req.Environment)
+	// 查询pending状态的任务（服务精确匹配，environments数组匹配任意一个，status=pending）
+	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, req.Environments, req.User)
 	if err != nil {
 		s.logger.WithError(err).Error("查询失败")
 		http.Error(w, "查询失败", http.StatusInternalServerError)
@@ -374,12 +380,29 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		dataJSON, _ := json.Marshal(results)
 		fmt.Printf("\033[32m[成功] 查询到pending任务: %s\033[0m\n", string(dataJSON)) // 绿色成功日志
 
-		// 新增: 查询成功后，更新这些任务的状态为"assigned"
+		// 更新查询到的任务状态为"assigned"
 		for _, task := range results {
+			// 确定任务匹配的环境（从task.Environments中选择一个在req.Environments中的环境）
+			var matchedEnv string
+			for _, env := range task.Environments {
+				for _, reqEnv := range req.Environments {
+					if env == reqEnv {
+						matchedEnv = env
+						break
+					}
+				}
+				if matchedEnv != "" {
+					break
+				}
+			}
+			if matchedEnv == "" {
+				continue // 理论上不会发生，因查询已确保环境匹配
+			}
+
 			updateReq := storage.StatusRequest{
 				Service:     task.Service,
 				Version:     task.Version,
-				Environment: req.Environment,  // 使用查询的环境
+				Environment: matchedEnv,
 				User:        task.User,
 				Status:      "assigned",
 			}
@@ -393,7 +416,8 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 		json.NewEncoder(w).Encode(results) // 返回完整JSON
 	} else {
-		fmt.Printf("\033[31m[失败] 未查询到pending任务: service=%s, env=%s\033[0m\n", req.Service, req.Environment) // 红色失败日志
+		fmt.Printf("\033[31m[失败] 未查询到pending任务: service=%s, environments=%v, user=%s\033[0m\n",
+			req.Service, req.Environments, req.User) // 红色失败日志
 		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
 	}
 }
@@ -427,7 +451,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 新增: 先查询原始数据（用于日志）
+	// 先查询原始数据（用于日志）
 	originalTasks, err := s.storage.GetDeployByFilter(req.Service, req.Version, req.Environment)
 	if err != nil {
 		s.logger.WithError(err).Error("预查询任务失败")
@@ -444,7 +468,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if updated {
-		// 新增: 更新成功，查询更新后数据用于日志
+		// 更新成功，查询更新后数据用于日志
 		updatedTasks, _ := s.storage.GetDeployByFilter(req.Service, req.Version, req.Environment)
 		origJSON, _ := json.Marshal(originalTasks)
 		updJSON, _ := json.Marshal(updatedTasks)
