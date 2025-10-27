@@ -263,7 +263,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 	wp.Submit(pushTask)
 
-	w.WriteHeader(http.StatusAccepted) // 202 Accepted
+	w.WriteHeader(http.StatusOK) // 修改为 200 OK 以避免客户端误判
 	response := map[string]interface{}{
 		"message": "推送请求已入队",
 		"task_id": taskID,
@@ -382,13 +382,14 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 日志记录：使用ANSI颜色渲染（绿色成功，红色失败）
-	responseData := map[string]string{"message": "暂无待处理任务"}
 	if len(results) > 0 {
 		dataJSON, _ := json.Marshal(results)
 		fmt.Printf("\033[32m[成功] 查询到pending任务: %s\033[0m\n", string(dataJSON)) // 绿色成功日志
 		s.logger.Infof("查询反馈数据: %s", string(dataJSON))
 
-		// 更新查询到的任务状态为"assigned"
+		json.NewEncoder(w).Encode(results) // 先反馈数据给外部服务
+
+		// 查询成功并反馈后，更新状态为assigned
 		for _, task := range results {
 			// 确定任务匹配的环境（从task.Environments中选择一个在req.Environments中的环境）
 			var matchedEnv string
@@ -421,14 +422,11 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 				s.logger.Infof("任务 %s 更新为 assigned", task.Version)
 			}
 		}
-
-		json.NewEncoder(w).Encode(results) // 返回完整JSON
 	} else {
-		fmt.Printf("\033[31m[失败] 未查询到pending任务: service=%s, environments=%v, user=%s\033[0m\n",
-			req.Service, req.Environments, req.User) // 红色失败日志
-		respJSON, _ := json.Marshal(responseData)
-		s.logger.Info("查询反馈数据: ", string(respJSON))
-		json.NewEncoder(w).Encode(responseData)
+		fmt.Printf("\033[33m[信息] 查询成功但无pending任务: service=%s, environments=%v, user=%s\033[0m\n",
+			req.Service, req.Environments, req.User) // 黄色信息日志
+		s.logger.Info("查询成功但无待处理任务")
+		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
 	}
 }
 
