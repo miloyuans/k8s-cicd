@@ -267,7 +267,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 	wp.Submit(pushTask)
 
-	w.WriteHeader(http.StatusOK) // 改为 200 OK 以避免客户端误判
+	w.WriteHeader(http.StatusOK) // 200 OK
 	response := map[string]interface{}{
 		"message": "推送请求已入队",
 		"task_id": taskID,
@@ -382,6 +382,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// 查询pending状态的任务（服务精确匹配，environments数组匹配任意一个，status=pending，user可选）
 	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, req.Environments, req.User)
 	if err != nil {
+		fmt.Printf("\033[31m[错误] 查询数据库失败: %v\033[0m\n", err) // 红色错误日志
 		s.logger.WithError(err).Error("查询数据库失败")
 		http.Error(w, "查询失败", http.StatusInternalServerError)
 		return

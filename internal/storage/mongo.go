@@ -4,7 +4,7 @@ package storage
 import (
 	"context"
 	"errors"
-	//"regexp"
+	"regexp"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -176,7 +176,7 @@ func (s *MongoStorage) QueryDeployQueueByServiceEnv(service string, environments
 	return results, nil
 }
 
-// UpdateStatus 更新任务状态（添加状态检查）
+// UpdateStatus 更新任务状态（修正为匹配 pending 状态）
 func (s *MongoStorage) UpdateStatus(req StatusRequest) (bool, error) {
 	coll := s.db.Collection("deploy_queue")
 	filter := bson.D{
@@ -184,7 +184,7 @@ func (s *MongoStorage) UpdateStatus(req StatusRequest) (bool, error) {
 		{"version", req.Version},
 		{"user", req.User},
 		{"environments", bson.D{{"$in", []string{req.Environment}}}},
-		{"status", "assigned"}, // 必须是assigned才能更新
+		{"status", "pending"}, // 修正：匹配 pending 状态
 	}
 	update := bson.D{{"$set", bson.D{{"status", req.Status}}}}
 	result, err := coll.UpdateOne(s.ctx, filter, update)
