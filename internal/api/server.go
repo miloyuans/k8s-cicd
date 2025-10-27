@@ -263,7 +263,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 	wp.Submit(pushTask)
 
-	w.WriteHeader(http.StatusOK) // 修改为 200 OK 以避免客户端误判
+	w.WriteHeader(http.StatusOK) // 修改为 200 OK
 	response := map[string]interface{}{
 		"message": "推送请求已入队",
 		"task_id": taskID,
@@ -387,9 +387,14 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("\033[32m[成功] 查询到pending任务: %s\033[0m\n", string(dataJSON)) // 绿色成功日志
 		s.logger.Infof("查询反馈数据: %s", string(dataJSON))
 
-		json.NewEncoder(w).Encode(results) // 先反馈数据给外部服务
+		// 先反馈数据给外部服务
+		err = json.NewEncoder(w).Encode(results)
+		if err != nil {
+			s.logger.WithError(err).Error("反馈数据失败")
+			return
+		}
 
-		// 查询成功并反馈后，更新状态为assigned
+		// 反馈成功后，更新状态为assigned
 		for _, task := range results {
 			// 确定任务匹配的环境（从task.Environments中选择一个在req.Environments中的环境）
 			var matchedEnv string
