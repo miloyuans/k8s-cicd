@@ -339,7 +339,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleQuery 处理查询请求（支持多环境查询，服务名单一，user可选）
+// handleQuery 处理查询请求（支持多环境查询，服务单个，user可选）
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -358,16 +358,15 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	reqJSON, _ := json.Marshal(req)
+	s.logger.Infof("收到查询请求: %s", string(reqJSON))
+
 	if req.Service == "" || len(req.Environments) == 0 {
-		s.logger.WithFields(logrus.Fields{
-			"service":      req.Service,
-			"environments": req.Environments,
-		}).Error("缺少必填字段：服务名或环境列表")
 		http.Error(w, "缺少必填字段：服务名或环境列表", http.StatusBadRequest)
 		return
 	}
 
-	// 查询pending状态的任务（服务精确匹配，environments数组匹配任意一个，status=pending）
+	// 查询pending状态的任务（服务精确匹配，environments数组匹配任意一个，status=pending，user可选）
 	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, req.Environments, req.User)
 	if err != nil {
 		s.logger.WithError(err).Error("查询失败")
@@ -379,6 +378,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	if len(results) > 0 {
 		dataJSON, _ := json.Marshal(results)
 		fmt.Printf("\033[32m[成功] 查询到pending任务: %s\033[0m\n", string(dataJSON)) // 绿色成功日志
+		s.logger.Infof("查询反馈数据: %s", string(dataJSON))
 
 		// 更新查询到的任务状态为"assigned"
 		for _, task := range results {
@@ -418,6 +418,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	} else {
 		fmt.Printf("\033[31m[失败] 未查询到pending任务: service=%s, environments=%v, user=%s\033[0m\n",
 			req.Service, req.Environments, req.User) // 红色失败日志
+		s.logger.Info("查询反馈数据: 暂无待处理任务")
 		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
 	}
 }
@@ -451,7 +452,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 先查询原始数据（用于日志）
+	// 新增: 先查询原始数据（用于日志）
 	originalTasks, err := s.storage.GetDeployByFilter(req.Service, req.Version, req.Environment)
 	if err != nil {
 		s.logger.WithError(err).Error("预查询任务失败")
@@ -468,7 +469,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if updated {
-		// 更新成功，查询更新后数据用于日志
+		// 新增: 更新成功，查询更新后数据用于日志
 		updatedTasks, _ := s.storage.GetDeployByFilter(req.Service, req.Version, req.Environment)
 		origJSON, _ := json.Marshal(originalTasks)
 		updJSON, _ := json.Marshal(updatedTasks)
