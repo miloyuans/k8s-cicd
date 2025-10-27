@@ -32,7 +32,7 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	startTime := time.Now()
 	// 步骤1：创建MongoDB客户端配置
 	clientOptions := options.Client().ApplyURI(cfg.URI).
-		SetConnectTimeout(5 * time.Second).
+		SetConnectTimeout(5*time.Second).
 		SetMaxPoolSize(10).
 		SetMinPoolSize(2)
 
@@ -145,7 +145,7 @@ func (m *MongoClient) PushDeployments(deploys []models.DeployRequest) error {
 		// 步骤2：存储到环境特定任务集合，并添加confirmation_status字段
 		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
 		deploy.ConfirmationStatus = "pending" // 初始状态
-		deploy.PopupRetries = 0 // 初始化重试次数
+		deploy.PopupRetries = 0              // 初始化重试次数
 		_, err = collection.InsertOne(ctx, deploy)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
@@ -181,6 +181,7 @@ func (m *MongoClient) CheckDuplicateTask(deploy models.DeployRequest) (bool, err
 		"version":     deploy.Version,
 		"environment": deploy.Environments[0],
 		"user":        deploy.User,
+		"confirmation_status": bson.M{"$nin": []string{"confirmed", "rejected", "failed"}},
 	})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -282,11 +283,11 @@ func (m *MongoClient) CleanCompletedTasks() error {
 	// 步骤2：清理任务
 	for cursor.Next(ctx) {
 		var task struct {
-			Service     string `bson:"service"`
-			Version     string `bson:"version"`
-			Environment string `bson:"environment"`
-			User        string `bson:"user"`
-			Status      string `bson:"status"`
+			Service            string `bson:"service"`
+			Version            string `bson:"version"`
+			Environment        string `bson:"environment"`
+			User               string `bson:"user"`
+			Status             string `bson:"status"`
 			ConfirmationStatus string `bson:"confirmation_status"`
 		}
 		if err := cursor.Decode(&task); err != nil {
@@ -311,7 +312,7 @@ func (m *MongoClient) CleanCompletedTasks() error {
 			continue
 		}
 
-		// 如果状态为completed/rejected/failed，删除（状态已包含在任务中）
+		// 如果状态为confirmed/rejected/failed，删除
 		if task.ConfirmationStatus == "confirmed" || task.ConfirmationStatus == "rejected" || task.ConfirmationStatus == "failed" {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -484,6 +485,81 @@ func (m *MongoClient) UpdateConfirmationStatus(service, version, environment, us
 		},
 	}).Infof("确认状态更新成功: %s", confirmationStatus)
 	return nil
+}
+
+// UpdatePopupRetries 更新弹窗重试次数
+func (m *MongoClient) UpdatePopupRetries(service, version, environment, user string, retries int) error {
+	startTime := time.Now()
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
+	_, err := collection.UpdateOne(ctx, bson.M{
+		"service":     service,
+		"version":     version,
+		"environment": environment,
+		"user":        user,
+	}, bson.M{"$set": bson.M{"popup_retries": retries}})
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "UpdatePopupRetries",
+			"took":   time.Since(startTime),
+		}).Errorf("更新弹窗重试次数失败: %v", err)
+		return err
+	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "UpdatePopupRetries",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"retries": retries,
+		},
+	}).Infof("弹窗重试次数更新成功: %d", retries)
+	return nil
+}
+
+// GetPendingOrFailedPopupTasks 获取待处理或失败的弹窗任务
+func (m *MongoClient) GetPendingOrFailedPopupTasks(env string, maxRetries int) ([]models.DeployRequest, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+	cursor, err := collection.Find(ctx, bson.M{
+		"confirmation_status": bson.M{"$in": []string{"pending", "failed"}},
+		"popup_retries":       bson.M{"$lte": maxRetries},
+	})
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPendingOrFailedPopupTasks",
+			"took":   time.Since(startTime),
+		}).Errorf("查询待处理或失败弹窗任务失败: %v", err)
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var tasks []models.DeployRequest
+	for cursor.Next(ctx) {
+		var task models.DeployRequest
+		if err := cursor.Decode(&task); err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "GetPendingOrFailedPopupTasks",
+				"took":   time.Since(startTime),
+			}).Errorf("解码任务失败: %v", err)
+			continue
+		}
+		tasks = append(tasks, task)
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetPendingOrFailedPopupTasks",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"task_count": len(tasks),
+			"environment": env,
+		},
+	}).Infof("查询到 %d 个待处理或失败的弹窗任务", len(tasks))
+	return tasks, nil
 }
 
 // GetLastPushRequest 获取上一次推送的PushRequest

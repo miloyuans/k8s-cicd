@@ -50,6 +50,9 @@ task:
   queue_workers: 5                 # 工作线程数
   poll_interval_seconds: 30        # 轮询间隔（秒）
   max_queue_size: 100              # 最大队列大小
+  popup_max_retries: 3
+  popup_retry_delay: 300 # 5 minutes in seconds
+
 
 # 部署配置
 deploy:

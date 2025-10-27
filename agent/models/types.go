@@ -21,7 +21,8 @@ type DeployRequest struct {
 	User              string    `json:"user" bson:"user"`                 // 用户
 	Status            string    `json:"status" bson:"status"`             // 状态
 	CreatedAt         time.Time `json:"created_at" bson:"created_at"`     // 创建时间
-	ConfirmationStatus string    `json:"confirmation_status" bson:"confirmation_status"` // 弹窗状态: pending, success, confirmed, rejected, failed
+	ConfirmationStatus string    `json:"confirmation_status" bson:"confirmation_status"` // 弹窗状态: pending, sent, confirmed, rejected, failed
+	PopupRetries      int       `json:"popup_retries" bson:"popup_retries"` // 弹窗重试次数
 }
 
 // QueryRequest 查询请求数据结构
