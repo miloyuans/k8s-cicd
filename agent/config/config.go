@@ -23,17 +23,17 @@ type TelegramBot struct {
 
 // TelegramConfig Telegram多机器人配置
 type TelegramConfig struct {
-	Bots           []TelegramBot    `yaml:"bots"`            // 机器人列表
-	AllowedUsers   []string         `yaml:"allowed_users"`   // 全局允许用户ID
-	ConfirmTimeout time.Duration    `yaml:"confirm_timeout"` // 弹窗超时
+	Bots           []TelegramBot `yaml:"bots"`            // 机器人列表
+	AllowedUsers   []string      `yaml:"allowed_users"`   // 全局允许用户ID
+	ConfirmTimeout time.Duration `yaml:"confirm_timeout"` // 弹窗超时
 }
 
 // APIConfig API服务配置
 type APIConfig struct {
-	BaseURL        string        `yaml:"base_url"`       // API基础地址
-	PushInterval   time.Duration `yaml:"push_interval"`  // 推送间隔
-	QueryInterval  time.Duration `yaml:"query_interval"` // 查询间隔
-	MaxRetries     int           `yaml:"max_retries"`    // 最大重试次数
+	BaseURL       string        `yaml:"base_url"`       // API基础地址
+	PushInterval  time.Duration `yaml:"push_interval"`  // 推送间隔
+	QueryInterval time.Duration `yaml:"query_interval"` // 查询间隔
+	MaxRetries    int           `yaml:"max_retries"`    // 最大重试次数
 }
 
 // QueryConfig 查询弹窗过滤配置
@@ -51,21 +51,21 @@ type K8sAuthConfig struct {
 
 // MongoConfig MongoDB配置
 type MongoConfig struct {
-	URI         string              `yaml:"uri"`          // MongoDB连接URI
-	TTL         time.Duration       `yaml:"ttl"`          // 数据过期时间
-	MaxRetries  int                 `yaml:"max_retries"`  // 连接重试次数
-	IdleTimeout time.Duration       `yaml:"idle_timeout"` // 空闲连接超时
-	EnvMapping  EnvMappingConfig    `yaml:"env_mapping"`  // 环境映射
+	URI         string           `yaml:"uri"`          // MongoDB连接URI
+	TTL         time.Duration    `yaml:"ttl"`          // 数据过期时间
+	MaxRetries  int              `yaml:"max_retries"`  // 连接重试次数
+	IdleTimeout time.Duration    `yaml:"idle_timeout"` // 空闲连接超时
+	EnvMapping  EnvMappingConfig `yaml:"env_mapping"`  // 环境映射
 }
 
 // TaskConfig 任务队列配置
 type TaskConfig struct {
-	MaxRetries     int `yaml:"max_retries"`         // 最大重试次数
-	RetryDelay     int `yaml:"retry_delay_seconds"` // 重试延迟
-	QueueWorkers   int `yaml:"queue_workers"`       // 工作线程数
-	PollInterval   int `yaml:"poll_interval_seconds"` // 轮询间隔
-	MaxQueueSize   int `yaml:"max_queue_size"`      // 最大队列大小
-	PopupMaxRetries int `yaml:"popup_max_retries"`   // 弹窗最大重试次数
+	MaxRetries      int `yaml:"max_retries"`          // 最大重试次数
+	RetryDelay      int `yaml:"retry_delay_seconds"`  // 重试延迟
+	QueueWorkers    int `yaml:"queue_workers"`        // 工作线程数
+	PollInterval    int `yaml:"poll_interval_seconds"` // 轮询间隔
+	MaxQueueSize    int `yaml:"max_queue_size"`       // 最大队列大小
+	PopupMaxRetries int `yaml:"popup_max_retries"`    // 弹窗最大重试次数
 	PopupRetryDelay int `yaml:"popup_retry_delay_seconds"` // 弹窗重试延迟
 }
 
@@ -88,16 +88,16 @@ type EnvMappingConfig struct {
 
 // Config 完整配置结构
 type Config struct {
-	Telegram    TelegramConfig      `yaml:"telegram"`    // Telegram配置
-	API         APIConfig           `yaml:"api"`         // API配置
-	Query       QueryConfig         `yaml:"query"`       // 查询配置
-	Kubernetes  K8sAuthConfig       `yaml:"kubernetes"`  // Kubernetes配置
-	Mongo       MongoConfig         `yaml:"mongo"`       // MongoDB配置
-	Task        TaskConfig          `yaml:"task"`        // 任务配置
-	Deploy      DeployConfig        `yaml:"deploy"`      // 部署配置
-	User        UserConfig          `yaml:"user"`        // 用户配置
-	EnvMapping  EnvMappingConfig    `yaml:"env_mapping"` // 环境映射
-	LogLevel    string              `yaml:"log_level"`   // 日志级别
+	Telegram   TelegramConfig   `yaml:"telegram"`   // Telegram配置
+	API        APIConfig        `yaml:"api"`        // API配置
+	Query      QueryConfig      `yaml:"query"`      // 查询配置
+	Kubernetes K8sAuthConfig    `yaml:"kubernetes"` // Kubernetes配置
+	Mongo      MongoConfig      `yaml:"mongo"`      // MongoDB配置
+	Task       TaskConfig       `yaml:"task"`       // 任务配置
+	Deploy     DeployConfig     `yaml:"deploy"`     // 部署配置
+	User       UserConfig       `yaml:"user"`       // 用户配置
+	EnvMapping EnvMappingConfig `yaml:"env_mapping"` // 环境映射
+	LogLevel   string           `yaml:"log_level"`   // 日志级别
 }
 
 // LoadConfig 从YAML文件加载配置
