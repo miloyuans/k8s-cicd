@@ -124,7 +124,7 @@ type PushRequest struct {
 	Environments []string `json:"environments"`
 }
 
-// QueryRequest 查询请求结构（重新设计：基于service和environments，支持单个environment兼容）
+// QueryRequest 查询请求结构（支持单个environment兼容）
 type QueryRequest struct {
 	Service      string   `json:"service"`      // 服务名字（必须）
 	Environments []string `json:"environments"` // 环境列表（可选，与environment互斥）
@@ -247,7 +247,11 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	reqJSON, _ := json.Marshal(req)
+	s.logger.Infof("收到推送请求: %s", string(reqJSON))
+
 	if len(req.Services) == 0 || len(req.Environments) == 0 {
+		s.logger.Error("缺少必填字段：服务列表或环境列表")
 		http.Error(w, "缺少必填字段：服务列表或环境列表", http.StatusBadRequest)
 		return
 	}
@@ -263,11 +267,13 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 	wp.Submit(pushTask)
 
-	w.WriteHeader(http.StatusAccepted) // 202 Accepted
+	w.WriteHeader(http.StatusOK) // 改为 200 OK 以避免客户端误判
 	response := map[string]interface{}{
 		"message": "推送请求已入队",
 		"task_id": taskID,
 	}
+	respJSON, _ := json.Marshal(response)
+	s.logger.Infof("推送响应: %s", string(respJSON))
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -376,12 +382,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// 查询pending状态的任务（服务精确匹配，environments数组匹配任意一个，status=pending，user可选）
 	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, req.Environments, req.User)
 	if err != nil {
-		s.logger.WithError(err).Error("查询失败")
+		s.logger.WithError(err).Error("查询数据库失败")
 		http.Error(w, "查询失败", http.StatusInternalServerError)
 		return
 	}
 
-	// 日志记录：使用ANSI颜色渲染（绿色成功，红色失败）
+	// 日志记录：使用ANSI颜色渲染（绿色成功，黄色信息，红色错误）
 	if len(results) > 0 {
 		dataJSON, _ := json.Marshal(results)
 		fmt.Printf("\033[32m[成功] 查询到pending任务: %s\033[0m\n", string(dataJSON)) // 绿色成功日志
@@ -390,13 +396,14 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		// 先反馈数据给外部服务
 		err = json.NewEncoder(w).Encode(results)
 		if err != nil {
+			fmt.Printf("\033[31m[错误] 反馈数据失败: %v\033[0m\n", err) // 红色错误日志
 			s.logger.WithError(err).Error("反馈数据失败")
 			return
 		}
 
 		// 反馈成功后，更新状态为assigned
 		for _, task := range results {
-			// 确定任务匹配的环境（从task.Environments中选择一个在req.Environments中的环境）
+			// 确定任务匹配的环境
 			var matchedEnv string
 			for _, env := range task.Environments {
 				for _, reqEnv := range req.Environments {
@@ -410,7 +417,9 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if matchedEnv == "" {
-				continue // 理论上不会发生，因查询已确保环境匹配
+				fmt.Printf("\033[33m[异常] 任务 %s 未找到匹配环境\033[0m\n", task.Version) // 黄色异常日志
+				s.logger.Warnf("任务 %s 未找到匹配环境", task.Version)
+				continue
 			}
 
 			updateReq := storage.StatusRequest{
@@ -462,22 +471,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	var req storage.StatusRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.WithError(err).Error("解析状态更新请求失败")
 		http.Error(w, "无效的请求数据", http.StatusBadRequest)
 		return
 	}
 
 	if req.Service == "" || req.Version == "" || req.Environment == "" || req.User == "" {
+		s.logger.Error("缺少必填字段")
 		http.Error(w, "缺少必填字段", http.StatusBadRequest)
 		return
 	}
 
 	validStatuses := map[string]bool{"success": true, "failure": true, "no_action": true}
 	if !validStatuses[req.Status] {
+		s.logger.Error("无效的状态值")
 		http.Error(w, "无效的状态值", http.StatusBadRequest)
 		return
 	}
 
-	// 新增: 先查询原始数据（用于日志）
+	// 先查询原始数据（用于日志）
 	originalTasks, err := s.storage.GetDeployByFilter(req.Service, req.Version, req.Environment)
 	if err != nil {
 		s.logger.WithError(err).Error("预查询任务失败")
@@ -494,7 +506,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if updated {
-		// 新增: 更新成功，查询更新后数据用于日志
+		// 更新成功，查询更新后数据用于日志
 		updatedTasks, _ := s.storage.GetDeployByFilter(req.Service, req.Version, req.Environment)
 		origJSON, _ := json.Marshal(originalTasks)
 		updJSON, _ := json.Marshal(updatedTasks)
