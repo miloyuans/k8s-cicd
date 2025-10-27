@@ -319,7 +319,7 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 		userName, action, service, version, env)
 
 	// 步骤9：发送反馈消息
-	feedbackMessageID, err := bm.sendMessage(bm.getDefaultBot(), chatID, resultText, nil, "MarkdownV2")
+	feedbackMessageID, err := bm.sendMessage(bm.getDefaultBot(), chatID, resultText, "MarkdownV2") // FIX: Removed extra 'nil' argument (no keyboard needed here).
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -419,7 +419,7 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, allow
 	}
 
 	// 步骤5：发送带键盘的消息
-	_, err = bm.sendMessage(bot, bot.GroupID, message, keyboard, "MarkdownV2")
+	_, err = bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2") // FIX: Changed to 'sendMessageWithKeyboard' (keyboard is required here).
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -627,7 +627,7 @@ func (bm *BotManager) sendMessageWithKeyboard(bot *TelegramBot, chatID, text str
 // SendSimpleMessage 发送简单反馈消息
 func (bm *BotManager) SendSimpleMessage(bot *TelegramBot, chatID, text, parseMode string) (int, error) {
 	// 步骤1：调用sendMessage发送消息
-	return bm.sendMessage(bot, chatID, text, nil, parseMode)
+	return bm.sendMessage(bot, chatID, text, parseMode) // FIX: Removed extra 'nil' argument (no keyboard needed here).
 }
 
 // DeleteMessage 删除指定消息
