@@ -601,23 +601,46 @@ func (m *BotManager) sendMessage(bot *TelegramBot, chatID, text string, replyMar
 	return result, nil
 }
 
-// getBotForService 根据服务获取机器人
-func (m *BotManager) getBotForService(service string) (*TelegramBot, error) {
-	for _, bot := range m.Bots {
-		for prefix, services := range bot.Services {
-			if bot.RegexMatch {
-				if matched, _ := regexp.MatchString(prefix, service); matched {
-					return bot, nil
-				}
-			} else if strings.HasPrefix(service, prefix) {
-				for _, s := range services {
-					if s == service {
+// getBotForService 根据服务名选择机器人
+func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
+	startTime := time.Now()
+	// 步骤1：遍历所有机器人
+	for _, bot := range bm.Bots {
+		// 步骤2：遍历服务的匹配规则
+		for _, serviceList := range bot.Services {
+			// 步骤3：遍历服务列表中的模式
+			for _, pattern := range serviceList {
+				if bot.RegexMatch {
+					// 使用正则匹配
+					matched, err := regexp.MatchString(pattern, service)
+					if err == nil && matched {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "getBotForService",
+							"took":   time.Since(startTime),
+						}).Infof(color.GreenString("服务 %s 匹配机器人 %s", service, bot.Name))
+						return bot, nil
+					}
+				} else {
+					// 使用前缀匹配（忽略大小写）
+					if strings.HasPrefix(strings.ToUpper(service), strings.ToUpper(pattern)) {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "getBotForService",
+							"took":   time.Since(startTime),
+						}).Infof(color.GreenString("服务 %s 匹配机器人 %s", service, bot.Name))
 						return bot, nil
 					}
 				}
 			}
 		}
 	}
+	// 步骤4：未匹配，返回错误
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "getBotForService",
+		"took":   time.Since(startTime),
+	}).Errorf(color.RedString("服务 %s 未匹配任何机器人", service))
 	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
 }
 
