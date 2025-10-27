@@ -263,7 +263,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 	wp.Submit(pushTask)
 
-	w.WriteHeader(http.StatusOK) // 修改为 200 OK
+	w.WriteHeader(http.StatusAccepted) // 202 Accepted
 	response := map[string]interface{}{
 		"message": "推送请求已入队",
 		"task_id": taskID,
@@ -421,10 +421,23 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 				Status:      "assigned",
 			}
 			updated, err := s.storage.UpdateStatus(updateReq)
-			if err != nil || !updated {
+			if err != nil {
+				fmt.Printf("\033[31m[错误] 更新任务 %s 到 assigned 失败: %v\033[0m\n", task.Version, err) // 红色错误日志
 				s.logger.WithError(err).Errorf("更新任务 %s 到 assigned 失败", task.Version)
+			} else if !updated {
+				fmt.Printf("\033[33m[异常] 未更新任务 %s 到 assigned (可能状态不匹配)\033[0m\n", task.Version) // 黄色异常日志
+				s.logger.Warnf("未更新任务 %s 到 assigned (可能状态不匹配)", task.Version)
 			} else {
-				s.logger.Infof("任务 %s 更新为 assigned", task.Version)
+				// 更新成功，重新查询任务数据并打印
+				recheckedTasks, recheckErr := s.storage.GetDeployByFilter(task.Service, task.Version, matchedEnv)
+				if recheckErr != nil {
+					fmt.Printf("\033[31m[错误] 重新查询更新后任务 %s 失败: %v\033[0m\n", task.Version, recheckErr) // 红色错误日志
+					s.logger.WithError(recheckErr).Errorf("重新查询更新后任务 %s 失败", task.Version)
+				} else {
+					recheckedJSON, _ := json.Marshal(recheckedTasks)
+					fmt.Printf("\033[32m[成功] 任务 %s 更新为 assigned, 更新后数据: %s\033[0m\n", task.Version, string(recheckedJSON)) // 绿色成功日志
+					s.logger.Infof("任务 %s 更新为 assigned, 更新后数据: %s", task.Version, string(recheckedJSON))
+				}
 			}
 		}
 	} else {
