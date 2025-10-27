@@ -124,10 +124,11 @@ type PushRequest struct {
 	Environments []string `json:"environments"`
 }
 
-// QueryRequest 查询请求结构（重新设计：基于service和environments）
+// QueryRequest 查询请求结构（重新设计：基于service和environments，支持单个environment兼容）
 type QueryRequest struct {
 	Service      string   `json:"service"`      // 服务名字（必须）
-	Environments []string `json:"environments"` // 环境列表（必须）
+	Environments []string `json:"environments"` // 环境列表（可选，与environment互斥）
+	Environment  string   `json:"environment"`  // 单个环境（可选，与environments互斥）
 	User         string   `json:"user"`         // 用户名（可选）
 }
 
@@ -358,10 +359,16 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 兼容单个环境
+	if len(req.Environments) == 0 && req.Environment != "" {
+		req.Environments = []string{req.Environment}
+	}
+
 	reqJSON, _ := json.Marshal(req)
 	s.logger.Infof("收到查询请求: %s", string(reqJSON))
 
 	if req.Service == "" || len(req.Environments) == 0 {
+		s.logger.Error("缺少必填字段：服务名或环境列表")
 		http.Error(w, "缺少必填字段：服务名或环境列表", http.StatusBadRequest)
 		return
 	}
@@ -375,6 +382,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 日志记录：使用ANSI颜色渲染（绿色成功，红色失败）
+	responseData := map[string]string{"message": "暂无待处理任务"}
 	if len(results) > 0 {
 		dataJSON, _ := json.Marshal(results)
 		fmt.Printf("\033[32m[成功] 查询到pending任务: %s\033[0m\n", string(dataJSON)) // 绿色成功日志
@@ -418,8 +426,9 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	} else {
 		fmt.Printf("\033[31m[失败] 未查询到pending任务: service=%s, environments=%v, user=%s\033[0m\n",
 			req.Service, req.Environments, req.User) // 红色失败日志
-		s.logger.Info("查询反馈数据: 暂无待处理任务")
-		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
+		respJSON, _ := json.Marshal(responseData)
+		s.logger.Info("查询反馈数据: ", string(respJSON))
+		json.NewEncoder(w).Encode(responseData)
 	}
 }
 
