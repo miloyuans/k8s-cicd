@@ -327,8 +327,8 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 		wg.Add(1)
 		go func(t models.DeployRequest) {
 			defer wg.Done()
-			for _, env := range t.Environments { // 注意：这里Environments是[]string，但代码中常取[0]，假设单环境
-				// 要求1: 弹窗前检查数据库中是否已有相同任务
+			for _, env := range t.Environments {
+				// 检查数据库中是否已有相同任务
 				exists, err := a.mongo.CheckExistingTask(t.Service, t.Version, env)
 				if err != nil {
 					logrus.WithFields(logrus.Fields{
@@ -341,46 +341,70 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					}).Errorf(color.RedString("检查现有任务失败: %v", err))
 					continue
 				}
+				var confirmationStatus string
 				if exists {
+					confirmationStatus, err = a.mongo.GetConfirmationStatus(t.Service, t.Version, env, t.User)
+					if err != nil {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "processQueryTasks",
+							"took":   time.Since(startTime),
+							"data": logrus.Fields{
+								"service": t.Service, "version": t.Version, "env": env,
+							},
+						}).Errorf(color.RedString("获取确认状态失败: %v", err))
+						continue
+					}
+				} else {
+					// 设置命名空间
+					namespace, ok := a.envMapper.GetNamespace(env)
+					if !ok {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "processQueryTasks",
+							"took":   time.Since(startTime),
+							"data": logrus.Fields{
+								"service": t.Service, "version": t.Version, "env": env,
+							},
+						}).Errorf(color.RedString("无法获取环境 [%s] 的命名空间", env))
+						continue
+					}
+					t.Namespace = namespace
+					t.ConfirmationStatus = "pending"
+					err = a.validateAndStoreTask(t, env)
+					if err != nil {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "processQueryTasks",
+							"took":   time.Since(startTime),
+							"data": logrus.Fields{
+								"service": t.Service, "version": t.Version, "env": env,
+							},
+						}).Errorf(color.RedString("存储任务失败: %v", err))
+						continue
+					}
+					confirmationStatus = "pending"
+				}
+				if confirmationStatus != "pending" {
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
 						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env,
-						},
-					}).Warnf(color.YellowString("重复任务忽略，不发起弹窗: %s v%s [%s]", t.Service, t.Version, env))
-					continue
-				}
-
-				// 存储任务 (已有重复检查，并设置ConfirmationStatus = "pending")
-				err = a.validateAndStoreTask(t, env)
-				if err != nil {
-					continue
-				}
-
-				// 要求4: 检查状态，确保只弹一次
-				if t.ConfirmationStatus != "pending" {
-					logrus.WithFields(logrus.Fields{
-						"time":   time.Now().Format("2006-01-02 15:04:05"),
-						"method": "processQueryTasks",
-						"took":   time.Since(startTime),
-						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env, "status": t.ConfirmationStatus,
+							"service": t.Service, "version": t.Version, "env": env, "status": confirmationStatus,
 						},
 					}).Infof(color.GreenString("弹窗已处理，跳过: %s v%s [%s]", t.Service, t.Version, env))
 					continue
 				}
 
-				// 要求2: 如果需要弹窗，发送并设置初始状态"sent"
+				// 如果需要弹窗，发送并设置初始状态"sent"
 				if contains(a.config.Query.ConfirmEnvs, env) {
 					confirmChan := make(chan models.DeployRequest)
 					rejectChan := make(chan models.StatusRequest)
-					_, err := a.botMgr.SendConfirmation(t.Service, env, t.Version, t.User, confirmChan, rejectChan)
+					messageID, err := a.botMgr.SendConfirmation(t.Service, env, t.Version, t.User, confirmChan, rejectChan)
 					if err != nil {
-						// 要求2: 发送失败，设置"failed"
-						err = a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed")
-						if err != nil {
+						// 发送失败，设置"failed"
+						if err := a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed"); err != nil {
 							logrus.WithFields(logrus.Fields{
 								"time":   time.Now().Format("2006-01-02 15:04:05"),
 								"method": "processQueryTasks",
@@ -400,13 +424,15 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						}).Errorf(color.RedString("弹窗发送失败: %v", err))
 						continue
 					}
-					// 发送成功，更新状态"success"
-					err = a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "success")
-					if err != nil {
+					// 发送成功，更新状态"sent"
+					if err := a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "sent"); err != nil {
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "processQueryTasks",
 							"took":   time.Since(startTime),
+							"data": logrus.Fields{
+								"service": t.Service, "version": t.Version, "env": env,
+							},
 						}).Errorf(color.RedString("更新确认状态失败: %v", err))
 					}
 					logrus.WithFields(logrus.Fields{
@@ -414,9 +440,9 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
 						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env,
+							"service": t.Service, "version": t.Version, "env": env, "message_id": messageID,
 						},
-					}).Infof(color.GreenString("弹窗发送成功并设置初始状态'success': %s v%s [%s]", t.Service, t.Version, env))
+					}).Infof(color.GreenString("弹窗发送成功并设置初始状态'sent': %s v%s [%s]", t.Service, t.Version, env))
 
 					go a.handleConfirmationChannels(confirmChan, rejectChan) // 异步处理
 				} else {
@@ -452,9 +478,22 @@ func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployReque
 	startTime := time.Now()
 	select {
 	case task := <-confirmChan:
-		// 要求3: 确认，更新状态"confirmed"，入队
-		err := a.mongo.UpdateConfirmationStatus(task.Service, task.Version, task.Environments[0], task.User, "confirmed")
-		if err != nil {
+		// 设置命名空间
+		namespace, ok := a.envMapper.GetNamespace(task.Environments[0])
+		if !ok {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "handleConfirmationChannels",
+				"took":   time.Since(startTime),
+				"data": logrus.Fields{
+					"service": task.Service, "version": task.Version, "env": task.Environments[0],
+				},
+			}).Errorf(color.RedString("无法获取环境 [%s] 的命名空间", task.Environments[0]))
+			return
+		}
+		task.Namespace = namespace
+		// 确认，更新状态"confirmed"，入队
+		if err := a.mongo.UpdateConfirmationStatus(task.Service, task.Version, task.Environments[0], task.User, "confirmed"); err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "handleConfirmationChannels",
@@ -478,23 +517,21 @@ func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployReque
 		}).Infof(color.GreenString("用户确认部署，任务入队并更新状态'confirmed': %s v%s [%s]", task.Service, task.Version, task.Environments[0]))
 
 	case status := <-rejectChan:
-		// 要求3: 拒绝，更新状态"rejected"，推送no_action，删除任务
-		err := a.mongo.UpdateConfirmationStatus(status.Service, status.Version, status.Environment, status.User, "rejected")
-		if err != nil {
+		// 拒绝，更新状态"rejected"，推送no_action，删除任务
+		if err := a.mongo.UpdateConfirmationStatus(status.Service, status.Version, status.Environment, status.User, "rejected"); err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "handleConfirmationChannels",
 				"took":   time.Since(startTime),
 			}).Errorf(color.RedString("更新拒绝状态失败: %v", err))
 		}
-		err = a.apiClient.UpdateStatus(models.StatusRequest{
+		if err := a.apiClient.UpdateStatus(models.StatusRequest{
 			Service:     status.Service,
 			Version:     status.Version,
 			Environment: status.Environment,
 			User:        status.User,
 			Status:      "no_action",
-		})
-		if err != nil {
+		}); err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "handleConfirmationChannels",
@@ -513,8 +550,7 @@ func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployReque
 				},
 			}).Infof(color.GreenString("用户拒绝部署，推送no_action成功并更新状态'rejected': %s v%s [%s]", status.Service, status.Version, status.Environment))
 		}
-		err = a.mongo.DeleteTask(status.Service, status.Version, status.Environment, status.User)
-		if err != nil {
+		if err := a.mongo.DeleteTask(status.Service, status.Version, status.Environment, status.User); err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "handleConfirmationChannels",
@@ -550,7 +586,7 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 				"task": task,
 			},
 		}).Errorf(color.RedString("环境 [%s] 无命名空间配置", env))
-		return nil
+		return fmt.Errorf("环境 [%s] 无命名空间配置", env)
 	}
 	task.Environments = []string{env}
 	task.Namespace = namespace
@@ -565,7 +601,7 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 				"task": task,
 			},
 		}).Errorf(color.RedString("检查任务重复失败: %v", err))
-		return nil
+		return err
 	}
 	if isDuplicate {
 		logrus.WithFields(logrus.Fields{
@@ -575,7 +611,7 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 			"data": logrus.Fields{
 				"task": task,
 			},
-		}).Warnf(color.GreenString("任务重复，忽略: %s v%s [%s]", task.Service, task.Version, env))
+		}).Warnf(color.YellowString("任务重复，忽略: %s v%s [%s]", task.Service, task.Version, env))
 		return nil
 	}
 	// 步骤3：存储任务到MongoDB
@@ -589,7 +625,7 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 				"task": task,
 			},
 		}).Errorf(color.RedString("存储任务失败: %v", err))
-		return nil
+		return err
 	}
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -620,7 +656,7 @@ func (a *Agent) Stop() {
 	}).Infof(color.GreenString("Agent关闭完成"))
 }
 
-// generateTaskID 生成任务ID（假设实现）
+// generateTaskID 生成任务ID
 func generateTaskID(task models.DeployRequest) string {
 	return task.Service + "-" + task.Version // 简单实现，实际可使用UUID
 }
