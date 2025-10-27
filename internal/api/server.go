@@ -246,15 +246,11 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(req.Services) == 0 || len(req.Environments) == 0 {
-		http.Error(w, "服务名和环境必须存在", http.StatusBadRequest)
+		http.Error(w, "缺少必填字段：服务列表或环境列表", http.StatusBadRequest)
 		return
 	}
 
-	s.logger.WithFields(logrus.Fields{
-		"services_count":     len(req.Services),
-		"environments_count": len(req.Environments),
-	}).Info("收到推送请求")
-
+	// 异步提交推送任务
 	wp := getGlobalWorkerPool()
 	taskID := fmt.Sprintf("push-%d", time.Now().UnixNano())
 	pushTask := &PushTask{
@@ -263,11 +259,11 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		ID:           taskID,
 	}
 
-	wp.Submit(pushTask) // 异步提交任务
+	wp.Submit(pushTask)
 
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusAccepted) // 202 Accepted
 	response := map[string]interface{}{
-		"message": "数据推送成功",
+		"message": "推送请求已入队",
 		"task_id": taskID,
 	}
 	json.NewEncoder(w).Encode(response)
@@ -365,7 +361,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 查询pending状态的任务（模糊查询：服务使用正则模糊匹配）
+	// 查询pending状态的任务（模糊查询：服务使用正则，environment精确在environments数组中，status=pending）
 	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, req.Environment)
 	if err != nil {
 		s.logger.WithError(err).Error("查询失败")
@@ -377,6 +373,24 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	if len(results) > 0 {
 		dataJSON, _ := json.Marshal(results)
 		fmt.Printf("\033[32m[成功] 查询到pending任务: %s\033[0m\n", string(dataJSON)) // 绿色成功日志
+
+		// 新增: 查询成功后，更新这些任务的状态为"assigned"
+		for _, task := range results {
+			updateReq := storage.StatusRequest{
+				Service:     task.Service,
+				Version:     task.Version,
+				Environment: req.Environment,  // 使用查询的环境
+				User:        task.User,
+				Status:      "assigned",
+			}
+			updated, err := s.storage.UpdateStatus(updateReq)
+			if err != nil || !updated {
+				s.logger.WithError(err).Errorf("更新任务 %s 到 assigned 失败", task.Version)
+			} else {
+				s.logger.Infof("任务 %s 更新为 assigned", task.Version)
+			}
+		}
+
 		json.NewEncoder(w).Encode(results) // 返回完整JSON
 	} else {
 		fmt.Printf("\033[31m[失败] 未查询到pending任务: service=%s, env=%s\033[0m\n", req.Service, req.Environment) // 红色失败日志
@@ -413,21 +427,40 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 新增: 先查询原始数据（用于日志）
+	originalTasks, err := s.storage.GetDeployByFilter(req.Service, req.Version, req.Environment)
+	if err != nil {
+		s.logger.WithError(err).Error("预查询任务失败")
+		http.Error(w, "预查询失败", http.StatusInternalServerError)
+		return
+	}
+
+	// 尝试更新（UpdateStatus已内置检查status="assigned"）
 	updated, err := s.storage.UpdateStatus(req)
 	if err != nil {
+		s.logger.WithError(err).Error("更新状态失败")
 		http.Error(w, "更新状态失败", http.StatusInternalServerError)
 		return
 	}
 
-	if updated && req.Status == "success" {
-		if err := s.stats.InsertDeploySuccess(req.Service, req.Environment, req.Version); err != nil {
-			s.logger.WithError(err).Error("插入统计记录失败")
-		}
-	}
-
 	if updated {
+		// 新增: 更新成功，查询更新后数据用于日志
+		updatedTasks, _ := s.storage.GetDeployByFilter(req.Service, req.Version, req.Environment)
+		origJSON, _ := json.Marshal(originalTasks)
+		updJSON, _ := json.Marshal(updatedTasks)
+		s.logger.Infof("状态更新成功: 原始数据=%s, 更新后数据=%s", string(origJSON), string(updJSON))
+
+		if req.Status == "success" {
+			if err := s.stats.InsertDeploySuccess(req.Service, req.Environment, req.Version); err != nil {
+				s.logger.WithError(err).Error("插入统计记录失败")
+			}
+		}
 		json.NewEncoder(w).Encode(map[string]string{"message": "状态更新成功"})
 	} else {
+		// 不匹配: 打印查询到的数据
+		dataJSON, _ := json.Marshal(originalTasks)
+		s.logger.Warnf("未找到匹配任务 (必须是assigned状态): 查询条件=service=%s, version=%s, env=%s, user=%s, 找到的数据=%s",
+			req.Service, req.Version, req.Environment, req.User, string(dataJSON))
 		json.NewEncoder(w).Encode(map[string]string{"message": "未找到匹配任务"})
 	}
 }
