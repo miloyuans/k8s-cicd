@@ -65,6 +65,8 @@ type TaskConfig struct {
 	QueueWorkers   int `yaml:"queue_workers"`       // 工作线程数
 	PollInterval   int `yaml:"poll_interval_seconds"` // 轮询间隔
 	MaxQueueSize   int `yaml:"max_queue_size"`      // 最大队列大小
+	PopupMaxRetries int `yaml:"popup_max_retries"`   // 弹窗最大重试次数
+	PopupRetryDelay int `yaml:"popup_retry_delay_seconds"` // 弹窗重试延迟
 }
 
 // DeployConfig 部署配置
@@ -99,7 +101,6 @@ type Config struct {
 }
 
 // LoadConfig 从YAML文件加载配置
-// 读取配置文件并解析YAML
 func LoadConfig(filePath string) (*Config, error) {
 	startTime := time.Now()
 	// 步骤1：读取配置文件
@@ -149,7 +150,6 @@ func LoadConfig(filePath string) (*Config, error) {
 }
 
 // setDefaults 设置配置默认值
-// 为配置项设置默认值
 func (c *Config) setDefaults() {
 	// 步骤1：设置API默认值
 	if c.API.PushInterval == 0 {
@@ -213,6 +213,12 @@ func (c *Config) setDefaults() {
 	if c.Task.MaxQueueSize == 0 {
 		c.Task.MaxQueueSize = 100
 	}
+	if c.Task.PopupMaxRetries == 0 {
+		c.Task.PopupMaxRetries = 3
+	}
+	if c.Task.PopupRetryDelay == 0 {
+		c.Task.PopupRetryDelay = 300 // 5 minutes
+	}
 
 	// 步骤7：设置Kubernetes默认值
 	if c.Kubernetes.AuthType == "" {
@@ -238,7 +244,6 @@ func (c *Config) setDefaults() {
 }
 
 // mergeEnvVars 合并环境变量
-// 从环境变量中合并配置值
 func (c *Config) mergeEnvVars() {
 	// 步骤1：合并Telegram环境变量
 	if token := os.Getenv("TELEGRAM_TOKEN"); token != "" {
