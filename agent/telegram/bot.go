@@ -214,6 +214,10 @@ func (bm *BotManager) processUpdateChan() {
 		if callback, ok := update["callback_query"].(map[string]interface{}); ok {
 			bot := bm.getDefaultBot() // 假设默认机器人，或根据context
 			data, _ := callback["data"].(string)
+			message, _ := callback["message"].(map[string]interface{})
+			chat, _ := message["chat"].(map[string]interface{})
+			chatID, _ := chat["id"].(float64)
+			messageID, _ := message["message_id"].(float64)
 			if strings.HasPrefix(data, "confirm:") {
 				key := data[8:]
 				if val, ok := bm.confirmationChans.LoadAndDelete(key); ok {
@@ -229,6 +233,9 @@ func (bm *BotManager) processUpdateChan() {
 						}
 						close(chans.confirmChan)
 						close(chans.rejectChan)
+						bm.DeleteMessage(bot, fmt.Sprintf("%d", int64(chatID)), int64(messageID))
+						time.Sleep(30 * time.Minute)
+						bm.DeleteMessage(bot, fmt.Sprintf("%d", int64(chatID)), int64(messageID))
 					}
 				}
 			} else if strings.HasPrefix(data, "reject:") {
@@ -246,6 +253,9 @@ func (bm *BotManager) processUpdateChan() {
 						}
 						close(chans.confirmChan)
 						close(chans.rejectChan)
+						bm.DeleteMessage(bot, fmt.Sprintf("%d", int64(chatID)), int64(messageID))
+						time.Sleep(30 * time.Minute)
+						bm.DeleteMessage(bot, fmt.Sprintf("%d", int64(chatID)), int64(messageID))
 					}
 				}
 			}
@@ -266,7 +276,7 @@ func (bm *BotManager) answerCallbackQuery(bot *TelegramBot, queryID string) {
 }
 
 // SendConfirmation 发送确认弹窗
-func (bm *BotManager) SendConfirmation(service, env, version, user string, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) (int64, error) {
+func (bm *BotManager) SendConfirmation(service, env, version, user string, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) error {
 	startTime := time.Now()
 	// 步骤1：根据服务选择机器人
 	bot, err := bm.getBotForService(service)
@@ -276,7 +286,7 @@ func (bm *BotManager) SendConfirmation(service, env, version, user string, confi
 			"method": "SendConfirmation",
 			"took":   time.Since(startTime),
 		}).Errorf(color.RedString("选择机器人失败: %v", err))
-		return 0, err
+		return err
 	}
 
 	// 步骤2：构建@用户列表
@@ -294,7 +304,7 @@ func (bm *BotManager) SendConfirmation(service, env, version, user string, confi
 		"**版本**: `%s`\n"+
 		"**用户**: `%s`\n\n"+
 		"*请选择操作*\n\n"+
-		"通知: %s", escapeMarkdownV2(service), escapeMarkdownV2(env), escapeMarkdownV2(version), escapeMarkdownV2(user), mentions.String())
+		"通知: %s", escapeCode(service), escapeCode(env), escapeCode(version), escapeCode(user), mentions.String())
 
 	// 步骤4：构建内联键盘
 	key := fmt.Sprintf("%s:%s:%s:%s", service, env, version, user)
@@ -314,7 +324,7 @@ func (bm *BotManager) SendConfirmation(service, env, version, user string, confi
 	bm.confirmationChans.Store(key, confirmationChans{confirmChan: confirmChan, rejectChan: rejectChan})
 
 	// 步骤5：发送带键盘的消息
-	result, err := bm.sendMessage(bot, bot.GroupID, message, keyboard)
+	_, err = bm.sendMessage(bot, bot.GroupID, message, keyboard)
 	if err != nil {
 		bm.confirmationChans.Delete(key) // 清理
 		logrus.WithFields(logrus.Fields{
@@ -322,20 +332,8 @@ func (bm *BotManager) SendConfirmation(service, env, version, user string, confi
 			"method": "SendConfirmation",
 			"took":   time.Since(startTime),
 		}).Errorf(color.RedString("发送弹窗失败: %v", err))
-		return 0, err
+		return err
 	}
-
-	// 获取 message_id
-	messageIDFloat, ok := result["result"].(map[string]interface{})["message_id"].(float64)
-	if !ok {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "SendConfirmation",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("无法获取 message_id"))
-		return 0, fmt.Errorf("无法获取 message_id")
-	}
-	messageID := int64(messageIDFloat)
 
 	// 步骤6：记录发送成功日志
 	logrus.WithFields(logrus.Fields{
@@ -343,7 +341,7 @@ func (bm *BotManager) SendConfirmation(service, env, version, user string, confi
 		"method": "SendConfirmation",
 		"took":   time.Since(startTime),
 	}).Infof(color.GreenString("确认弹窗发送成功: %s v%s [%s]", service, version, env))
-	return messageID, nil
+	return nil
 }
 
 // getDefaultBot 获取默认机器人
@@ -355,7 +353,7 @@ func (bm *BotManager) getDefaultBot() *TelegramBot {
 }
 
 // SendNotification 发送部署通知
-func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) (int64, error) {
+func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
 	startTime := time.Now()
 	// 步骤1：获取匹配的机器人
 	bot, err := bm.getBotForService(service)
@@ -365,7 +363,7 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 			"method": "SendNotification",
 			"took":   time.Since(startTime),
 		}).Errorf(color.RedString("发送通知失败: %v", err))
-		return 0, err
+		return err
 	}
 
 	// 步骤2：验证GroupID
@@ -375,14 +373,14 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 			"method": "SendNotification",
 			"took":   time.Since(startTime),
 		}).Errorf(color.RedString("发送通知失败: 机器人 [%s] 的GroupID为空", bot.Name))
-		return 0, fmt.Errorf("GroupID为空")
+		return fmt.Errorf("GroupID为空")
 	}
 
 	// 步骤3：生成通知消息
 	message := bm.generateMarkdownMessage(service, env, user, oldVersion, newVersion, success)
 
 	// 步骤4：发送通知
-	result, err := bm.sendMessage(bot, bot.GroupID, message, nil)
+	_, err = bm.sendMessage(bot, bot.GroupID, message, nil)
 	if err != nil {
 		// 回退到纯文本
 		logrus.WithFields(logrus.Fields{
@@ -392,35 +390,23 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 		}).Warnf(color.YellowString("MarkdownV2通知失败，尝试纯文本: %v", err))
 		message = fmt.Sprintf("部署通知\n服务: %s\n环境: %s\n操作人: %s\n旧版本: %s\n新版本: %s\n状态: %s\n时间: %s",
 			service, env, user, oldVersion, newVersion, map[bool]string{true: "成功", false: "失败"}[success], time.Now().Format("2006-01-02 15:04:05"))
-		result, err = bm.sendMessage(bot, bot.GroupID, message, nil)
+		_, err = bm.sendMessage(bot, bot.GroupID, message, nil)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "SendNotification",
 				"took":   time.Since(startTime),
 			}).Errorf(color.RedString("发送通知失败: %v", err))
-			return 0, err
+			return err
 		}
 	}
-
-	// 获取 message_id
-	messageIDFloat, ok := result["result"].(map[string]interface{})["message_id"].(float64)
-	if !ok {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "SendNotification",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("无法获取 message_id"))
-		return 0, fmt.Errorf("无法获取 message_id")
-	}
-	messageID := int64(messageIDFloat)
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "SendNotification",
 		"took":   time.Since(startTime),
 	}).Infof(color.GreenString("通知发送成功: %s v%s [%s]", service, newVersion, env))
-	return messageID, nil
+	return nil
 }
 
 // generateMarkdownMessage 生成美观的Markdown部署通知
@@ -434,23 +420,23 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 
 	// 步骤3：添加详细信息
 	message.WriteString("**服务**: `")
-	message.WriteString(escapeMarkdownV2(service))
+	message.WriteString(escapeCode(service))
 	message.WriteString("`\n")
 
 	message.WriteString("**环境**: `")
-	message.WriteString(escapeMarkdownV2(env))
+	message.WriteString(escapeCode(env))
 	message.WriteString("`\n")
 
 	message.WriteString("**操作人**: `")
-	message.WriteString(escapeMarkdownV2(user))
+	message.WriteString(escapeCode(user))
 	message.WriteString("`\n")
 
 	message.WriteString("**旧版本**: `")
-	message.WriteString(escapeMarkdownV2(oldVersion))
+	message.WriteString(escapeCode(oldVersion))
 	message.WriteString("`\n")
 
 	message.WriteString("**新版本**: `")
-	message.WriteString(escapeMarkdownV2(newVersion))
+	message.WriteString(escapeCode(newVersion))
 	message.WriteString("`\n")
 
 	// 步骤4：添加状态
@@ -464,7 +450,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 
 	// 步骤5：添加时间
 	message.WriteString("**时间**: `")
-	message.WriteString(escapeMarkdownV2(time.Now().Format("2006-01-02 15:04:05")))
+	message.WriteString(escapeCode(time.Now().Format("2006-01-02 15:04:05")))
 	message.WriteString("`\n\n")
 
 	// 步骤6：如果失败，添加回滚信息
@@ -473,7 +459,7 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 	}
 
 	// 步骤7：添加签名
-	message.WriteString("---\n")
+	message.WriteString("\-\\-\\-\n")
 	message.WriteString("*由 K8s\\-CICD Agent 自动发送*")
 
 	// 步骤8：返回生成的字符串
@@ -485,9 +471,18 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 	return message.String()
 }
 
-// escapeMarkdownV2 转义MarkdownV2特殊字符
-func escapeMarkdownV2(text string) string {
+// escapeNormal 转义正常文本的MarkdownV2特殊字符
+func escapeNormal(text string) string {
 	reserved := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
+	for _, char := range reserved {
+		text = strings.ReplaceAll(text, char, "\\"+char)
+	}
+	return text
+}
+
+// escapeCode 转义inline code的MarkdownV2特殊字符
+func escapeCode(text string) string {
+	reserved := []string{"`", "\\"}
 	for _, char := range reserved {
 		text = strings.ReplaceAll(text, char, "\\"+char)
 	}

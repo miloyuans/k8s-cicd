@@ -341,46 +341,42 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					}).Errorf(color.RedString("检查现有任务失败: %v", err))
 					continue
 				}
-				var confirmationStatus string
 				if exists {
-					confirmationStatus, err = a.mongo.GetConfirmationStatus(t.Service, t.Version, env, t.User)
-					if err != nil {
-						logrus.WithFields(logrus.Fields{
-							"time":   time.Now().Format("2006-01-02 15:04:05"),
-							"method": "processQueryTasks",
-							"took":   time.Since(startTime),
-							"data": logrus.Fields{
-								"service": t.Service, "version": t.Version, "env": env,
-							},
-						}).Errorf(color.RedString("获取确认状态失败: %v", err))
-						continue
-					}
-				} else {
-					t.Namespace, _ = a.envMapper.GetNamespace(env)
-					t.ConfirmationStatus = "pending"
-					err = a.validateAndStoreTask(t, env)
-					if err != nil {
-						continue
-					}
-					confirmationStatus = "pending"
-				}
-				if confirmationStatus != "pending" {
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
 						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env, "status": confirmationStatus,
+							"service": t.Service, "version": t.Version, "env": env,
+						},
+					}).Warnf(color.YellowString("重复任务忽略，不发起弹窗: %s v%s [%s]", t.Service, t.Version, env))
+					continue
+				}
+
+				// 存储任务 (已有重复检查，并设置ConfirmationStatus = "pending")
+				err = a.validateAndStoreTask(t, env)
+				if err != nil {
+					continue
+				}
+
+				// 要求4: 检查状态，确保只弹一次
+				if t.ConfirmationStatus != "pending" {
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "processQueryTasks",
+						"took":   time.Since(startTime),
+						"data": logrus.Fields{
+							"service": t.Service, "version": t.Version, "env": env, "status": t.ConfirmationStatus,
 						},
 					}).Infof(color.GreenString("弹窗已处理，跳过: %s v%s [%s]", t.Service, t.Version, env))
 					continue
 				}
 
-				// 要求2: 如果需要弹窗，发送并设置初始状态"success"
+				// 要求2: 如果需要弹窗，发送并设置初始状态"sent"
 				if contains(a.config.Query.ConfirmEnvs, env) {
 					confirmChan := make(chan models.DeployRequest)
 					rejectChan := make(chan models.StatusRequest)
-					err := a.botMgr.SendConfirmation(t.Service, env, t.Version, t.User, confirmChan, rejectChan)
+					_, err := a.botMgr.SendConfirmation(t.Service, env, t.Version, t.User, confirmChan, rejectChan)
 					if err != nil {
 						// 要求2: 发送失败，设置"failed"
 						err = a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed")
@@ -425,7 +421,6 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					go a.handleConfirmationChannels(confirmChan, rejectChan) // 异步处理
 				} else {
 					// 无需弹窗，直接入队
-					t.Namespace, _ = a.envMapper.GetNamespace(env)
 					taskID := generateTaskID(t)
 					a.taskQ.Enqueue(&models.Task{
 						DeployRequest: t,
@@ -457,8 +452,6 @@ func (a *Agent) handleConfirmationChannels(confirmChan <-chan models.DeployReque
 	startTime := time.Now()
 	select {
 	case task := <-confirmChan:
-		// 设置namespace
-		task.Namespace, _ = a.envMapper.GetNamespace(task.Environments[0])
 		// 要求3: 确认，更新状态"confirmed"，入队
 		err := a.mongo.UpdateConfirmationStatus(task.Service, task.Version, task.Environments[0], task.User, "confirmed")
 		if err != nil {
@@ -559,6 +552,7 @@ func (a *Agent) validateAndStoreTask(task models.DeployRequest, env string) erro
 		}).Errorf(color.RedString("环境 [%s] 无命名空间配置", env))
 		return nil
 	}
+	task.Environments = []string{env}
 	task.Namespace = namespace
 	// 步骤2：检查任务重复
 	isDuplicate, err := a.mongo.CheckDuplicateTask(task)
