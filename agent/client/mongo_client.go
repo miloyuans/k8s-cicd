@@ -144,7 +144,6 @@ func (m *MongoClient) PushDeployments(deploys []models.DeployRequest) error {
 
 		// 步骤2：存储到环境特定任务集合，并添加confirmation_status字段
 		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", deploy.Environments[0]))
-		deploy.ConfirmationStatus = "pending" // 初始状态为pending
 		_, err = collection.InsertOne(ctx, deploy)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
@@ -310,7 +309,7 @@ func (m *MongoClient) CleanCompletedTasks() error {
 			continue
 		}
 
-		// 如果状态为confirmed/rejected/failed，删除（状态已包含在任务中）
+		// 如果状态为completed/rejected/failed，删除（状态已包含在任务中）
 		if task.ConfirmationStatus == "confirmed" || task.ConfirmationStatus == "rejected" || task.ConfirmationStatus == "failed" {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -382,6 +381,47 @@ func (m *MongoClient) CheckExistingTask(service, version, environment string) (b
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// GetConfirmationStatus 获取任务的确认状态
+func (m *MongoClient) GetConfirmationStatus(service, version, environment, user string) (string, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
+	var result struct {
+		ConfirmationStatus string `bson:"confirmation_status"`
+	}
+	err := collection.FindOne(ctx, bson.M{
+		"service":     service,
+		"version":     version,
+		"environment": environment,
+		"user":        user,
+	}).Decode(&result)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "GetConfirmationStatus",
+				"took":   time.Since(startTime),
+			}).Warnf("未找到任务: %s v%s [%s/%s]", service, version, environment, user)
+			return "", nil
+		}
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetConfirmationStatus",
+			"took":   time.Since(startTime),
+		}).Errorf("获取确认状态失败: %v", err)
+		return "", err
+	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetConfirmationStatus",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"status": result.ConfirmationStatus,
+		},
+	}).Infof("获取确认状态成功: %s", result.ConfirmationStatus)
+	return result.ConfirmationStatus, nil
 }
 
 // UpdateTaskStatus 更新任务状态
@@ -500,43 +540,4 @@ func (m *MongoClient) StoreLastPushRequest(req models.PushRequest) error {
 		"took":   time.Since(startTime),
 	}).Info("推送数据存储成功")
 	return nil
-}
-
-// GetConfirmationStatus 获取任务的确认状态
-func (m *MongoClient) GetConfirmationStatus(service, version, environment, user string) (string, error) {
-	startTime := time.Now()
-	ctx := context.Background()
-	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
-	var task models.DeployRequest
-	err := collection.FindOne(ctx, bson.M{
-		"service":     service,
-		"version":     version,
-		"environment": environment,
-		"user":        user,
-	}).Decode(&task)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "GetConfirmationStatus",
-				"took":   time.Since(startTime),
-			}).Warnf("未找到任务记录: service=%s, version=%s, env=%s, user=%s", service, version, environment, user)
-			return "pending", nil // 默认返回pending状态
-		}
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetConfirmationStatus",
-			"took":   time.Since(startTime),
-		}).Errorf("查询确认状态失败: %v", err)
-		return "", err
-	}
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetConfirmationStatus",
-		"took":   time.Since(startTime),
-		"data": logrus.Fields{
-			"status": task.ConfirmationStatus,
-		},
-	}).Infof("查询确认状态成功")
-	return task.ConfirmationStatus, nil
 }

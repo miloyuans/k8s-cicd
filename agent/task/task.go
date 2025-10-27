@@ -3,7 +3,6 @@ package task
 
 import (
 	"container/list"
-	"fmt"
 	"sync"
 	"time"
 
@@ -98,7 +97,6 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 					"service":     task.Service,
 					"version":     task.Version,
 					"environment": task.Environments,
-					"namespace":   task.Namespace,
 					"user":        task.User,
 					"status":      task.Status,
 				},
@@ -127,30 +125,6 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 						"method": "worker",
 						"took":   time.Since(startTime),
 					}).Errorf(color.RedString("Worker-%d 任务永久失败: %s", workerID, task.ID))
-					// 更新状态为"failure"
-					err = mongo.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, "failure")
-					if err != nil {
-						logrus.WithFields(logrus.Fields{
-							"time":   time.Now().Format("2006-01-02 15:04:05"),
-							"method": "worker",
-							"took":   time.Since(startTime),
-						}).Errorf(color.RedString("更新任务状态为'failure'失败: %v", err))
-					}
-					// 推送失败状态
-					err = apiClient.UpdateStatus(models.StatusRequest{
-						Service:     task.Service,
-						Version:     task.Version,
-						Environment: task.Environments[0],
-						User:        task.User,
-						Status:      "failure",
-					})
-					if err != nil {
-						logrus.WithFields(logrus.Fields{
-							"time":   time.Now().Format("2006-01-02 15:04:05"),
-							"method": "worker",
-							"took":   time.Since(startTime),
-						}).Errorf(color.RedString("推送失败状态失败: %v", err))
-					}
 				}
 			} else {
 				logrus.WithFields(logrus.Fields{
@@ -166,6 +140,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 // executeTask 执行任务
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task *models.Task, botMgr *telegram.BotManager) error {
 	startTime := time.Now()
+	success := false
 	// 步骤1：获取命名空间
 	namespace := task.Namespace
 	if namespace == "" {
@@ -176,50 +151,10 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"data": logrus.Fields{
 				"task_id": task.ID,
 			},
-		}).Errorf(color.RedString("任务缺少命名空间"))
-		return fmt.Errorf("任务缺少命名空间")
+		}).Errorf(color.RedString("命名空间为空"))
+		return fmt.Errorf("命名空间为空")
 	}
-
-	// 步骤2：更新任务状态为"checking_workload"
-	err := mongo.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, "checking_workload")
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "executeTask",
-			"took":   time.Since(startTime),
-			"data": logrus.Fields{
-				"task_id": task.ID,
-			},
-		}).Errorf(color.RedString("更新任务状态为'checking_workload'失败: %v", err))
-		return err
-	}
-
-	// 步骤3：检查工作负载是否运行
-	if !k8s.IsWorkloadRunning(namespace, task.Service) {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "executeTask",
-			"took":   time.Since(startTime),
-			"data": logrus.Fields{
-				"task_id": task.ID,
-			},
-		}).Infof(color.GreenString("工作负载 %s 在命名空间 %s 无运行中的Pod，跳过更新", task.Service, namespace))
-		return nil
-	}
-
-	// 步骤4：获取旧版本
-	err = mongo.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, "fetching_version")
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "executeTask",
-			"took":   time.Since(startTime),
-			"data": logrus.Fields{
-				"task_id": task.ID,
-			},
-		}).Errorf(color.RedString("更新任务状态为'fetching_version'失败: %v", err))
-		return err
-	}
+	// 步骤2：获取旧版本
 	oldVersion := k8s.GetCurrentImage(namespace, task.Service)
 	if oldVersion == "unknown" {
 		logrus.WithFields(logrus.Fields{
@@ -233,20 +168,8 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		return fmt.Errorf("获取旧版本失败")
 	}
 
-	// 步骤5：更新镜像
-	err = mongo.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, "updating_image")
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "executeTask",
-			"took":   time.Since(startTime),
-			"data": logrus.Fields{
-				"task_id": task.ID,
-			},
-		}).Errorf(color.RedString("更新任务状态为'updating_image'失败: %v", err))
-		return err
-	}
-	err = k8s.UpdateWorkloadImage(namespace, task.Service, task.Version)
+	// 步骤3：更新镜像
+	err := k8s.UpdateWorkloadImage(namespace, task.Service, task.Version)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -257,34 +180,11 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			},
 		}).Errorf(color.RedString("更新镜像失败: %v", err))
 		// 回滚
-		err = mongo.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, "rolling_back")
-		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "executeTask",
-				"took":   time.Since(startTime),
-				"data": logrus.Fields{
-					"task_id": task.ID,
-				},
-			}).Errorf(color.RedString("更新任务状态为'rolling_back'失败: %v", err))
-		}
 		k8s.RollbackWorkload(namespace, task.Service, oldVersion)
 		return err
 	}
 
-	// 步骤6：等待新版本就绪
-	err = mongo.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, "waiting_rollout")
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "executeTask",
-			"took":   time.Since(startTime),
-			"data": logrus.Fields{
-				"task_id": task.ID,
-			},
-		}).Errorf(color.RedString("更新任务状态为'waiting_rollout'失败: %v", err))
-		return err
-	}
+	// 步骤4：等待新版本就绪
 	ready, err := k8s.WaitForRolloutComplete(namespace, task.Service, cfg.Deploy.WaitTimeout)
 	if err != nil || !ready {
 		logrus.WithFields(logrus.Fields{
@@ -296,25 +196,8 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			},
 		}).Errorf(color.RedString("新版本就绪失败: %v", err))
 		// 回滚
-		err = mongo.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, "rolling_back")
-		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "executeTask",
-				"took":   time.Since(startTime),
-				"data": logrus.Fields{
-					"task_id": task.ID,
-				},
-			}).Errorf(color.RedString("更新任务状态为'rolling_back'失败: %v", err))
-		}
 		k8s.RollbackWorkload(namespace, task.Service, oldVersion)
-		return err
-	}
-	success := true
-
-	// 步骤7：发送通知
-	err = mongo.UpdateTaskStatus(task.Service, task.Version, task.Environments[0], task.User, "sending_notification")
-	if err != nil {
+	} else {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "executeTask",
@@ -322,9 +205,11 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"data": logrus.Fields{
 				"task_id": task.ID,
 			},
-		}).Errorf(color.RedString("更新任务状态为'sending_notification'失败: %v", err))
-		return err
+		}).Infof(color.GreenString("新版本就绪"))
+		success = true
 	}
+
+	// 步骤5：发送通知
 	err = botMgr.SendNotification(task.Service, task.Environments[0], task.User, oldVersion, task.Version, success)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -346,7 +231,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		}).Infof(color.GreenString("通知发送成功"))
 	}
 
-	// 步骤8：更新状态
+	// 步骤6：更新状态
 	status := "success"
 	if !success {
 		status = "failure"
@@ -373,7 +258,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		}).Infof(color.GreenString("MongoDB状态更新成功: %s", status))
 	}
 
-	// 步骤9：推送状态
+	// 步骤7：推送状态
 	err = apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.Service,
 		Version:     task.Version,
@@ -402,7 +287,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		}).Infof(color.GreenString("状态推送成功"))
 	}
 
-	// 步骤10：总结任务执行结果
+	// 步骤8：总结任务执行结果
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "executeTask",
@@ -412,7 +297,6 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"service":     task.Service,
 			"version":     task.Version,
 			"environment": task.Environments[0],
-			"namespace":   task.Namespace,
 			"user":        task.User,
 			"status":      status,
 		},
