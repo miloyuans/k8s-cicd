@@ -129,7 +129,6 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 	}
 }
 
-// executeTask 执行任务（核心）
 // executeTask 执行任务
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task *models.Task, botMgr *telegram.BotManager) error {
 	startTime := time.Now()
@@ -137,47 +136,94 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 
 	// 步骤1：验证命名空间
 	if task.Namespace == "" {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"data":   logrus.Fields{"task_id": task.ID},
+		}).Errorf(color.RedString("命名空间为空"))
 		return fmt.Errorf("命名空间为空")
 	}
 
 	// 步骤2：快照 + 更新
 	snapshot, err := k8s.CaptureAndUpdateImage(task.Namespace, task.Service, task.Version, mongo)
 	if err != nil {
-		logrus.Errorf(color.RedString("镜像更新失败: %v", err))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"data":   logrus.Fields{"task_id": task.ID},
+		}).Errorf(color.RedString("镜像更新失败: %v", err))
+
 		if snapshot != nil {
-			k8s.RollbackWithSnapshot(snapshot)
+			if rollbackErr := k8s.RollbackWithSnapshot(snapshot); rollbackErr != nil {
+				logrus.Errorf(color.RedString("回滚失败: %v", rollbackErr))
+				q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
+				return fmt.Errorf("更新失败且回滚失败")
+			}
+			logrus.Infof(color.GreenString("自动回滚成功至: %s", snapshot.Tag))
 		}
 		q.handleFailure(mongo, apiClient, botMgr, task, getImageOrUnknown(snapshot), task.Version)
 		return err
 	}
 	if snapshot == nil {
+		logrus.Warnf(color.YellowString("无运行 Pod，跳过更新: %s", task.Service))
 		return nil
 	}
 
 	// 步骤3：等待 rollout
 	ready, err := k8s.WaitForRolloutComplete(task.Namespace, task.Service, cfg.Deploy.WaitTimeout)
 	if err != nil || !ready {
-		logrus.Errorf(color.RedString("rollout 失败: %v", err))
-		k8s.RollbackWithSnapshot(snapshot)
+		logrus.Errorf(color.RedString("rollout 超时或失败: %v", err))
+
+		if rollbackErr := k8s.RollbackWithSnapshot(snapshot); rollbackErr != nil {
+			logrus.Errorf(color.RedString("回滚失败: %v", rollbackErr))
+			q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
+			return fmt.Errorf("rollout失败且回滚失败")
+		}
+		logrus.Infof(color.GreenString("自动回滚成功至: %s", snapshot.Tag))
 		q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
 		return err
 	}
 
-	// 步骤4：成功
+	// 步骤4：成功处理
 	if err := botMgr.SendNotification(task.Service, env, task.User, snapshot.Image, task.Version, true); err != nil {
-		logrus.Errorf(color.RedString("通知失败: %v", err))
+		logrus.Errorf(color.RedString("发送成功通知失败: %v", err))
+	} else {
+		logrus.Infof(color.GreenString("通知发送成功"))
 	}
-	mongo.UpdateTaskStatus(task.Service, task.Version, env, task.User, "success")
-	apiClient.UpdateStatus(models.StatusRequest{
+
+	if err := mongo.UpdateTaskStatus(task.Service, task.Version, env, task.User, "success"); err != nil {
+		logrus.Errorf(color.RedString("更新MongoDB状态失败: %v", err))
+	}
+
+	if err := apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.Service,
 		Version:     task.Version,
 		Environment: env,
 		User:        task.User,
 		Status:      "success",
-	})
+	}); err != nil {
+		logrus.Errorf(color.RedString("推送成功状态失败: %v", err))
+	}
 
-	logrus.Infof(color.GreenString("任务成功: %s %s -> %s", task.ID, kubernetes.ExtractTag(snapshot.Image), task.Version))
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "executeTask",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"task_id":  task.ID,
+			"old_tag":  kubernetes.ExtractTag(snapshot.Image),
+			"new_tag":  task.Version,
+		},
+	}).Infof(color.GreenString("任务执行完成: %s, 状态: success", task.ID))
 	return nil
+}
+
+// 辅助函数
+func getImageOrUnknown(s *models.ImageSnapshot) string {
+	if s != nil && s.Image != "" {
+		return s.Image
+	}
+	return "unknown"
 }
 
 func getImageOrUnknown(s *models.ImageSnapshot) string {

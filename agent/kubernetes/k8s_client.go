@@ -198,11 +198,19 @@ func (k *K8sClient) UpdateWorkloadImage(namespace, serviceName, newTag string) e
 	// 步骤1：快照
 	snapshot, err := k.captureRunningImageSnapshot(namespace, serviceName)
 	if err != nil {
-		logrus.Errorf(color.RedString("获取快照失败: %v", err))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "UpdateWorkloadImage",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("获取快照失败: %v", err))
 		return err
 	}
 	if snapshot == nil {
-		logrus.Warnf(color.YellowString("无运行 Pod，跳过更新: %s [%s]", serviceName, namespace))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "UpdateWorkloadImage",
+			"took":   time.Since(startTime),
+		}).Warnf(color.YellowString("无运行 Pod，跳过更新: %s [%s]", serviceName, namespace))
 		return nil
 	}
 
@@ -217,7 +225,13 @@ func (k *K8sClient) UpdateWorkloadImage(namespace, serviceName, newTag string) e
 		return k.updateDaemonSetImage(ds, newImage, namespace, serviceName, startTime)
 	}
 
-	return fmt.Errorf("未找到工作负载")
+	err = fmt.Errorf("未找到工作负载: %s [%s]", serviceName, namespace)
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "UpdateWorkloadImage",
+		"took":   time.Since(startTime),
+	}).Errorf(color.RedString("%v", err))
+	return err
 }
 
 // ======================
@@ -273,7 +287,7 @@ func (k *K8sClient) RollbackWithSnapshot(snapshot *models.ImageSnapshot) error {
 	return k.UpdateWorkloadImage(snapshot.Namespace, snapshot.Service, snapshot.Tag)
 }
 
-// updateDeploymentImage 更新 Deployment 镜像（仅替换 tag）
+// updateDeploymentImage 更新 Deployment
 func (k *K8sClient) updateDeploymentImage(deploy *appsv1.Deployment, newImage, namespace, name string, startTime time.Time) error {
 	k.ensureRollingUpdateStrategy(deploy)
 
@@ -283,27 +297,42 @@ func (k *K8sClient) updateDeploymentImage(deploy *appsv1.Deployment, newImage, n
 		if container.Image == newImage {
 			continue
 		}
-		logrus.Infof("更新容器镜像: %s -> %s", container.Image, newImage)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "updateDeploymentImage",
+		}).Infof("更新容器镜像: %s -> %s", container.Image, newImage)
 		container.Image = newImage
 		updated = true
 	}
 
 	if !updated {
-		logrus.Infof(color.YellowString("镜像已是最新: %s", newImage))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "updateDeploymentImage",
+			"took":   time.Since(startTime),
+		}).Infof(color.YellowString("Deployment %s 镜像已是最新 tag: %s", name, ExtractTag(newImage)))
 		return nil
 	}
 
 	_, err := k.Clientset.AppsV1().Deployments(namespace).Update(context.TODO(), deploy, metav1.UpdateOptions{})
 	if err != nil {
-		logrus.Errorf(color.RedString("更新Deployment失败: %v", err))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "updateDeploymentImage",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("更新Deployment失败: %v", err))
 		return err
 	}
 
-	logrus.Infof(color.GreenString("Deployment更新成功: %s -> %s", name, ExtractTag(newImage)))
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "updateDeploymentImage",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("Deployment镜像更新成功: %s -> %s", name, ExtractTag(newImage)))
 	return nil
 }
 
-// updateDaemonSetImage 更新 DaemonSet 镜像（仅替换 tag）
+// updateDaemonSetImage 更新 DaemonSet
 func (k *K8sClient) updateDaemonSetImage(ds *appsv1.DaemonSet, newImage, namespace, name string, startTime time.Time) error {
 	updated := false
 	for i := range ds.Spec.Template.Spec.Containers {
@@ -311,23 +340,38 @@ func (k *K8sClient) updateDaemonSetImage(ds *appsv1.DaemonSet, newImage, namespa
 		if container.Image == newImage {
 			continue
 		}
-		logrus.Infof("更新容器镜像: %s -> %s", container.Image, newImage)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "updateDaemonSetImage",
+		}).Infof("更新容器镜像: %s -> %s", container.Image, newImage)
 		container.Image = newImage
 		updated = true
 	}
 
 	if !updated {
-		logrus.Infof(color.YellowString("镜像已是最新: %s", newImage))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "updateDaemonSetImage",
+			"took":   time.Since(startTime),
+		}).Infof(color.YellowString("DaemonSet %s 镜像已是最新 tag: %s", name, ExtractTag(newImage)))
 		return nil
 	}
 
 	_, err := k.Clientset.AppsV1().DaemonSets(namespace).Update(context.TODO(), ds, metav1.UpdateOptions{})
 	if err != nil {
-		logrus.Errorf(color.RedString("更新DaemonSet失败: %v", err))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "updateDaemonSetImage",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("更新DaemonSet失败: %v", err))
 		return err
 	}
 
-	logrus.Infof(color.GreenString("DaemonSet更新成功: %s -> %s", name, ExtractTag(newImage)))
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "updateDaemonSetImage",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("DaemonSet镜像更新成功: %s -> %s", name, ExtractTag(newImage)))
 	return nil
 }
 
