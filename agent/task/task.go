@@ -203,7 +203,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	}
 
 	// 步骤6：成功处理
-	oldImage := snapshot.Image
+	oldImage := getImageOrUnknown(snapshot) // 正确调用
 	if err := botMgr.SendNotification(task.Service, env, task.User, oldImage, task.Version, true); err != nil {
 		logrus.Errorf(color.RedString("发送成功通知失败: %v", err))
 	} else {
@@ -241,19 +241,6 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 func getImageOrUnknown(s *models.ImageSnapshot) string {
 	if s != nil && s.Image != "" {
 		return s.Image
-	}
-	return "unknown"
-}
-
-func getImageOrUnknown(s *models.ImageSnapshot) string {
-	if s != nil && s.Image != "" { return s.Image }
-	return "unknown"
-}
-
-// 辅助函数：安全获取镜像
-func getImageOrUnknown(snapshot *models.ImageSnapshot) string {
-	if snapshot != nil && snapshot.Image != "" {
-		return snapshot.Image
 	}
 	return "unknown"
 }
