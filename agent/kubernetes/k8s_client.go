@@ -177,48 +177,38 @@ func (k *K8sClient) captureRunningImageSnapshot(namespace, serviceName string, m
 }
 
 // UpdateWorkloadImage 返回快照，用于回滚
-func (k *K8sClient) UpdateWorkloadImage(namespace, serviceName, newTag string, mongo *client.MongoClient) error {
+func (k *K8sClient) UpdateWorkloadImage(namespace, serviceName, newTag string) (*models.ImageSnapshot, error) {
 	startTime := time.Now()
 
-	// 步骤1：获取运行中 Pod 镜像快照
-	snapshot, err := k.captureRunningImageSnapshot(namespace, serviceName, mongo)
+	// 步骤1：快照
+	snapshot, err := k.captureRunningImageSnapshot(namespace, serviceName)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "UpdateWorkloadImage",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("获取运行镜像快照失败: %v", err))
-		return err
+		logrus.Errorf(color.RedString("获取快照失败: %v", err))
+		return nil, err
 	}
 	if snapshot == nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "UpdateWorkloadImage",
-			"took":   time.Since(startTime),
-		}).Warnf(color.YellowString("无运行 Pod，跳过更新: %s [%s]", serviceName, namespace))
-		return nil
+		logrus.Warnf(color.YellowString("无运行 Pod，跳过更新: %s [%s]", serviceName, namespace))
+		return nil, nil
 	}
 
 	// 步骤2：构建新镜像
-	newImage := buildNewImage(snapshot.Image, newTag)
+	newImage := fmt.Sprintf("%s:%s", strings.SplitN(snapshot.Image, ":", 2)[0], newTag)
 
-	// 步骤3：尝试更新 Deployment
+	// 步骤3：更新
 	if deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(context.TODO(), serviceName, metav1.GetOptions{}); err == nil {
-		return k.updateDeploymentImage(deploy, newImage, namespace, serviceName, startTime, snapshot)
+		if updateErr := k.updateDeploymentImage(deploy, newImage, namespace, serviceName, startTime); updateErr != nil {
+			return snapshot, updateErr
+		}
+		return snapshot, nil
 	}
-
-	// 步骤4：尝试更新 DaemonSet
 	if ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(context.TODO(), serviceName, metav1.GetOptions{}); err == nil {
-		return k.updateDaemonSetImage(ds, newImage, namespace, serviceName, startTime, snapshot)
+		if updateErr := k.updateDaemonSetImage(ds, newImage, namespace, serviceName, startTime); updateErr != nil {
+			return snapshot, updateErr
+		}
+		return snapshot, nil
 	}
 
-	err = fmt.Errorf("未找到工作负载: %s [%s]", serviceName, namespace)
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "UpdateWorkloadImage",
-		"took":   time.Since(startTime),
-	}).Errorf(color.RedString("%v", err))
-	return err
+	return nil, fmt.Errorf("未找到工作负载")
 }
 
 // ======================
@@ -242,18 +232,19 @@ func (k *K8sClient) captureRunningImageSnapshot(namespace, serviceName string) (
 			}
 			image := status.Image
 			tag := ExtractTag(image)
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "captureRunningImageSnapshot",
-			}).Infof("捕获运行镜像: %s (tag: %s)", image, tag)
-			return &models.ImageSnapshot{
+			snapshot := &models.ImageSnapshot{
 				Namespace:  namespace,
 				Service:    serviceName,
 				Container:  status.Name,
 				Image:      image,
 				Tag:        tag,
 				RecordedAt: time.Now(),
-			}, nil
+			}
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "captureRunningImageSnapshot",
+			}).Infof("捕获运行镜像: %s (tag: %s)", image, tag)
+			return snapshot, nil
 		}
 	}
 	return nil, nil
