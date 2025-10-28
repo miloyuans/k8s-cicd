@@ -534,7 +534,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					// 发送弹窗
 					confirmChan := make(chan models.DeployRequest)
 					rejectChan := make(chan models.StatusRequest)
-					err := a.botMgr.SendConfirmation(t.Service, env, t.User, t.Version, a.config.Telegram.AllowedUsers)
+					msgID, err := a.botMgr.SendConfirmation(t.Service, env, t.User, t.Version, a.config.Telegram.AllowedUsers)
 					if err != nil {
 						retries++
 						if err := a.mongo.UpdatePopupRetries(t.Service, t.Version, env, t.User, retries); err != nil {
