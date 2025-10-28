@@ -29,7 +29,6 @@ type TaskQueue struct {
 
 // NewTaskQueue 创建任务队列
 func NewTaskQueue(workers int) *TaskQueue {
-	startTime := time.Now()
 	q := &TaskQueue{
 		queue:   list.New(),
 		workers: workers,
@@ -38,30 +37,25 @@ func NewTaskQueue(workers int) *TaskQueue {
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "NewTaskQueue",
-		"took":   time.Since(startTime),
 	}).Infof(color.GreenString("任务队列初始化完成，worker数量: %d", workers))
 	return q
 }
 
 // StartWorkers 启动任务worker
 func (q *TaskQueue) StartWorkers(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient) {
-	startTime := time.Now()
 	q.wg.Add(q.workers)
 	for i := 0; i < q.workers; i++ {
 		go q.worker(cfg, mongo, k8s, botMgr, apiClient, i+1)
 	}
-	// 保留原清理任务
 	go mongo.CleanCompletedTasks()
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "StartWorkers",
-		"took":   time.Since(startTime),
 	}).Infof(color.GreenString("启动 %d 个任务worker", q.workers))
 }
 
-// worker 任务worker（保留完整重试逻辑）
+// worker 任务worker
 func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, workerID int) {
-	startTime := time.Now()
 	defer q.wg.Done()
 
 	logrus.WithFields(logrus.Fields{
@@ -126,7 +120,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				}
 			} else {
 				logrus.WithFields(logrus.Fields{
-					"time":   time.Now().Format("2006-01-02 15: 04: 05"),
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "worker",
 					"data": logrus.Fields{"task_id": task.ID},
 				}).Infof(color.GreenString("Worker-%d 任务成功: %s", workerID, task.ID))
@@ -135,9 +129,8 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 	}
 }
 
-// executeTask 执行任务
+// executeTask 执行任务（核心）
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task *models.Task, botMgr *telegram.BotManager) error {
-	startTime := time.Now()
 	env := task.Environments[0]
 
 	// 步骤1：验证命名空间
@@ -150,8 +143,8 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		return fmt.Errorf("命名空间为空")
 	}
 
-	// 步骤2：更新前快照 + 更新
-	snapshot, err := k8s.UpdateWorkloadImage(task.Namespace, task.Service, task.Version)
+	// 步骤2：更新镜像（仅返回 error）
+	err := k8s.UpdateWorkloadImage(task.Namespace, task.Service, task.Version)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -159,27 +152,40 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"data": logrus.Fields{"task_id": task.ID},
 		}).Errorf(color.RedString("镜像更新失败: %v", err))
 
-		if snapshot != nil {
-			if rollbackErr := k8s.RollbackWithSnapshot(snapshot); rollbackErr != nil {
-				logrus.Errorf(color.RedString("回滚失败失败: %v", rollbackErr))
-				return fmt.Errorf("更新失败且回滚失败")
-			}
-			logrus.Infof(color.GreenString("自动回滚成功至: %s", snapshot.Tag))
+		// 回滚：从数据库获取快照
+		snapshot, err := mongo.GetLatestImageSnapshot(task.Service, task.Namespace)
+		if err != nil || snapshot == nil {
+			logrus.Errorf(color.RedString("获取快照失败，无法回滚: %v", err))
+			q.handleFailure(mongo, apiClient, botMgr, task, "unknown", task.Version)
+			return err
 		}
+
+		if rollbackErr := k8s.RollbackWithSnapshot(snapshot); rollbackErr != nil {
+			logrus.Errorf(color.RedString("回滚失败: %v", rollbackErr))
+			q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
+			return fmt.Errorf("更新失败且回滚失败")
+		}
+		logrus.Infof(color.GreenString("自动回滚成功至: %s", snapshot.Tag))
 		q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
 		return err
-	}
-	if snapshot == nil {
-		logrus.Warnf(color.YellowString("无运行 Pod，跳过更新: %s", task.Service))
-		return nil
 	}
 
 	// 步骤3：等待 rollout
 	ready, err := k8s.WaitForRolloutComplete(task.Namespace, task.Service, cfg.Deploy.WaitTimeout)
 	if err != nil || !ready {
 		logrus.Errorf(color.RedString("rollout 超时或失败: %v", err))
+
+		// 回滚
+		snapshot, err := mongo.GetLatestImageSnapshot(task.Service, task.Namespace)
+		if err != nil || snapshot == nil {
+			logrus.Errorf(color.RedString("获取快照失败，无法回滚: %v", err))
+			q.handleFailure(mongo, apiClient, botMgr, task, "unknown", task.Version)
+			return err
+		}
+
 		if rollbackErr := k8s.RollbackWithSnapshot(snapshot); rollbackErr != nil {
 			logrus.Errorf(color.RedString("回滚失败: %v", rollbackErr))
+			q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
 			return fmt.Errorf("rollout失败且回滚失败")
 		}
 		logrus.Infof(color.GreenString("自动回滚成功至: %s", snapshot.Tag))
@@ -188,8 +194,10 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	}
 
 	// 步骤4：成功处理
-	if err := mongo.StoreImageSnapshot(snapshot, task.ID); err != nil {
-		logrus.Warnf(color.YellowString("存储快照失败: %v", err))
+	snapshot, err := mongo.GetLatestImageSnapshot(task.Service, task.Namespace)
+	if err != nil || snapshot == nil {
+		logrus.Warnf(color.YellowString("获取快照失败: %v", err))
+		snapshot = &models.ImageSnapshot{Image: "unknown"}
 	}
 
 	if err := botMgr.SendNotification(task.Service, env, task.User, snapshot.Image, task.Version, true); err != nil {
@@ -215,38 +223,48 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "executeTask",
-		"took":   time.Since(startTime),
 		"data": logrus.Fields{
-			"task_id": task.ID, "old_tag": extractTag(snapshot.Image), "new_tag": task.Version,
+			"task_id": task.ID, "old_tag": kubernetes.ExtractTag(snapshot.Image), "new_tag": task.Version,
 		},
 	}).Infof(color.GreenString("任务执行完成: %s, 状态: success", task.ID))
 	return nil
 }
 
-// handlePermanentFailure 永久失败处理（保留原逻辑）
+// handleFailure 统一失败处理
+func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *models.Task, oldImage, newVersion string) {
+	env := task.Environments[0]
+	// Mongo
+	_ = mongo.UpdateTaskStatus(task.Service, newVersion, env, task.User, "failure")
+	// API
+	_ = apiClient.UpdateStatus(models.StatusRequest{
+		Service:     task.Service,
+		Version:     newVersion,
+		Environment: env,
+		User:        task.User,
+		Status:      "failure",
+	})
+	// 通知
+	_ = botMgr.SendNotification(task.Service, env, task.User, oldImage, newVersion, false)
+}
+
+// handlePermanentFailure 永久失败处理
 func (q *TaskQueue) handlePermanentFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *models.Task) {
 	env := task.Environments[0]
 	// Mongo
-	if err := mongo.UpdateTaskStatus(task.Service, task.Version, env, task.User, "failure"); err != nil {
-		logrus.Errorf(color.RedString("更新MongoDB状态失败: %v", err))
-	}
+	_ = mongo.UpdateTaskStatus(task.Service, task.Version, env, task.User, "failure")
 	// API
-	if err := apiClient.UpdateStatus(models.StatusRequest{
+	_ = apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.Service,
 		Version:     task.Version,
 		Environment: env,
 		User:        task.User,
 		Status:      "failure",
-	}); err != nil {
-		logrus.Errorf(color.RedString("推送失败状态失败: %v", err))
-	}
+	})
 	// 通知
-	if err := botMgr.SendNotification(task.Service, env, task.User, "unknown", task.Version, false); err != nil {
-		logrus.Errorf(color.RedString("发送失败通知失败: %v", err))
-	}
+	_ = botMgr.SendNotification(task.Service, env, task.User, "unknown", task.Version, false)
 }
 
-// Enqueue / Dequeue / Stop（完整保留）
+// Enqueue / Dequeue / Stop
 func (q *TaskQueue) Enqueue(task *models.Task) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -276,12 +294,10 @@ func (q *TaskQueue) Dequeue() (*models.Task, bool) {
 }
 
 func (q *TaskQueue) Stop() {
-	startTime := time.Now()
 	close(q.stopCh)
 	q.wg.Wait()
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "Stop",
-		"took":   time.Since(startTime),
 	}).Infof(color.GreenString("任务队列停止"))
 }
