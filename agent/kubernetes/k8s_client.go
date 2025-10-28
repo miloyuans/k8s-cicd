@@ -26,7 +26,7 @@ import (
 // 工具函数
 // ======================
 
-// extractTag 提取镜像 tag
+// ExtractTag 提取镜像 tag
 func ExtractTag(image string) string {
 	if idx := strings.LastIndex(image, ":"); idx != -1 {
 		return image[idx+1:]
@@ -197,7 +197,7 @@ func (k *K8sClient) captureRunningImageSnapshot(namespace, serviceName string) (
 				continue
 			}
 			image := status.Image
-			tag := extractTag(image)
+			tag := ExtractTag(image)
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "captureRunningImageSnapshot",
@@ -252,7 +252,7 @@ func (k *K8sClient) updateDeploymentImage(deploy *appsv1.Deployment, newImage, n
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "updateDeploymentImage",
 			"took":   time.Since(startTime),
-		}).Infof(color.YellowString("Deployment %s 镜像已是最新 tag: %s", name, extractTag(newImage)))
+		}).Infof(color.YellowString("Deployment %s 镜像已是最新 tag: %s", name, ExtractTag(newImage)))
 		return nil
 	}
 
@@ -270,7 +270,7 @@ func (k *K8sClient) updateDeploymentImage(deploy *appsv1.Deployment, newImage, n
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "updateDeploymentImage",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("Deployment镜像更新成功: %s -> %s", name, extractTag(newImage)))
+	}).Infof(color.GreenString("Deployment镜像更新成功: %s -> %s", name, ExtractTag(newImage)))
 	return nil
 }
 
@@ -295,7 +295,7 @@ func (k *K8sClient) updateDaemonSetImage(ds *appsv1.DaemonSet, newImage, namespa
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "updateDaemonSetImage",
 			"took":   time.Since(startTime),
-		}).Infof(color.YellowString("DaemonSet %s 镜像已是最新 tag: %s", name, extractTag(newImage)))
+		}).Infof(color.YellowString("DaemonSet %s 镜像已是最新 tag: %s", name, ExtractTag(newImage)))
 		return nil
 	}
 
@@ -313,7 +313,7 @@ func (k *K8sClient) updateDaemonSetImage(ds *appsv1.DaemonSet, newImage, namespa
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "updateDaemonSetImage",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("DaemonSet镜像更新成功: %s -> %s", name, extractTag(newImage)))
+	}).Infof(color.GreenString("DaemonSet镜像更新成功: %s -> %s", name, ExtractTag(newImage)))
 	return nil
 }
 
