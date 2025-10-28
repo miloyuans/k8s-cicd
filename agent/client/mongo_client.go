@@ -633,48 +633,6 @@ func (c *MongoClient) GetLatestImageSnapshot(service, namespace string) (*models
 	return &snapshot, nil
 }
 
-// captureRunningImageSnapshot 获取 Running Pod 镜像（修复：存储快照）
-func (k *K8sClient) captureRunningImageSnapshot(namespace, serviceName string, mongo *client.MongoClient) (*models.ImageSnapshot, error) {
-	pods, err := k.Clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app=%s", serviceName),
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	for _, pod := range pods.Items {
-		if pod.Status.Phase != corev1.PodRunning {
-			continue
-		}
-		for _, status := range pod.Status.ContainerStatuses {
-			if !status.Ready {
-				continue
-			}
-			image := status.Image
-			tag := extractTag(image)
-			snapshot := &models.ImageSnapshot{
-				Namespace:  namespace,
-				Service:    serviceName,
-				Container:  status.Name,
-				Image:      image,
-				Tag:        tag,
-				RecordedAt: time.Now(),
-			}
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "captureRunningImageSnapshot",
-			}).Infof("捕获运行镜像: %s (tag: %s)", image, tag)
-
-			// 存储快照到 Mongo
-			if err := mongo.StoreImageSnapshot(snapshot, ""); err != nil {
-				logrus.Warnf(color.YellowString("存储快照失败: %v", err))
-			}
-			return snapshot, nil
-		}
-	}
-	return nil, nil
-}
-
 // StoreLastPushRequest 存储当前的PushRequest
 func (m *MongoClient) StoreLastPushRequest(req models.PushRequest) error {
 	startTime := time.Now()
