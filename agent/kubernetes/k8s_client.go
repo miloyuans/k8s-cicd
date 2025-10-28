@@ -153,9 +153,8 @@ func (k *K8sClient) CaptureAndUpdateImage(namespace, serviceName, newTag string,
 func (k *K8sClient) UpdateWorkloadImage(namespace, serviceName, newTag string) error {
 	startTime := time.Now()
 
-	// 步骤1：快照
-	snapshot, err := k.captureRunningImageSnapshot(namespace, serviceName)
-	if err != nil {
+	snapshot, err := k.captureRunningImageSnapshot(namespace, serviceName) // 2 参数
+	if err != nil || snapshot == nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateWorkloadImage",
@@ -196,7 +195,7 @@ func (k *K8sClient) UpdateWorkloadImage(namespace, serviceName, newTag string) e
 // captureRunningImageSnapshot 获取 Running Pod 镜像
 // ======================
 // captureRunningImageSnapshot 获取 Running Pod 镜像并存储快照
-func (k *K8sClient) captureRunningImageSnapshot(namespace, serviceName string, mongo *client.MongoClient) (*models.ImageSnapshot, error) {
+func (k *K8sClient) captureRunningImageSnapshot(namespace, serviceName string) (*models.ImageSnapshot, error) {
 	pods, err := k.Clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("app=%s", serviceName),
 	})
@@ -213,7 +212,7 @@ func (k *K8sClient) captureRunningImageSnapshot(namespace, serviceName string, m
 				continue
 			}
 			image := status.Image
-			tag := ExtractTag(image) // 使用导出的函数
+			tag := ExtractTag(image)
 			snapshot := &models.ImageSnapshot{
 				Namespace:  namespace,
 				Service:    serviceName,
@@ -226,11 +225,6 @@ func (k *K8sClient) captureRunningImageSnapshot(namespace, serviceName string, m
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "captureRunningImageSnapshot",
 			}).Infof("捕获运行镜像: %s (tag: %s)", image, tag)
-
-			// 存储快照到 Mongo
-			if err := mongo.StoreImageSnapshot(snapshot, ""); err != nil {
-				logrus.Warnf(color.YellowString("存储快照失败: %v", err))
-			}
 			return snapshot, nil
 		}
 	}

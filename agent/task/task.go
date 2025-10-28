@@ -144,8 +144,8 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		return fmt.Errorf("命名空间为空")
 	}
 
-	// 步骤2：快照 + 更新
-	snapshot, err := k8s.CaptureAndUpdateImage(task.Namespace, task.Service, task.Version, mongo)
+	// 步骤2：更新前快照 + 更新（只返回 error）
+	err := k8s.UpdateWorkloadImage(task.Namespace, task.Service, task.Version)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -153,23 +153,41 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"data":   logrus.Fields{"task_id": task.ID},
 		}).Errorf(color.RedString("镜像更新失败: %v", err))
 
-		if snapshot != nil {
-			if rollbackErr := k8s.RollbackWithSnapshot(snapshot); rollbackErr != nil {
-				logrus.Errorf(color.RedString("回滚失败: %v", rollbackErr))
-				q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
-				return fmt.Errorf("更新失败且回滚失败")
-			}
-			logrus.Infof(color.GreenString("自动回滚成功至: %s", snapshot.Tag))
+		// 回滚：从 Mongo 获取最新快照
+		snapshot, getErr := mongo.GetLatestImageSnapshot(task.Service, task.Namespace)
+		if getErr != nil || snapshot == nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"data":   logrus.Fields{"task_id": task.ID},
+			}).Errorf(color.RedString("获取快照失败，无法回滚: %v", getErr))
+			q.handleFailure(mongo, apiClient, botMgr, task, "unknown", task.Version)
+			return err
 		}
-		q.handleFailure(mongo, apiClient, botMgr, task, getImageOrUnknown(snapshot), task.Version)
+
+		if rollbackErr := k8s.RollbackWithSnapshot(snapshot); rollbackErr != nil {
+			logrus.Errorf(color.RedString("回滚失败: %v", rollbackErr))
+			q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
+			return fmt.Errorf("更新失败且回滚失败")
+		}
+		logrus.Infof(color.GreenString("自动回滚成功至: %s", snapshot.Tag))
+		q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
 		return err
 	}
-	if snapshot == nil {
-		logrus.Warnf(color.YellowString("无运行 Pod，跳过更新: %s", task.Service))
-		return nil
+
+	// 步骤3：获取快照（用于通知和存储）
+	snapshot, getErr := mongo.GetLatestImageSnapshot(task.Service, task.Namespace)
+	if getErr != nil || snapshot == nil {
+		logrus.Warnf(color.YellowString("获取快照失败，使用默认: %v", getErr))
+		snapshot = &models.ImageSnapshot{Image: "unknown"}
 	}
 
-	// 步骤3：等待 rollout
+	// 步骤4：手动存储快照（关键！）
+	if err := mongo.StoreImageSnapshot(snapshot, task.ID); err != nil {
+		logrus.Warnf(color.YellowString("存储快照失败: %v", err))
+	}
+
+	// 步骤5：等待 rollout
 	ready, err := k8s.WaitForRolloutComplete(task.Namespace, task.Service, cfg.Deploy.WaitTimeout)
 	if err != nil || !ready {
 		logrus.Errorf(color.RedString("rollout 超时或失败: %v", err))
@@ -184,8 +202,9 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		return err
 	}
 
-	// 步骤4：成功处理
-	if err := botMgr.SendNotification(task.Service, env, task.User, snapshot.Image, task.Version, true); err != nil {
+	// 步骤6：成功处理
+	oldImage := snapshot.Image
+	if err := botMgr.SendNotification(task.Service, env, task.User, oldImage, task.Version, true); err != nil {
 		logrus.Errorf(color.RedString("发送成功通知失败: %v", err))
 	} else {
 		logrus.Infof(color.GreenString("通知发送成功"))
@@ -211,7 +230,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		"took":   time.Since(startTime),
 		"data": logrus.Fields{
 			"task_id":  task.ID,
-			"old_tag":  kubernetes.ExtractTag(snapshot.Image),
+			"old_tag":  kubernetes.ExtractTag(oldImage),
 			"new_tag":  task.Version,
 		},
 	}).Infof(color.GreenString("任务执行完成: %s, 状态: success", task.ID))
