@@ -4,6 +4,7 @@ package telegram
 import (
 	"bytes"
 	"encoding/json"
+	//"strings"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -225,6 +226,85 @@ func (bm *BotManager) PollUpdates(confirmChan chan models.DeployRequest, rejectC
 	}
 }
 
+// escapeMarkdownV2 转义 MarkdownV2 特殊字符，但保留代码块和链接中的内容
+func escapeMarkdownV2(text string) string {
+	// 定义需要转义的字符（除了代码块和链接内的内容）
+	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
+
+	var result strings.Builder
+	inCode := false
+	inLinkText := false
+	inLinkURL := false
+	i := 0
+	for i < len(text) {
+		c := text[i]
+
+		// 检测是否进入/退出代码块 `` `...` ``
+		if c == '`' {
+			count := 0
+			for j := i; j < len(text) && text[j] == '`'; j++ {
+				count++
+			}
+			if count >= 1 {
+				inCode = !inCode
+				result.WriteString(text[i : i+count])
+				i += count
+				continue
+			}
+		}
+
+		// 检测链接格式 [text](url)
+		if c == '[' && !inCode {
+			result.WriteByte(c)
+			i++
+			inLinkText = true
+			continue
+		}
+		if c == ']' && inLinkText && !inCode {
+			result.WriteByte(c)
+			i++
+			if i < len(text) && text[i] == '(' {
+				result.WriteByte('(')
+				i++
+				inLinkURL = true
+			}
+			continue
+		}
+		if c == ')' && inLinkURL && !inCode {
+			result.WriteByte(c)
+			i++
+			inLinkText = false
+			inLinkURL = false
+			continue
+		}
+
+		// 在代码块或链接 URL 中，不转义
+		if inCode || inLinkURL {
+			result.WriteByte(c)
+			i++
+			continue
+		}
+
+		// 正常文本：转义特殊字符
+		if containsRune(escapeChars, string(c)) {
+			result.WriteString("\\")
+		}
+		result.WriteByte(c)
+		i++
+	}
+	return result.String()
+}
+
+// 辅助函数：判断字符是否在列表中
+func containsRune(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
 // HandleCallback 处理回调查询
 func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
 	startTime := time.Now()
@@ -315,8 +395,8 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 	}
 
 	// 步骤8：构建反馈消息文本
-	resultText := fmt.Sprintf("✅ 用户 @%s %s 部署请求: *%s* v`%s` 在 `%s`",
-		userName, action, service, version, env)
+	resultText := fmt.Sprintf("Success 用户 @%s %s 部署请求: *%s* v`%s` 在 `%s`",
+		escapeMarkdownV2(userName), action, escapeMarkdownV2(service), escapeMarkdownV2(version), escapeMarkdownV2(env))
 
 	// 步骤9：发送反馈消息
 	feedbackMessageID, err := bm.sendMessage(bm.getDefaultBot(), chatID, resultText, "MarkdownV2") // FIX: Removed extra 'nil' argument (no keyboard needed here).
@@ -377,7 +457,6 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 // SendConfirmation 发送确认弹窗
 func (bm *BotManager) SendConfirmation(service, env, user, version string, allowedUsers []string) error {
 	startTime := time.Now()
-	// 步骤1：根据服务选择机器人
 	bot, err := bm.getBotForService(service)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -388,38 +467,42 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, allow
 		return err
 	}
 
-	// 步骤2：构建@用户列表
+	// 构建@用户列表
 	var mentions strings.Builder
 	for _, uid := range allowedUsers {
 		mentions.WriteString("@")
-		mentions.WriteString(uid)
+		mentions.WriteString(escapeMarkdownV2(uid)) // 转义用户名
 		mentions.WriteString(" ")
 	}
 
-	// 步骤3：构建确认消息文本，包括@用户
-	message := fmt.Sprintf("*🛡️ 部署确认*\n\n"+
+	// 构建消息（全部转义）
+	safeService := escapeMarkdownV2(service)
+	safeEnv := escapeMarkdownV2(env)
+	safeVersion := escapeMarkdownV2(version)
+	safeUser := escapeMarkdownV2(user)
+
+	message := fmt.Sprintf("*Deployment Confirmation*\n\n"+
 		"**服务**: `%s`\n"+
 		"**环境**: `%s`\n"+
 		"**版本**: `%s`\n"+
 		"**用户**: `%s`\n\n"+
 		"*请选择操作*\n\n"+
-		"通知: %s", service, env, version, user, mentions.String())
+		"通知: %s", safeService, safeEnv, safeVersion, safeUser, mentions.String())
 
-	// 步骤4：构建内联键盘
+	// 构建内联键盘（callback_data 不需要转义）
 	callbackDataConfirm := fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, version, user)
 	callbackDataReject := fmt.Sprintf("reject:%s:%s:%s:%s", service, env, version, user)
 
 	keyboard := map[string]interface{}{
 		"inline_keyboard": [][]map[string]string{
 			{
-				{"text": "✅ 确认部署", "callback_data": callbackDataConfirm},
-				{"text": "❌ 拒绝部署", "callback_data": callbackDataReject},
+				{"text": "Confirm 确认部署", "callback_data": callbackDataConfirm},
+				{"text": "Reject 拒绝部署", "callback_data": callbackDataReject},
 			},
 		},
 	}
 
-	// 步骤5：发送带键盘的消息
-	_, err = bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2") // FIX: Changed to 'sendMessageWithKeyboard' (keyboard is required here).
+	_, err = bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2")
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -429,7 +512,6 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, allow
 		return err
 	}
 
-	// 步骤6：记录发送成功日志
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "SendConfirmation",
@@ -758,65 +840,63 @@ func (bm *BotManager) Stop() {
 // generateMarkdownMessage 生成美观的Markdown部署通知
 func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
 	startTime := time.Now()
-	// 步骤1：初始化字符串构建器
 	var message strings.Builder
 
-	// 步骤2：构建标题
-	message.WriteString("*🚀 ")
-	message.WriteString(service)
-	message.WriteString(" 部署 ")
+	// 标题
+	title := fmt.Sprintf("Deployment %s", service)
 	if success {
-		message.WriteString("成功*")
+		title = fmt.Sprintf("%s 部署成功", service)
 	} else {
-		message.WriteString("失败*")
+		title = fmt.Sprintf("%s 部署失败", service)
 	}
-	message.WriteString("\n\n")
+	message.WriteString("*")
+	message.WriteString(escapeMarkdownV2(title))
+	message.WriteString("*\n\n")
 
-	// 步骤3：添加详细信息
+	// 详细信息
 	message.WriteString("**服务**: `")
-	message.WriteString(service)
+	message.WriteString(escapeMarkdownV2(service))
 	message.WriteString("`\n")
 
 	message.WriteString("**环境**: `")
-	message.WriteString(env)
+	message.WriteString(escapeMarkdownV2(env))
 	message.WriteString("`\n")
 
 	message.WriteString("**操作人**: `")
-	message.WriteString(user)
+	message.WriteString(escapeMarkdownV2(user))
 	message.WriteString("`\n")
 
 	message.WriteString("**旧版本**: `")
-	message.WriteString(oldVersion)
+	message.WriteString(escapeMarkdownV2(oldVersion))
 	message.WriteString("`\n")
 
 	message.WriteString("**新版本**: `")
-	message.WriteString(newVersion)
+	message.WriteString(escapeMarkdownV2(newVersion))
 	message.WriteString("`\n")
 
-	// 步骤4：添加状态
+	// 状态
 	message.WriteString("**状态**: ")
 	if success {
-		message.WriteString("✅ *部署成功*")
+		message.WriteString("Success *部署成功*")
 	} else {
-		message.WriteString("❌ *部署失败-已回滚*")
+		message.WriteString("Failure *部署失败-已回滚*")
 	}
 	message.WriteString("\n")
 
-	// 步骤5：添加时间
+	// 时间
 	message.WriteString("**时间**: `")
 	message.WriteString(time.Now().Format("2006-01-02 15:04:05"))
 	message.WriteString("`\n\n")
 
-	// 步骤6：如果失败，添加回滚信息
+	// 失败时回滚信息
 	if !success {
-		message.WriteString("*🔄 自动回滚已完成*\n\n")
+		message.WriteString("*Automatic rollback 已完成*\n\n")
 	}
 
-	// 步骤7：添加签名
+	// 签名
 	message.WriteString("---\n")
 	message.WriteString("*由 K8s-CICD Agent 自动发送*")
 
-	// 步骤8：返回生成的字符串
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "generateMarkdownMessage",
