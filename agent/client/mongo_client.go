@@ -595,6 +595,25 @@ func (m *MongoClient) GetLastPushRequest() (models.PushRequest, error) {
 	return result, nil
 }
 
+// UpdatePopupMessageID 记录弹窗消息 ID
+func (c *MongoClient) UpdatePopupMessageID(service, version, environment, user string, messageID int) error {
+	collection := c.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))
+	filter := bson.M{
+		"service":     service,
+		"version":     version,
+		"environment": environment,
+		"user":        user,
+	}
+	update := bson.M{
+		"$set": bson.M{
+			"popup_message_id": messageID,
+			"updated_at":       time.Now(),
+		},
+	}
+	_, err := collection.UpdateOne(context.Background(), filter, update)
+	return err
+}
+
 // StoreLastPushRequest 存储当前的PushRequest
 func (m *MongoClient) StoreLastPushRequest(req models.PushRequest) error {
 	startTime := time.Now()

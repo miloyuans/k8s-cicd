@@ -418,7 +418,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					t.Namespace = namespace
 					t.ConfirmationStatus = "pending"
 					t.PopupRetries = 0
-					isNewTask = true // 标记为新任务
+					isNewTask = true
 
 					err = a.validateAndStoreTask(t, env)
 					if err != nil {
@@ -439,7 +439,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 				// 如果需要弹窗
 				if contains(a.config.Query.ConfirmEnvs, env) {
 					if confirmationStatus == "failed" || confirmationStatus == "pending" {
-						// 关键修复：如果是新任务，直接使用内存中的 retries = 0
+						// 关键修复：新任务直接使用 retries=0，跳过数据库查询
 						if isNewTask {
 							retries = 0
 							logrus.WithFields(logrus.Fields{
@@ -451,7 +451,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 								},
 							}).Infof(color.GreenString("新任务，跳过数据库查询，直接使用 retries=0: %s v%s [%s]", t.Service, t.Version, env))
 						} else {
-							// 旧任务：从数据库读取 retries（可加重试）
+							// 旧任务：从数据库读取 retries（带重试）
 							var taskInDB models.DeployRequest
 							collection := a.mongo.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 							const maxQueryRetries = 3
@@ -534,22 +534,21 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					// 发送弹窗
 					confirmChan := make(chan models.DeployRequest)
 					rejectChan := make(chan models.StatusRequest)
+
 					msgID, err := a.botMgr.SendConfirmation(t.Service, env, t.User, t.Version, a.config.Telegram.AllowedUsers)
 					if err != nil {
 						retries++
-						if err := a.mongo.UpdatePopupRetries(t.Service, t.Version, env, t.User, retries); err != nil {
+						if updateErr := a.mongo.UpdatePopupRetries(t.Service, t.Version, env, t.User, retries); updateErr != nil {
 							logrus.WithFields(logrus.Fields{
 								"time":   time.Now().Format("2006-01-02 15:04:05"),
 								"method": "processQueryTasks",
-								"took":   time.Since(startTime),
-							}).Errorf(color.RedString("更新弹窗重试次数失败: %v", err))
+							}).Errorf(color.RedString("更新弹窗重试次数失败: %v", updateErr))
 						}
-						if err := a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed"); err != nil {
+						if updateErr := a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed"); updateErr != nil {
 							logrus.WithFields(logrus.Fields{
 								"time":   time.Now().Format("2006-01-02 15:04:05"),
 								"method": "processQueryTasks",
-								"took":   time.Since(startTime),
-							}).Errorf(color.RedString("更新确认状态失败: %v", err))
+							}).Errorf(color.RedString("更新确认状态失败: %v", updateErr))
 						}
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -562,20 +561,28 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						continue
 					}
 
-					// 发送成功
+					// 记录 message_id 到数据库
+					if storeErr := a.mongo.UpdatePopupMessageID(t.Service, t.Version, env, t.User, msgID); storeErr != nil {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "process,",
+						}).Warnf(color.YellowString("记录弹窗 message_id 失败: %v", storeErr))
+					}
+
+					// 更新状态为 sent
 					if err := a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "sent"); err != nil {
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "processQueryTasks",
-							"took":   time.Since(startTime),
 						}).Errorf(color.RedString("更新确认状态失败: %v", err))
 					}
+
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
 						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env,
+							"service": t.Service, "version": t.Version, "env": env, "message_id": msgID,
 						},
 					}).Infof(color.GreenString("弹窗发送成功并设置状态'sent': %s v%s [%s]", t.Service, t.Version, env))
 
