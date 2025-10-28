@@ -359,9 +359,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "processQueryTasks",
 		"took":   time.Since(startTime),
-		"data": logrus.Fields{
-			"task_count": len(tasks),
-		},
+		"data": logrus.Fields{"task_count": len(tasks)},
 	}).Infof(color.GreenString("开始处理 %d 个查询任务", len(tasks)))
 
 	var wg sync.WaitGroup
@@ -377,13 +375,10 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
-						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env,
-						},
+						"data": logrus.Fields{"service": t.Service, "version": t.Version, "env": env},
 					}).Errorf(color.RedString("检查现有任务失败: %v", err))
 					continue
 				}
-
 				var confirmationStatus string
 				var retries int
 				var isNewTask bool = false
@@ -395,9 +390,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "processQueryTasks",
 							"took":   time.Since(startTime),
-							"data": logrus.Fields{
-								"service": t.Service, "version": t.Version, "env": env,
-							},
+							"data": logrus.Fields{"service": t.Service, "version": t.Version, "env": env},
 						}).Errorf(color.RedString("获取确认状态失败: %v", err))
 						continue
 					}
@@ -409,9 +402,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "processQueryTasks",
 							"took":   time.Since(startTime),
-							"data": logrus.Fields{
-								"service": t.Service, "version": t.Version, "env": env,
-							},
+							"data": logrus.Fields{"service": t.Service, "version": t.Version, "env": env},
 						}).Errorf(color.RedString("无法获取环境 [%s] 的命名空间", env))
 						continue
 					}
@@ -426,9 +417,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "processQueryTasks",
 							"took":   time.Since(startTime),
-							"data": logrus.Fields{
-								"service": t.Service, "version": t.Version, "env": env,
-							},
+							"data": logrus.Fields{"service": t.Service, "version": t.Version, "env": env},
 						}).Errorf(color.RedString("存储任务失败: %v", err))
 						continue
 					}
@@ -436,20 +425,19 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					retries = 0
 				}
 
+				// 修复：增强弹窗条件日志
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "processQueryTasks",
+					"data": logrus.Fields{"env": env, "ConfirmEnvs": a.config.Query.ConfirmEnvs, "status": confirmationStatus, "retries": retries},
+				}).Infof("弹窗检查: 环境=%s, ConfirmEnvs=%v, 状态=%s, 重试=%d", env, a.config.Query.ConfirmEnvs, confirmationStatus, retries)
+
 				// 如果需要弹窗
 				if contains(a.config.Query.ConfirmEnvs, env) {
 					if confirmationStatus == "failed" || confirmationStatus == "pending" {
-						// 关键修复：新任务直接使用 retries=0，跳过数据库查询
 						if isNewTask {
 							retries = 0
-							logrus.WithFields(logrus.Fields{
-								"time":   time.Now().Format("2006-01-02 15:04:05"),
-								"method": "processQueryTasks",
-								"took":   time.Since(startTime),
-								"data": logrus.Fields{
-									"service": t.Service, "version": t.Version, "env": env,
-								},
-							}).Infof(color.GreenString("新任务，跳过数据库查询，直接使用 retries=0: %s v%s [%s]", t.Service, t.Version, env))
+							logrus.Infof(color.GreenString("新任务，跳过数据库查询，直接使用 retries=0: %s v%s [%s]", t.Service, t.Version, env))
 						} else {
 							// 旧任务：从数据库读取 retries（带重试）
 							var taskInDB models.DeployRequest
@@ -470,64 +458,31 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 									break
 								}
 								if err.Error() == "mongo: no documents in result" && attempt < maxQueryRetries {
-									logrus.WithFields(logrus.Fields{
-										"time":   time.Now().Format("2006-01-02 15:04:05"),
-										"method": "processQueryTasks",
-										"took":   time.Since(startTime),
-										"data": logrus.Fields{
-											"service": t.Service, "version": t.Version, "env": env, "attempt": attempt,
-										},
-									}).Warnf(color.YellowString("获取任务重试次数失败，尝试 %d/%d: %v", attempt, maxQueryRetries, err))
+									logrus.Warnf(color.YellowString("获取任务重试次数失败，尝试 %d/%d: %v", attempt, maxQueryRetries, err))
 									time.Sleep(queryRetryDelay)
 									continue
 								}
-								logrus.WithFields(logrus.Fields{
-									"time":   time.Now().Format("2006-01-02 15:04:05"),
-									"method": "processQueryTasks",
-									"took":   time.Since(startTime),
-									"data": logrus.Fields{
-										"service": t.Service, "version": t.Version, "env": env,
-									},
-								}).Errorf(color.RedString("获取任务重试次数失败: %v", err))
+								logrus.Errorf(color.RedString("获取任务重试次数失败: %v", err))
 								break
 							}
 							if !found {
-								retries = 0 // 兜底
+								retries = 0
 							}
 						}
 
 						if retries >= a.config.Task.PopupMaxRetries {
-							logrus.WithFields(logrus.Fields{
-								"time":   time.Now().Format("2006-01-02 15:04:05"),
-								"method": "processQueryTasks",
-								"took":   time.Since(startTime),
-								"data": logrus.Fields{
-									"service": t.Service, "version": t.Version, "env": env,
-								},
-							}).Warnf(color.YellowString("任务已达最大弹窗重试次数 (%d/%d)，跳过: %s v%s [%s]", retries, a.config.Task.PopupMaxRetries, t.Service, t.Version, env))
+							logrus.Warnf(color.YellowString("任务已达最大弹窗重试次数 (%d/%d)，跳过: %s v%s [%s]", retries, a.config.Task.PopupMaxRetries, t.Service, t.Version, env))
 							if err := a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed"); err != nil {
-								logrus.WithFields(logrus.Fields{
-									"time":   time.Now().Format("2006-01-02 15:04:05"),
-									"method": "processQueryTasks",
-									"took":   time.Since(startTime),
-								}).Errorf(color.RedString("更新确认状态失败: %v", err))
+								logrus.Errorf(color.RedString("更新确认状态失败: %v", err))
 							}
 							continue
 						}
 
-						// 重试延迟
 						if confirmationStatus == "failed" {
 							time.Sleep(time.Duration(a.config.Task.PopupRetryDelay*retries) * time.Second)
 						}
 					} else if confirmationStatus == "sent" || confirmationStatus == "confirmed" || confirmationStatus == "rejected" {
-						logrus.WithFields(logrus.Fields{
-							"time":   time.Now().Format("2006-01-02 15:04:05"),
-							"method": "processQueryTasks",
-							"took":   time.Since(startTime),
-							"data": logrus.Fields{
-								"service": t.Service, "version": t.Version, "env": env, "status": confirmationStatus,
-							},
-						}).Infof(color.GreenString("弹窗已处理，跳过: %s v%s [%s]", t.Service, t.Version, env))
+						logrus.Infof(color.GreenString("弹窗已处理，跳过: %s v%s [%s]", t.Service, t.Version, env))
 						continue
 					}
 
@@ -539,53 +494,35 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					if err != nil {
 						retries++
 						if updateErr := a.mongo.UpdatePopupRetries(t.Service, t.Version, env, t.User, retries); updateErr != nil {
-							logrus.WithFields(logrus.Fields{
-								"time":   time.Now().Format("2006-01-02 15:04:05"),
-								"method": "processQueryTasks",
-							}).Errorf(color.RedString("更新弹窗重试次数失败: %v", updateErr))
+							logrus.Errorf(color.RedString("更新弹窗重试次数失败: %v", updateErr))
 						}
 						if updateErr := a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "failed"); updateErr != nil {
-							logrus.WithFields(logrus.Fields{
-								"time":   time.Now().Format("2006-01-02 15:04:05"),
-								"method": "processQueryTasks",
-							}).Errorf(color.RedString("更新确认状态失败: %v", updateErr))
+							logrus.Errorf(color.RedString("更新确认状态失败: %v", updateErr))
 						}
-						// 修复：增加延迟，避免频繁重试
-    					time.Sleep(time.Duration(a.config.Task.PopupRetryDelay * retries) * time.Second)
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "processQueryTasks",
 							"took":   time.Since(startTime),
-							"data": logrus.Fields{
-								"service": t.Service, "version": t.Version, "env": env, "retries": retries,
-							},
+							"data": logrus.Fields{"service": t.Service, "version": t.Version, "env": env, "retries": retries},
 						}).Errorf(color.RedString("弹窗发送失败，重试次数: %d/%d: %v", retries, a.config.Task.PopupMaxRetries, err))
 						continue
 					}
 
-					// 记录 message_id 到数据库
+					// 记录 message_id
 					if storeErr := a.mongo.UpdatePopupMessageID(t.Service, t.Version, env, t.User, msgID); storeErr != nil {
-						logrus.WithFields(logrus.Fields{
-							"time":   time.Now().Format("2006-01-02 15:04:05"),
-							"method": "process,",
-						}).Warnf(color.YellowString("记录弹窗 message_id 失败: %v", storeErr))
+						logrus.Warnf(color.YellowString("记录弹窗 message_id 失败: %v", storeErr))
 					}
 
 					// 更新状态为 sent
 					if err := a.mongo.UpdateConfirmationStatus(t.Service, t.Version, env, t.User, "sent"); err != nil {
-						logrus.WithFields(logrus.Fields{
-							"time":   time.Now().Format("2006-01-02 15:04:05"),
-							"method": "processQueryTasks",
-						}).Errorf(color.RedString("更新确认状态失败: %v", err))
+						logrus.Errorf(color.RedString("更新确认状态失败: %v", err))
 					}
 
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
-						"data": logrus.Fields{
-							"service": t.Service, "version": t.Version, "env": env, "message_id": msgID,
-						},
+						"data": logrus.Fields{"service": t.Service, "version": t.Version, "env": env, "message_id": msgID},
 					}).Infof(color.GreenString("弹窗发送成功并设置状态'sent': %s v%s [%s]", t.Service, t.Version, env))
 
 					go a.handleConfirmationChannels(confirmChan, rejectChan)
@@ -598,14 +535,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						ID:            taskID,
 						Retries:       0,
 					})
-					logrus.WithFields(logrus.Fields{
-						"time":   time.Now().Format("2006-01-02 15:04:05"),
-						"method": "processQueryTasks",
-						"took":   time.Since(startTime),
-						"data": logrus.Fields{
-							"task_id": taskID,
-						},
-					}).Infof(color.GreenString("无需弹窗，任务直接入队: %s v%s [%s]", t.Service, t.Version, env))
+					logrus.Infof(color.GreenString("无需弹窗，任务直接入队: %s v%s [%s]", t.Service, t.Version, env))
 				}
 			}
 		}(task)
