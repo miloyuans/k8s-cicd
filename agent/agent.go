@@ -550,6 +550,8 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 								"method": "processQueryTasks",
 							}).Errorf(color.RedString("更新确认状态失败: %v", updateErr))
 						}
+						// 修复：增加延迟，避免频繁重试
+    					time.Sleep(time.Duration(a.config.Task.PopupRetryDelay * retries) * time.Second)
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "processQueryTasks",

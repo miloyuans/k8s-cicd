@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -291,13 +292,13 @@ func (bm *BotManager) sendTelegramMessage(bot *TelegramBot, chatID, text string,
 // ======================
 // 7. 发送确认弹窗（返回 message_id）
 // ======================
+// SendConfirmation 发送确认弹窗（修复：callback_data URL 编码）
 func (bm *BotManager) SendConfirmation(service, env, user, version string, allowedUsers []string) (int, error) {
 	bot, err := bm.getBotForService(service)
 	if err != nil {
 		return 0, err
 	}
 
-	// @用户
 	var mentions strings.Builder
 	for _, u := range allowedUsers {
 		mentions.WriteString(fmt.Sprintf("@%s ", escapeMarkdownV2(u)))
@@ -312,18 +313,21 @@ func (bm *BotManager) SendConfirmation(service, env, user, version string, allow
 		"*请选择操作*\n\n"+
 		"通知: %s", safe(service), safe(env), safe(version), safe(user), mentions.String())
 
+	// 修复：callback_data URL 编码
+	callbackDataConfirm := url.QueryEscape(fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, version, user))
+	callbackDataReject := url.QueryEscape(fmt.Sprintf("reject:%s:%s:%s:%s", service, env, version, user))
+
 	keyboard := map[string]interface{}{
 		"inline_keyboard": [][]map[string]string{
-			{{"text": "Confirm 确认部署", "callback_data": fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, version, user)}},
-			{{"text": "Reject 拒绝部署", "callback_data": fmt.Sprintf("reject:%s:%s:%s:%s", service, env, version, user)}},
+			{{"text": "✅ 确认部署", "callback_data": callbackDataConfirm}},
+			{{"text": "❌ 拒绝部署", "callback_data": callbackDataReject}},
 		},
 	}
 
-	msgID, err := bm.sendTelegramMessage(bot, bot.GroupID, message, keyboard, "MarkdownV2")
+	msgID, err := bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2")
 	if err != nil {
 		return 0, err
 	}
-	logrus.Infof(color.GreenString("确认弹窗发送成功: %s v%s [%s] message_id=%d", service, version, env, msgID))
 	return msgID, nil
 }
 
@@ -338,40 +342,26 @@ func extractTag(image string) string {
 	return image
 }
 
-func (bm *BotManager) SendNotification(service, env, user, oldImage, newImage string, success bool) error {
+// SendNotification 发送部署通知（修复：转义 version 中的 - ）
+func (bm *BotManager) SendNotification(service, env, user, oldImage, newVersion string, success bool) error {
 	bot, err := bm.getBotForService(service)
 	if err != nil {
 		return err
 	}
 
 	oldTag := extractTag(oldImage)
-	newTag := extractTag(newImage)
+	newTag := extractTag(newVersion) // 提取 tag，避免 - 解析错误
 
-	safe := escapeMarkdownV2
-	status := "Success *部署成功*"
-	if !success {
-		status = "Failure *部署失败\\-已回滚*"
-	}
-
-	message := fmt.Sprintf("*Deployment %s %s*\n\n"+
-		"**服务**: `%s`\n"+
-		"**环境**: `%s`\n"+
-		"**操作人**: `%s`\n"+
-		"**旧版本**: `%s`\n"+
-		"**新版本**: `%s`\n"+
-		"**状态**: %s\n"+
-		"**时间**: `%s`\n\n"+
-		"---\n"+
-		"*由 K8s\\-CICD Agent 自动发送*",
-		safe(service), map[bool]string{true: "成功", false: "失败"}[success],
-		safe(service), safe(env), safe(user), safe(oldTag), safe(newTag), status,
-		time.Now().Format("2006-01-02 15:04:05"))
-
-	_, err = bm.sendTelegramMessage(bot, bot.GroupID, message, nil, "MarkdownV2")
+	message := bm.generateMarkdownMessage(service, env, user, oldTag, newTag, success) // 使用 tag
+	_, err = bm.sendMessage(bot, bot.GroupID, message, "MarkdownV2")
 	if err != nil {
-		logrus.Errorf(color.RedString("发送通知失败: %v", err))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendNotification",
+		}).Errorf(color.RedString("发送通知失败: %v", err))
+		return err
 	}
-	return err
+	return nil
 }
 
 // ======================

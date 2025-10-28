@@ -433,45 +433,55 @@ func (k *K8sClient) GetCurrentImage(namespace, name string) string {
 }
 
 // WaitForRolloutComplete 等待 rollout 完成
+// WaitForRolloutComplete 等待 rollout 完成（修复：添加真实超时轮询）
 func (k *K8sClient) WaitForRolloutComplete(namespace, name string, timeout time.Duration) (bool, error) {
 	startTime := time.Now()
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// 检查Deployment
-		deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
-		if err == nil {
-			if deploy.Status.ObservedGeneration >= deploy.Generation && deploy.Status.AvailableReplicas == *deploy.Spec.Replicas {
-				return nil
+	ticker := time.NewTicker(2 * time.Second) // 每2s检查一次
+	defer ticker.Stop()
+
+	timeoutCh := time.After(timeout)
+	for {
+		select {
+		case <-timeoutCh:
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "WaitForRolloutComplete",
+				"took":   time.Since(startTime),
+			}).Errorf(color.RedString("rollout 超时: %s [%s]", name, namespace))
+			return false, fmt.Errorf("rollout 超时: %v", timeout)
+		case <-ticker.C:
+			// 检查 Deployment
+			if deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{}); err == nil {
+				if deploy.Status.ObservedGeneration >= deploy.Generation && deploy.Status.AvailableReplicas == *deploy.Spec.Replicas {
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "WaitForRolloutComplete",
+						"took":   time.Since(startTime),
+					}).Infof(color.GreenString("Deployment rollout 完成: %s [%s]", name, namespace))
+					return true, nil
+				}
+				continue
 			}
-			return fmt.Errorf("Deployment rollout 未完成")
-		}
 
-		// 检查DaemonSet
-		ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(context.TODO(), name, metav1.GetOptions{})
-		if err == nil {
-			if ds.Status.ObservedGeneration >= ds.Generation && ds.Status.NumberAvailable == ds.Status.DesiredNumberScheduled {
-				return nil
+			// 检查 DaemonSet
+			if ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(context.TODO(), name, metav1.GetOptions{}); err == nil {
+				if ds.Status.ObservedGeneration >= ds.Generation && ds.Status.NumberAvailable == ds.Status.DesiredNumberScheduled {
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "WaitForRolloutComplete",
+						"took":   time.Since(startTime),
+					}).Infof(color.GreenString("DaemonSet rollout 完成: %s [%s]", name, namespace))
+					return true, nil
+				}
+				continue
 			}
-			return fmt.Errorf("DaemonSet rollout 未完成")
+
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "WaitForRolloutComplete",
+			}).Debugf("rollout 进行中: %s [%s]", name, namespace)
 		}
-
-		return fmt.Errorf("未找到工作负载")
-	})
-
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "WaitForRolloutComplete",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("等待rollout完成失败: %v", err))
-		return false, err
 	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "WaitForRolloutComplete",
-		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("rollout完成"))
-	return true, nil
 }
 
 // DiscoverServicesFromNamespace 从命名空间发现服务

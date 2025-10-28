@@ -130,7 +130,9 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 }
 
 // executeTask 执行任务（核心）
+// executeTask 执行任务（修复：快照存储 + 回滚逻辑）
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task *models.Task, botMgr *telegram.BotManager) error {
+	startTime := time.Now()
 	env := task.Environments[0]
 
 	// 步骤1：验证命名空间
@@ -138,78 +140,145 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "executeTask",
+			"took":   time.Since(startTime),
 			"data": logrus.Fields{"task_id": task.ID},
 		}).Errorf(color.RedString("命名空间为空"))
 		return fmt.Errorf("命名空间为空")
 	}
 
-	// 步骤2：更新镜像（仅返回 error）
-	err := k8s.UpdateWorkloadImage(task.Namespace, task.Service, task.Version)
+	// 步骤2：更新前快照 + 更新（传入 mongo 存储快照）
+	err := k8s.UpdateWorkloadImage(task.Namespace, task.Service, task.Version, mongo) // 传入 mongo
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "executeTask",
+			"took":   time.Since(startTime),
 			"data": logrus.Fields{"task_id": task.ID},
 		}).Errorf(color.RedString("镜像更新失败: %v", err))
 
-		// 回滚：从数据库获取快照
-		snapshot, err := mongo.GetLatestImageSnapshot(task.Service, task.Namespace)
-		if err != nil || snapshot == nil {
-			logrus.Errorf(color.RedString("获取快照失败，无法回滚: %v", err))
+		// 回滚：获取最新快照
+		snapshot, getErr := mongo.GetLatestImageSnapshot(task.Service, task.Namespace)
+		if getErr != nil || snapshot == nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"took":   time.Since(startTime),
+				"data": logrus.Fields{"task_id": task.ID},
+			}).Errorf(color.RedString("获取快照失败，无法回滚: %v", getErr))
 			q.handleFailure(mongo, apiClient, botMgr, task, "unknown", task.Version)
 			return err
 		}
 
 		if rollbackErr := k8s.RollbackWithSnapshot(snapshot); rollbackErr != nil {
-			logrus.Errorf(color.RedString("回滚失败: %v", rollbackErr))
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"took":   time.Since(startTime),
+				"data": logrus.Fields{"task_id": task.ID},
+			}).Errorf(color.RedString("回滚失败: %v", rollbackErr))
 			q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
 			return fmt.Errorf("更新失败且回滚失败")
 		}
-		logrus.Infof(color.GreenString("自动回滚成功至: %s", snapshot.Tag))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+		}).Infof(color.GreenString("自动回滚成功至版本: %s", snapshot.Tag))
 		q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
 		return err
 	}
 
-	// 步骤3：等待 rollout
+	// 步骤3：等待新版本就绪
 	ready, err := k8s.WaitForRolloutComplete(task.Namespace, task.Service, cfg.Deploy.WaitTimeout)
 	if err != nil || !ready {
-		logrus.Errorf(color.RedString("rollout 超时或失败: %v", err))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{"task_id": task.ID},
+		}).Errorf(color.RedString("新版本就绪失败: %v", err))
 
 		// 回滚
-		snapshot, err := mongo.GetLatestImageSnapshot(task.Service, task.Namespace)
-		if err != nil || snapshot == nil {
-			logrus.Errorf(color.RedString("获取快照失败，无法回滚: %v", err))
+		snapshot, getErr := mongo.GetLatestImageSnapshot(task.Service, task.Namespace)
+		if getErr != nil || snapshot == nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"took":   time.Since(startTime),
+				"data": logrus.Fields{"task_id": task.ID},
+			}).Errorf(color.RedString("获取快照失败，无法回滚: %v", getErr))
 			q.handleFailure(mongo, apiClient, botMgr, task, "unknown", task.Version)
 			return err
 		}
 
 		if rollbackErr := k8s.RollbackWithSnapshot(snapshot); rollbackErr != nil {
-			logrus.Errorf(color.RedString("回滚失败: %v", rollbackErr))
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"took":   time.Since(startTime),
+				"data": logrus.Fields{"task_id": task.ID},
+			}).Errorf(color.RedString("回滚失败: %v", rollbackErr))
 			q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
-			return fmt.Errorf("rollout失败且回滚失败")
+			return fmt.Errorf("新版本就绪失败: %v, 回滚也失败: %v", err, rollbackErr)
 		}
-		logrus.Infof(color.GreenString("自动回滚成功至: %s", snapshot.Tag))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+		}).Infof(color.GreenString("回滚成功至版本: %s", snapshot.Tag))
 		q.handleFailure(mongo, apiClient, botMgr, task, snapshot.Image, task.Version)
 		return err
 	}
 
-	// 步骤4：成功处理
-	snapshot, err := mongo.GetLatestImageSnapshot(task.Service, task.Namespace)
-	if err != nil || snapshot == nil {
-		logrus.Warnf(color.YellowString("获取快照失败: %v", err))
+	// 步骤4：新版本就绪，标记成功
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "executeTask",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{"task_id": task.ID},
+	}).Infof(color.GreenString("新版本就绪"))
+
+	// 步骤5：发送成功通知
+	snapshot, getErr := mongo.GetLatestImageSnapshot(task.Service, task.Namespace)
+	if getErr != nil || snapshot == nil {
+		logrus.Warnf(color.YellowString("获取快照失败，使用默认: %v", getErr))
 		snapshot = &models.ImageSnapshot{Image: "unknown"}
 	}
-
-	if err := botMgr.SendNotification(task.Service, env, task.User, snapshot.Image, task.Version, true); err != nil {
-		logrus.Errorf(color.RedString("发送成功通知失败: %v", err))
+	oldVersion := snapshot.Image
+	if err := botMgr.SendNotification(task.Service, env, task.User, oldVersion, task.Version, true); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{"task_id": task.ID},
+		}).Errorf(color.RedString("发送成功通知失败: %v", err))
 	} else {
-		logrus.Infof(color.GreenString("通知发送成功"))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{"task_id": task.ID},
+		}).Infof(color.GreenString("通知发送成功"))
 	}
 
+	// 步骤6：更新状态为"success"
 	if err := mongo.UpdateTaskStatus(task.Service, task.Version, env, task.User, "success"); err != nil {
-		logrus.Errorf(color.RedString("更新MongoDB状态失败: %v", err))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{"task_id": task.ID},
+		}).Errorf(color.RedString("更新MongoDB状态失败: %v", err))
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{"task_id": task.ID, "status": "success"},
+		}).Infof(color.GreenString("MongoDB状态更新成功: %s", "success"))
 	}
 
+	// 步骤7：推送成功状态
 	if err := apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.Service,
 		Version:     task.Version,
@@ -217,16 +286,36 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		User:        task.User,
 		Status:      "success",
 	}); err != nil {
-		logrus.Errorf(color.RedString("推送成功状态失败: %v", err))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{"task_id": task.ID},
+		}).Errorf(color.RedString("推送成功状态失败: %v", err))
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{"task_id": task.ID, "status": "success"},
+		}).Infof(color.GreenString("状态推送成功"))
 	}
 
+	// 步骤8：总结任务执行结果
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "executeTask",
+		"took":   time.Since(startTime),
 		"data": logrus.Fields{
-			"task_id": task.ID, "old_tag": kubernetes.ExtractTag(snapshot.Image), "new_tag": task.Version,
+			"task_id":     task.ID,
+			"service":     task.Service,
+			"version":     task.Version,
+			"environment": env,
+			"user":        task.User,
+			"status":      "success",
+			"namespace":   task.Namespace,
 		},
-	}).Infof(color.GreenString("任务执行完成: %s, 状态: success", task.ID))
+	}).Infof(color.GreenString("任务执行完成: %s, 状态: %s, 耗时: %v", task.ID, "success", time.Since(startTime)))
 	return nil
 }
 
