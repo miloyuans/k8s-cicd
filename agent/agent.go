@@ -436,13 +436,46 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					if confirmationStatus == "failed" || confirmationStatus == "pending" {
 						var taskInDB models.DeployRequest
 						collection := a.mongo.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
-						err := collection.FindOne(context.Background(), bson.M{
-							"service":     t.Service,
-							"version":     t.Version,
-							"environment": env,
-							"user":        t.User,
-						}).Decode(&taskInDB)
+						// FIX: Add retry mechanism for querying task retries
+						const maxQueryRetries = 3
+						const queryRetryDelay = 500 * time.Millisecond
+						for attempt := 1; attempt <= maxQueryRetries; attempt++ {
+							err := collection.FindOne(context.Background(), bson.M{
+								"service":     t.Service,
+								"version":     t.Version,
+								"environment": env,
+								"user":        t.User,
+							}).Decode(&taskInDB)
+							if err == nil {
+								retries = taskInDB.PopupRetries
+								break
+							}
+							if err.Error() == "mongo: no documents in result" {
+								logrus.WithFields(logrus.Fields{
+									"time":   time.Now().Format("2006-01-02 15:04:05"),
+									"method": "processQueryTasks",
+									"took":   time.Since(startTime),
+									"data": logrus.Fields{
+										"service": t.Service, "version": t.Version, "env": env, "attempt": attempt,
+									},
+								}).Warnf(color.YellowString("获取任务重试次数失败，尝试 %d/%d: %v", attempt, maxQueryRetries, err))
+								if attempt < maxQueryRetries {
+									time.Sleep(queryRetryDelay)
+									continue
+								}
+							}
+							logrus.WithFields(logrus.Fields{
+								"time":   time.Now().Format("2006-01-02 15:04:05"),
+								"method": "processQueryTasks",
+								"took":   time.Since(startTime),
+								"data": logrus.Fields{
+									"service": t.Service, "version": t.Version, "env": env, "attempt": attempt,
+								},
+							}).Errorf(color.RedString("获取任务重试次数失败: %v", err))
+							return // Exit on non-retryable error
+						}
 						if err != nil {
+							// After retries, assume task is new with zero retries
 							logrus.WithFields(logrus.Fields{
 								"time":   time.Now().Format("2006-01-02 15:04:05"),
 								"method": "processQueryTasks",
@@ -450,10 +483,9 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 								"data": logrus.Fields{
 									"service": t.Service, "version": t.Version, "env": env,
 								},
-							}).Errorf(color.RedString("获取任务重试次数失败: %v", err))
-							continue
+							}).Warnf(color.YellowString("未找到任务，假设重试次数为0: %s v%s [%s]", t.Service, t.Version, env))
+							retries = 0
 						}
-						retries = taskInDB.PopupRetries
 						if retries >= a.config.Task.PopupMaxRetries {
 							logrus.WithFields(logrus.Fields{
 								"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -496,7 +528,7 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 					// 发送弹窗
 					confirmChan := make(chan models.DeployRequest)
 					rejectChan := make(chan models.StatusRequest)
-					err := a.botMgr.SendConfirmation(t.Service, env, t.User, t.Version, a.config.Telegram.AllowedUsers) // FIX: Corrected to match SendConfirmation signature; use global AllowedUsers; expect only error return value.
+					err := a.botMgr.SendConfirmation(t.Service, env, t.User, t.Version, a.config.Telegram.AllowedUsers)
 					if err != nil {
 						// 发送失败，增加重试次数并设置"failed"
 						retries++
@@ -546,10 +578,9 @@ func (a *Agent) processQueryTasks(tasks []models.DeployRequest) {
 						"method": "processQueryTasks",
 						"took":   time.Since(startTime),
 						"data": logrus.Fields{
-							"service":    t.Service,
-							"version":    t.Version,
-							"env":        env,
-							//"message_id": messageID, // FIX: Removed messageID from log as it's no longer returned.
+							"service": t.Service,
+							"version": t.Version,
+							"env":     env,
 						},
 					}).Infof(color.GreenString("弹窗发送成功并设置初始状态'sent': %s v%s [%s]", t.Service, t.Version, env))
 
