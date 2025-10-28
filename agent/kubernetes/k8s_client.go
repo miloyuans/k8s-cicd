@@ -27,7 +27,7 @@ import (
 // ======================
 
 // extractTag 提取镜像 tag
-func extractTag(image string) string {
+func ExtractTag(image string) string {
 	if idx := strings.LastIndex(image, ":"); idx != -1 {
 		return image[idx+1:]
 	}
