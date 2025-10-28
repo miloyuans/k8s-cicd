@@ -1,5 +1,5 @@
 // telegram/bot.go
-// telegram/bot.go
+package telegram
 
 import (
 	"bytes"
