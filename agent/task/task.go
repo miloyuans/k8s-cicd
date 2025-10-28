@@ -135,7 +135,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 	}
 }
 
-// executeTask 执行任务（核心优化）
+// executeTask 执行任务
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, task *models.Task, botMgr *telegram.BotManager) error {
 	startTime := time.Now()
 	env := task.Environments[0]
@@ -150,7 +150,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		return fmt.Errorf("命名空间为空")
 	}
 
-	// 步骤2：更新前快照（关键！）
+	// 步骤2：更新前快照 + 更新
 	snapshot, err := k8s.UpdateWorkloadImage(task.Namespace, task.Service, task.Version)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -161,7 +161,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 
 		if snapshot != nil {
 			if rollbackErr := k8s.RollbackWithSnapshot(snapshot); rollbackErr != nil {
-				logrus.Errorf(color.RedString("回滚失败: %v", rollbackErr))
+				logrus.Errorf(color.RedString("回滚失败失败: %v", rollbackErr))
 				return fmt.Errorf("更新失败且回滚失败")
 			}
 			logrus.Infof(color.GreenString("自动回滚成功至: %s", snapshot.Tag))
@@ -217,33 +217,10 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		"method": "executeTask",
 		"took":   time.Since(startTime),
 		"data": logrus.Fields{
-			"task_id": task.ID, "old_tag": kubernetes.ExtractTag(snapshot.Image), "new_tag": task.Version,
+			"task_id": task.ID, "old_tag": extractTag(snapshot.Image), "new_tag": task.Version,
 		},
 	}).Infof(color.GreenString("任务执行完成: %s, 状态: success", task.ID))
 	return nil
-}
-
-// handleFailure 统一失败处理
-func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *models.Task, oldImage, newVersion string) {
-	env := task.Environments[0]
-	// Mongo
-	if err := mongo.UpdateTaskStatus(task.Service, newVersion, env, task.User, "failure"); err != nil {
-		logrus.Errorf(color.RedString("更新MongoDB状态失败: %v", err))
-	}
-	// API
-	if err := apiClient.UpdateStatus(models.StatusRequest{
-		Service:     task.Service,
-		Version:     newVersion,
-		Environment: env,
-		User:        task.User,
-		Status:      "failure",
-	}); err != nil {
-		logrus.Errorf(color.RedString("推送失败状态失败: %v", err))
-	}
-	// 通知
-	if err := botMgr.SendNotification(task.Service, env, task.User, oldImage, newVersion, false); err != nil {
-		logrus.Errorf(color.RedString("发送失败通知失败: %v", err))
-	}
 }
 
 // handlePermanentFailure 永久失败处理（保留原逻辑）

@@ -595,6 +595,13 @@ func (m *MongoClient) GetLastPushRequest() (models.PushRequest, error) {
 	return result, nil
 }
 
+// StoreImageSnapshot 存储快照
+func (c *MongoClient) StoreImageSnapshot(snapshot *models.ImageSnapshot, taskID string) error {
+	snapshot.TaskID = taskID
+	_, err := c.GetClient().Database("cicd").Collection("image_snapshots").InsertOne(context.Background(), snapshot)
+	return err
+}
+
 // UpdatePopupMessageID 记录弹窗消息 ID
 func (c *MongoClient) UpdatePopupMessageID(service, version, environment, user string, messageID int) error {
 	collection := c.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", environment))

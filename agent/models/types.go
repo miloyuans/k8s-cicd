@@ -70,11 +70,11 @@ func UnmarshalDeploy(data []byte) (DeployRequest, error) {
 
 //k8s api image set release
 type ImageSnapshot struct {
-	Namespace   string            `bson:"namespace" json:"namespace"`
-	Service     string            `bson:"service" json:"service"`
-	Container   string            `bson:"container" json:"container"`
-	Image       string            `bson:"image" json:"image"`
-	Tag         string            `bson:"tag" json:"tag"`
-	RecordedAt  time.Time         `bson:"recorded_at" json:"recorded_at"`
-	TaskID      string            `bson:"task_id" json:"task_id"` // 关联任务
+	Namespace   string    `bson:"namespace" json:"namespace"`
+	Service     string    `bson:"service" json:"service"`
+	Container   string    `bson:"container" json:"container"`
+	Image       string    `bson:"image" json:"image"`
+	Tag         string    `bson:"tag" json:"tag"`
+	RecordedAt  time.Time `bson:"recorded_at" json:"recorded_at"`
+	TaskID      string    `bson:"task_id" json:"task_id"`
 }
