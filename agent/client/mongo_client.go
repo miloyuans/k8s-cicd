@@ -633,6 +633,26 @@ func (c *MongoClient) GetLatestImageSnapshot(service, namespace string) (*models
 	return &snapshot, nil
 }
 
+// GetTaskByCallbackPayload 通过截断 payload 查找任务（模糊匹配）
+func (c *MongoClient) GetTaskByCallbackPayload(payload string) (*models.DeployRequest, error) {
+    collection := c.GetClient().Database("cicd").Collection("tasks_*") // 需支持通配
+    // 实际使用正则或多集合查询
+    // 简化：遍历所有环境集合
+    for env := range c.cfg.EnvMapping.Mappings {
+        coll := c.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+        var task models.DeployRequest
+        err := coll.FindOne(context.Background(), bson.M{
+            "service":     bson.M{"$regex": payload},
+            "version":     bson.M{"$regex": payload},
+            "environment": env,
+        }).Decode(&task)
+        if err == nil {
+            return &task, nil
+        }
+    }
+    return nil, fmt.Errorf("task not found")
+}
+
 // StoreLastPushRequest 存储当前的PushRequest
 func (m *MongoClient) StoreLastPushRequest(req models.PushRequest) error {
 	startTime := time.Now()

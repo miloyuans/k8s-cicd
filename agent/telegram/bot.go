@@ -397,46 +397,87 @@ func (bm *BotManager) sendTelegramMessage(bot *TelegramBot, chatID, text string,
 	return int(result.Result["message_id"].(float64)), nil
 }
 
+// truncateString 截断字符串到指定长度（按字节）
+func truncateString(s string, maxBytes int) string {
+    if len(s) <= maxBytes {
+        return s
+    }
+    // 按字节截断，避免中文乱码
+    for i := maxBytes; i > 0; i-- {
+        if (s[i] & 0xC0) != 0x80 {
+            return s[:i]
+        }
+    }
+    return s[:maxBytes]
+}
+
 // ======================
 // 7. 发送确认弹窗（返回 message_id）
 // ======================
-// SendConfirmation 发送确认弹窗（修复：callback_data URL 编码）
+// SendConfirmation 发送确认弹窗（自动截断 callback_data）
 func (bm *BotManager) SendConfirmation(service, env, user, version string, allowedUsers []string) (int, error) {
-	bot, err := bm.getBotForService(service)
-	if err != nil {
-		return 0, err
-	}
+    bot, err := bm.getBotForService(service)
+    if err != nil {
+        return 0, err
+    }
 
-	var mentions strings.Builder
-	for _, u := range allowedUsers {
-		mentions.WriteString(fmt.Sprintf("@%s ", escapeMarkdownV2(u)))
-	}
+    // 构建原始 callback_data
+    rawConfirm := fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, version, user)
+    rawReject := fmt.Sprintf("reject:%s:%s:%s:%s", service, env, version, user)
 
-	safe := escapeMarkdownV2
-	message := fmt.Sprintf("*Deployment Confirmation*\n\n"+
-		"**服务**: `%s`\n"+
-		"**环境**: `%s`\n"+
-		"**版本**: `%s`\n"+
-		"**用户**: `%s`\n\n"+
-		"*请选择操作*\n\n"+
-		"通知: %s", safe(service), safe(env), safe(version), safe(user), mentions.String())
+	// SendConfirmation（关键：截断 + URL 编码）
+	callbackDataConfirm := truncateString(fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, version, user), 64)
+	callbackDataReject := truncateString(fmt.Sprintf("reject:%s:%s:%s:%s", service, env, version, user), 64)
 
-	// 修复：callback_data URL 编码
-	callbackDataConfirm := url.QueryEscape(fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, version, user))
-	callbackDataReject := url.QueryEscape(fmt.Sprintf("reject:%s:%s:%s:%s", service, env, version, user))
+	callbackDataConfirm = url.QueryEscape(callbackDataConfirm)
+	callbackDataReject = url.QueryEscape(callbackDataReject)
 
-	keyboard := map[string]interface{}{
-		"inline_keyboard": [][]map[string]string{
-			{{"text": "✅ 确认部署", "callback_data": callbackDataConfirm}},
-			{{"text": "❌ 拒绝部署", "callback_data": callbackDataReject}},
-		},
-	}
+    // 自动截断到 64 字节（Telegram 限制）
+    const maxLen = 64
+    callbackConfirm := truncateString(rawConfirm, maxLen)
+    callbackReject := truncateString(rawReject, maxLen)
 
-	msgID, err := bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2")
-	if err != nil {
-		return 0, err
-	}
-	return msgID, nil
+    // URL 编码（防止特殊字符）
+    callbackConfirm = url.QueryEscape(callbackConfirm)
+    callbackReject = url.QueryEscape(callbackReject)
+
+    // 构建消息
+    var mentions strings.Builder
+    for _, u := range allowedUsers {
+        mentions.WriteString(fmt.Sprintf("@%s ", escapeMarkdownV2(u)))
+    }
+
+    safe := escapeMarkdownV2
+    message := fmt.Sprintf("*Deployment Confirmation*\n\n"+
+        "**服务**: `%s`\n"+
+        "**环境**: `%s`\n"+
+        "**版本**: `%s`\n"+
+        "**用户**: `%s`\n\n"+
+        "*请选择操作*\n\n"+
+        "通知: %s", safe(service), safe(env), safe(version), safe(user), mentions.String())
+
+    keyboard := map[string]interface{}{
+        "inline_keyboard": [][]map[string]string{
+            {{"text": "Confirm 确认部署", "callback_data": callbackConfirm}},
+            {{"text": "Reject 拒绝部署", "callback_data": callbackReject}},
+        },
+    }
+
+    msgID, err := bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2")
+    if err != nil {
+        logrus.WithFields(logrus.Fields{
+            "time":   time.Now().Format("2006-01-02 15:04:05"),
+            "method": "SendConfirmation",
+            "data":   logrus.Fields{"service": service, "version": version, "env": env},
+        }).Errorf(color.RedString("弹窗发送失败: %v", err))
+        return 0, err
+    }
+
+    logrus.WithFields(logrus.Fields{
+        "time":   time.Now().Format("2006-01-02 15:04:05"),
+        "method": "SendConfirmation",
+    }).Infof(color.GreenString("弹窗发送成功: %s v%s [%s] message_id=%d", service, version, env, msgID))
+    return msgID, nil
 }
 
 // ======================
@@ -455,19 +496,53 @@ func extractTag(image string) string {
 // ======================
 // 9. 处理回调（点击后反馈 + 删除原弹窗）
 // ======================
+// HandleCallback 处理弹窗回调（兼容截断的 callback_data）
 func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
-	callback := update["callback_query"].(map[string]interface{})
-	from := callback["from"].(map[string]interface{})
-	userName := from["username"].(string)
-	data := callback["data"].(string)
-
-	parts := strings.Split(data, ":")
-	if len(parts) != 5 {
+	callback, ok := update["callback_query"].(map[string]interface{})
+	if !ok {
+		logrus.Warn("无效的 callback_query")
 		return
 	}
-	action, service, env, version, user := parts[0], parts[1], parts[2], parts[3], parts[4]
 
-	// 权限检查
+	from, ok := callback["from"].(map[string]interface{})
+	if !ok {
+		logrus.Warn("无法获取 from 用户信息")
+		return
+	}
+	userName, _ := from["username"].(string)
+	if userName == "" {
+		userName = from["first_name"].(string)
+	}
+
+	data, ok := callback["data"].(string)
+	if !ok || data == "" {
+		logrus.Warn("callback_data 为空")
+		return
+	}
+
+	// 步骤1：URL 解码（SendConfirmation 中编码了）
+	decodedData, err := url.QueryUnescape(data)
+	if err != nil {
+		logrus.Warnf("callback_data 解码失败: %v", err)
+		decodedData = data // 降级使用原始
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "HandleCallback",
+		"data":   logrus.Fields{"raw": data, "decoded": decodedData, "user": userName},
+	}).Infof("收到回调: %s", decodedData)
+
+	// 步骤2：解析 action
+	parts := strings.SplitN(decodedData, ":", 2)
+	if len(parts) < 2 {
+		logrus.Warnf("callback_data 格式错误: %s", decodedData)
+		return
+	}
+	action := parts[0]
+	payload := parts[1]
+
+	// 步骤3：权限检查
 	allowed := false
 	for _, u := range bm.globalAllowedUsers {
 		if u == userName {
@@ -476,46 +551,99 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 		}
 	}
 	if !allowed {
+		logrus.Warnf("用户无权限: %s", userName)
 		return
 	}
 
-	// 删除原弹窗
-	message := callback["message"].(map[string]interface{})
+	// 步骤4：从 Mongo 模糊匹配任务（关键！）
+	task, err := bm.findTaskByPayload(payload)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "HandleCallback",
+		}).Warnf("未找到匹配任务: %s, 错误: %v", payload, err)
+		return
+	}
+
+	// 步骤5：删除原弹窗
+	message, ok := callback["message"].(map[string]interface{})
+	if !ok {
+		logrus.Warn("无法获取消息信息")
+		return
+	}
 	messageID := int(message["message_id"].(float64))
 	chatID := fmt.Sprintf("%v", message["chat"].(map[string]interface{})["id"])
-	bot, _ := bm.getBotForService(service)
+	bot, err := bm.getBotForService(task.Service)
+	if err != nil {
+		logrus.Warnf("获取机器人失败: %v", err)
+		return
+	}
 	bm.DeleteMessage(bot, chatID, messageID)
 
-	// 反馈消息
+	// 步骤6：发送反馈
 	actionName := map[string]string{"confirm": "确认", "reject": "拒绝"}[action]
 	feedback := fmt.Sprintf("Success 用户 @%s 已 *%s* 部署: `%s` v`%s` 在 `%s`",
-		escapeMarkdownV2(userName), actionName, escapeMarkdownV2(service), escapeMarkdownV2(version), escapeMarkdownV2(env))
+		escapeMarkdownV2(userName), actionName, escapeMarkdownV2(task.Service),
+		escapeMarkdownV2(task.Version), escapeMarkdownV2(task.Environments[0]))
 
 	feedbackID, _ := bm.sendTelegramMessage(bot, chatID, feedback, nil, "MarkdownV2")
 
-	// 30秒后删除
+	// 30秒后删除反馈
 	go func() {
 		time.Sleep(30 * time.Second)
 		bm.DeleteMessage(bot, chatID, feedbackID)
 	}()
 
-	// 推送到通道
+	// 步骤7：推送到通道
 	if action == "confirm" {
 		confirmChan <- models.DeployRequest{
-			Service:      service,
-			Environments: []string{env},
-			Version:      version,
-			User:         user,
+			Service:      task.Service,
+			Environments: task.Environments,
+			Version:      task.Version,
+			User:         task.User,
 		}
 	} else {
 		rejectChan <- models.StatusRequest{
-			Service:     service,
-			Version:     version,
-			Environment: env,
-			User:        user,
+			Service:     task.Service,
+			Version:     task.Version,
+			Environment: task.Environments[0],
+			User:        task.User,
 			Status:      "no_action",
 		}
 	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "HandleCallback",
+		"data":   logrus.Fields{"action": action, "task_id": task.ID},
+	}).Infof("回调处理完成: %s", action)
+}
+
+// findTaskByPayload 通过 payload 模糊匹配任务
+func (bm *BotManager) findTaskByPayload(payload string) (*models.DeployRequest, error) {
+	// 假设 mongo 客户端可通过 bm 获取，或传入
+	// 这里简化，使用全局 mongo（实际请注入）
+	mongo := client.GetMongoClient() // 你需要实现单例或注入
+
+	ctx := context.Background()
+	// 遍历所有环境集合
+	for env := range mongo.cfg.EnvMapping.Mappings {
+		collection := mongo.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		filter := bson.M{
+			"$or": []bson.M{
+				{"service": bson.M{"$regex": payload, "$options": "i"}},
+				{"version": bson.M{"$regex": payload, "$options": "i"}},
+				{"user": bson.M{"$regex": payload, "$options": "i"}},
+			},
+			"confirmation_status": bson.M{"$in": []string{"pending", "sent"}},
+		}
+		var task models.DeployRequest
+		err := collection.FindOne(ctx, filter).Decode(&task)
+		if err == nil {
+			return &task, nil
+		}
+	}
+	return nil, fmt.Errorf("task not found for payload: %s", payload)
 }
 
 // ======================
