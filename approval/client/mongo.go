@@ -269,28 +269,59 @@ func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 	return serviceList, envList, nil
 }
 
+// StoreTaskIfNotExists 存储任务（防重：service+version+env 唯一）
 func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
-    coll := m.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", task.Environments[0]))
-    filter := bson.M{
-        "service":     task.Service,
-        "version":     task.Version,
-        "environment": task.Environments[0],
-    }
-    _, err := coll.UpdateOne(context.Background(), filter, bson.M{"$setOnInsert": task}, 
-        options.Update().SetUpsert(true))
-    return err
-}
+	startTime := time.Now()
 
-// StoreTaskIfNotExists 存储任务（防重）
-func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
-	coll := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", task.Environments[0]))
+	// 1. 验证环境
+	if len(task.Environments) == 0 {
+		return fmt.Errorf("task.Environments 不能为空")
+	}
+	env := task.Environments[0]
+
+	// 2. 获取集合
+	coll := m.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+
+	// 3. 唯一键过滤
 	filter := bson.M{
 		"service":     task.Service,
 		"version":     task.Version,
-		"environment": task.Environments[0],
+		"environment": env,
 	}
-	_, err := coll.UpdateOne(context.Background(), filter, bson.M{"$setOnInsert": task}, options.Update().SetUpsert(true))
-	return err
+
+	// 4. 仅在不存在时插入
+	opts := options.Update().SetUpsert(true)
+	update := bson.M{"$setOnInsert": task}
+
+	result, err := coll.UpdateOne(context.Background(), filter, update, opts)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "StoreTaskIfNotExists",
+			"task_id": task.TaskID,
+			"took":    time.Since(startTime),
+		}).Errorf("存储任务失败: %v", err)
+		return err
+	}
+
+	// 5. 判断是否插入
+	if result.UpsertedCount > 0 {
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "StoreTaskIfNotExists",
+			"task_id": task.TaskID,
+			"took":    time.Since(startTime),
+		}).Infof("任务存储成功（新插入）")
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "StoreTaskIfNotExists",
+			"task_id": task.TaskID,
+			"took":    time.Since(startTime),
+		}).Debugf("任务已存在（跳过）")
+	}
+
+	return nil
 }
 
 // GetTaskByID 根据 task_id 获取任务
