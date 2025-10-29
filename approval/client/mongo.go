@@ -240,6 +240,47 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status string) error {
 	return fmt.Errorf("任务未找到")
 }
 
+// GetPushedServicesAndEnvs 获取所有已 push 的服务和环境
+func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
+	services := make(map[string]bool)
+	envs := make(map[string]bool)
+
+	for env := range m.cfg.EnvMapping.Mappings {
+		coll := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		cursor, err := coll.Find(context.Background(), bson.M{})
+		if err != nil {
+			continue
+		}
+		var tasks []models.DeployRequest
+		cursor.All(context.Background(), &tasks)
+		for _, t := range tasks {
+			services[t.Service] = true
+			envs[env] = true
+		}
+	}
+
+	var serviceList, envList []string
+	for s := range services {
+		serviceList = append(serviceList, s)
+	}
+	for e := range envs {
+		envList = append(envList, e)
+	}
+	return serviceList, envList, nil
+}
+
+// StoreTaskIfNotExists 存储任务（防重）
+func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
+	coll := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", task.Environments[0]))
+	filter := bson.M{
+		"service":     task.Service,
+		"version":     task.Version,
+		"environment": task.Environments[0],
+	}
+	_, err := coll.UpdateOne(context.Background(), filter, bson.M{"$setOnInsert": task}, options.Update().SetUpsert(true))
+	return err
+}
+
 // GetTaskByID 根据 task_id 获取任务
 func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) {
 	startTime := time.Now()

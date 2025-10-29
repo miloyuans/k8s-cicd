@@ -53,6 +53,11 @@ func main() {
 
 	botMgr.Start()
 
+	queryClient := api.NewQueryClient(cfg.API.BaseURL)
+
+	// 启动查询任务
+	go a.periodicQueryAndSync(queryClient, mongoClient)
+
 	// 步骤6：等待系统信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
