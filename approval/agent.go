@@ -1,11 +1,16 @@
 package approval
 
 import (
+	"context"
+	"fmt"
 	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
 
 	"k8s-cicd/approval/api"
 	"k8s-cicd/approval/client"
 	"k8s-cicd/approval/config"
+	"k8s-cicd/approval/telegram" // 修复：导入 telegram
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
