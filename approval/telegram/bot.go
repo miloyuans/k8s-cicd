@@ -173,9 +173,8 @@ func (bm *BotManager) pollPendingTasks() {
 					go func(t *models.DeployRequest) {
 						startTime := time.Now()
 
-						// 发送弹窗
-						err := bm.sendConfirmation(t)
-						if err != nil {
+						// 发送弹窗（返回 error）
+						if err := bm.sendConfirmation(t); err != nil {
 							logrus.WithFields(logrus.Fields{
 								"time":     time.Now().Format("2006-01-02 15:04:05"),
 								"method":   "pollPendingTasks",
