@@ -2,7 +2,6 @@ package telegram
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -18,7 +17,6 @@ import (
 	"github.com/fatih/color"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/bson"
 )
 
 // TelegramBot 单个机器人配置
