@@ -76,6 +76,13 @@ func (a *Approval) periodicQueryAndSync() {
 					continue
 				}
 
+				// 传入 []string
+				tasks, err := a.queryClient.QueryTasks([]string{service}, []string{env})
+				if err != nil {
+					logrus.Errorf("查询任务失败 [%s@%s]: %v", service, env, err)
+					continue
+				}
+
 				// 3. 从环境变量或配置获取 user
 				user := os.Getenv("APPROVAL_QUERY_USER")
 				if user == "" {

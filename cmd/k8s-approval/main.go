@@ -20,6 +20,15 @@ import (
 func main() {
 	startTime := time.Now()
 
+	// 开启 debug 日志
+    logrus.SetLevel(logrus.DebugLevel)
+    logrus.SetFormatter(&logrus.TextFormatter{
+        FullTimestamp:    true,
+        TimestampFormat:  "2006-01-02 15:04:05",
+        ForceColors:      true,
+        DisableTimestamp: false,
+    })
+
 	// 步骤1：解析命令行参数
 	configFile := flag.String("config", "config.yaml", "配置文件路径")
 	flag.Parse()
