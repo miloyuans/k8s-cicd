@@ -8,7 +8,6 @@ import (
 	"k8s-cicd/agent/client"
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/kubernetes"
-	//"k8s-cicd/agent/models"
 	"k8s-cicd/agent/task"
 	"k8s-cicd/agent/telegram"
 

@@ -63,14 +63,14 @@ func main() {
 	// 步骤7：初始化任务队列
 	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers)
 
-	// 步骤8：组装 Agent
+	// 步骤8：组装 Agent（字段名大写）
 	ag := &agent.Agent{
-		cfg:       cfg,
-		mongo:     mongoClient,
-		k8s:       k8sClient,
-		taskQ:     taskQ,
-		botMgr:    botMgr,
-		apiClient: apiClient,
+		Cfg:       cfg,
+		Mongo:     mongoClient,
+		K8s:       k8sClient,
+		TaskQ:     taskQ,
+		BotMgr:    botMgr,
+		ApiClient: apiClient,
 	}
 
 	// 步骤9：启动 Agent
