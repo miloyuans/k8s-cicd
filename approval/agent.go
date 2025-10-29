@@ -70,15 +70,20 @@ func (a *Approval) periodicQueryAndSync() {
 
 		// 2. 遍历调用 /query
 		for _, service := range services {
+			if service == "" {
+				logrus.Warn("跳过空服务名")
+				continue
+			}
+
 			for _, env := range envs {
-				// 仅对配置中需确认的环境处理
 				if !contains(a.cfg.Query.ConfirmEnvs, env) {
 					continue
 				}
 
 				// 修复：使用 = 而不是 :=
 				// 修复：传入 []string{service} 和 []string{env}
-				tasks, err := a.queryClient.QueryTasks([]string{service}, []string{env})
+				// 传入非空 service 和 []string{env}
+				tasks, err := a.queryClient.QueryTasks(service, []string{env})
 				if err != nil {
 					logrus.Errorf("查询任务失败 [%s@%s]: %v", service, env, err)
 					continue
@@ -99,6 +104,7 @@ func (a *Approval) periodicQueryAndSync() {
 				}
 			}
 		}
+	}
 
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
