@@ -3,6 +3,7 @@ package approval
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -76,20 +77,19 @@ func (a *Approval) periodicQueryAndSync() {
 			}
 
 			for _, env := range envs {
+				// 仅对配置中需确认的环境处理
 				if !contains(a.cfg.Query.ConfirmEnvs, env) {
 					continue
 				}
 
-				// 修复：使用 = 而不是 :=
-				// 修复：传入 []string{service} 和 []string{env}
-				// 传入非空 service 和 []string{env}
+				// 调用 /query 接口
 				tasks, err := a.queryClient.QueryTasks(service, []string{env})
 				if err != nil {
 					logrus.Errorf("查询任务失败 [%s@%s]: %v", service, env, err)
 					continue
 				}
 
-				// 5. 存储到 Mongo（防重）
+				// 存储到 Mongo（防重）
 				for i := range tasks {
 					task := &tasks[i]
 					task.Namespace = a.cfg.EnvMapping.Mappings[env]
@@ -104,7 +104,6 @@ func (a *Approval) periodicQueryAndSync() {
 				}
 			}
 		}
-	}
 
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
