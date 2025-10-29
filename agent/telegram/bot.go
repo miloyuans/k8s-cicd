@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,17 +15,29 @@ import (
 	"k8s-cicd/agent/models"
 
 	"github.com/fatih/color"
-	"github.com/google/uuid" // 新增：生成 task_id
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
 )
+
+// TelegramBot 单个机器人配置
+type TelegramBot struct {
+	Name       string
+	Token      string
+	GroupID    string
+	Services   map[string][]string
+	RegexMatch bool
+	IsEnabled  bool
+}
 
 // BotManager 多机器人管理器
 type BotManager struct {
 	Bots               map[string]*TelegramBot
 	globalAllowedUsers []string
-	mongo              *client.MongoClient // 新增：Mongo 客户端
+	mongo              *client.MongoClient
 	updateChan         chan map[string]interface{}
 	stopChan           chan struct{}
+	offset             int64 // 新增：update offset
 }
 
 // NewBotManager 创建管理器
@@ -33,6 +46,7 @@ func NewBotManager(bots []config.TelegramBot) *BotManager {
 		Bots:       make(map[string]*TelegramBot),
 		updateChan: make(chan map[string]interface{}, 100),
 		stopChan:   make(chan struct{}),
+		offset:     0,
 	}
 
 	for i := range bots {
@@ -57,12 +71,12 @@ func NewBotManager(bots []config.TelegramBot) *BotManager {
 	return m
 }
 
-// SetMongoClient 注入 Mongo 客户端（Agent 中调用）
+// SetMongoClient 注入 Mongo 客户端
 func (bm *BotManager) SetMongoClient(mongo *client.MongoClient) {
 	bm.mongo = mongo
 }
 
-// SetGlobalAllowedUsers 设置全局允许用户
+// SetGlobalAllowedUsers 设置允许用户
 func (bm *BotManager) SetGlobalAllowedUsers(users []string) {
 	bm.globalAllowedUsers = users
 }
@@ -104,7 +118,7 @@ func (bm *BotManager) pollUpdates() {
 		Ok     bool                       `json:"ok"`
 		Result []map[string]interface{}   `json:"result"`
 	}
-	if json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		logrus.Errorf(color.RedString("解析响应失败: %v"), err)
 		return
 	}
@@ -113,6 +127,16 @@ func (bm *BotManager) pollUpdates() {
 		bm.offset = int64(update["update_id"].(float64)) + 1
 		bm.updateChan <- update
 	}
+}
+
+// getDefaultBot 获取默认机器人
+func (bm *BotManager) getDefaultBot() *TelegramBot {
+	for _, bot := range bm.Bots {
+		if bot.IsEnabled {
+			return bot
+		}
+	}
+	return nil
 }
 
 // PollUpdates 消费 updateChan
@@ -129,7 +153,7 @@ func (bm *BotManager) PollUpdates(confirmChan chan<- models.DeployRequest, rejec
 	}
 }
 
-// HandleCallback 处理回调（精确 task_id 匹配）
+// HandleCallback 处理回调
 func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan chan<- models.DeployRequest, rejectChan chan<- models.StatusRequest) {
 	callback, ok := update["callback_query"].(map[string]interface{})
 	if !ok {
@@ -216,16 +240,14 @@ func (bm *BotManager) findTaskByTaskID(taskID string) (*models.DeployRequest, er
 	return nil, fmt.Errorf("task not found for task_id: %s", taskID)
 }
 
-// SendConfirmation 发送弹窗（保留原 UI）
+// SendConfirmation 发送弹窗
 func (bm *BotManager) SendConfirmation(task *models.DeployRequest, bot *TelegramBot) (int, error) {
-	// 生成 task_id
 	if task.TaskID == "" {
 		task.TaskID = uuid.New().String()
 	}
 
 	env := task.Environments[0]
 
-	// @用户列表
 	var mentions strings.Builder
 	for _, uid := range bm.globalAllowedUsers {
 		mentions.WriteString("@")
@@ -233,7 +255,6 @@ func (bm *BotManager) SendConfirmation(task *models.DeployRequest, bot *Telegram
 		mentions.WriteString(" ")
 	}
 
-	// 弹窗文本（完全保留）
 	message := fmt.Sprintf("*Deployment Confirmation 部署确认*\n\n"+
 		"**服务**: `%s`\n"+
 		"**环境**: `%s`\n"+
@@ -248,7 +269,6 @@ func (bm *BotManager) SendConfirmation(task *models.DeployRequest, bot *Telegram
 		mentions.String(),
 	)
 
-	// 短 callback_data
 	confirmData := fmt.Sprintf("confirm:%s", task.TaskID)
 	rejectData := fmt.Sprintf("reject:%s", task.TaskID)
 
@@ -267,7 +287,6 @@ func (bm *BotManager) SendConfirmation(task *models.DeployRequest, bot *Telegram
 		return 0, err
 	}
 
-	// 记录 message_id
 	if bm.mongo != nil {
 		bm.mongo.UpdatePopupMessageID(task.Service, task.Version, env, task.User, messageID)
 	}
@@ -275,6 +294,125 @@ func (bm *BotManager) SendConfirmation(task *models.DeployRequest, bot *Telegram
 	logrus.Infof(color.GreenString("弹窗发送成功: %s v%s [%s] -> task_id=%s"),
 		task.Service, task.Version, env, task.TaskID)
 	return messageID, nil
+}
+
+// sendMessage 发送消息
+func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode string) (int, error) {
+	text = escapeMarkdownV2(text)
+	payload := map[string]interface{}{
+		"chat_id":     chatID,
+		"text":        text,
+		"parse_mode":  parseMode,
+	}
+	jsonData, _ := json.Marshal(payload)
+	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token), "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Ok          bool                   `json:"ok"`
+		Result      map[string]interface{} `json:"result"`
+		ErrorCode   int                    `json:"error_code"`
+		Description string                 `json:"description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+	if !result.Ok {
+		return 0, fmt.Errorf("Telegram API错误: code=%d, description=%s", result.ErrorCode, result.Description)
+	}
+	return int(result.Result["message_id"].(float64)), nil
+}
+
+// sendMessageWithKeyboard 发送带键盘消息
+func (bm *BotManager) sendMessageWithKeyboard(bot *TelegramBot, chatID, text string, keyboard map[string]interface{}, parseMode string) (int, error) {
+	text = escapeMarkdownV2(text)
+	payload := map[string]interface{}{
+		"chat_id":      chatID,
+		"text":         text,
+		"reply_markup": keyboard,
+		"parse_mode":   parseMode,
+	}
+	jsonData, _ := json.Marshal(payload)
+	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token), "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Ok          bool                   `json:"ok"`
+		Result      map[string]interface{} `json:"result"`
+		ErrorCode   int                    `json:"error_code"`
+		Description string                 `json:"description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+	if !result.Ok {
+		return 0, fmt.Errorf("Telegram API错误: code=%d, description=%s", result.ErrorCode, result.Description)
+	}
+	return int(result.Result["message_id"].(float64)), nil
+}
+
+// generateMarkdownMessage 生成通知
+func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
+	safe := escapeMarkdownV2
+	status := "Success *部署成功*"
+	if !success {
+		status = "Failure *部署失败\\-已回滚*"
+	}
+
+	return fmt.Sprintf("*Deployment %s %s*\n\n"+
+		"**服务**: `%s`\n"+
+		"**环境**: `%s`\n"+
+		"**操作人**: `%s`\n"+
+		"**旧版本**: `%s`\n"+
+		"**新版本**: `%s`\n"+
+		"**状态**: %s\n"+
+		"**时间**: `%s`\n\n"+
+		"---\n"+
+		"*由 K8s\\-CICD Agent 自动发送*",
+		safe(service), map[bool]string{true: "成功", false: "失败"}[success],
+		safe(service), safe(env), safe(user), safe(oldVersion), safe(newVersion), status,
+		time.Now().Format("2006-01-02 15:04:05"))
+}
+
+// getBotForService 服务匹配机器人
+func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
+	for _, bot := range bm.Bots {
+		for _, serviceList := range bot.Services {
+			for _, pattern := range serviceList {
+				if bot.RegexMatch {
+					if matched, _ := regexp.MatchString(pattern, service); matched {
+						return bot, nil
+					}
+				} else {
+					if strings.HasPrefix(strings.ToUpper(service), strings.ToUpper(pattern)) {
+						return bot, nil
+					}
+				}
+			}
+		}
+	}
+	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
+}
+
+// DeleteMessage 删除消息
+func (bm *BotManager) DeleteMessage(bot *TelegramBot, chatID string, messageID int) error {
+	payload := map[string]interface{}{
+		"chat_id":    chatID,
+		"message_id": messageID,
+	}
+	jsonData, _ := json.Marshal(payload)
+	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage", bot.Token), "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
 }
 
 // 工具函数
@@ -306,125 +444,4 @@ func containsRune(slice []rune, r rune) bool {
 		}
 	}
 	return false
-}
-
-// ======================
-// sendMessage 基础发送（无键盘）
-// ======================
-func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode string) (int, error) {
-	text = escapeMarkdownV2(text)
-	payload := map[string]interface{}{
-		"chat_id":     chatID,
-		"text":        text,
-		"parse_mode":  parseMode,
-	}
-	jsonData, _ := json.Marshal(payload)
-	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token), "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Ok          bool                   `json:"ok"`
-		Result      map[string]interface{} `json:"result"`
-		ErrorCode   int                    `json:"error_code"`
-		Description string                 `json:"description"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
-	}
-	if !result.Ok {
-		return 0, fmt.Errorf("Telegram API错误: code=%d, description=%s", result.ErrorCode, result.Description)
-	}
-	return int(result.Result["message_id"].(float64)), nil
-}
-
-// ======================
-// generateMarkdownMessage 生成通知消息
-// ======================
-func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
-	safe := escapeMarkdownV2
-	status := "Success *部署成功*"
-	if !success {
-		status = "Failure *部署失败\\-已回滚*"
-	}
-
-	return fmt.Sprintf("*Deployment %s %s*\n\n"+
-		"**服务**: `%s`\n"+
-		"**环境**: `%s`\n"+
-		"**操作人**: `%s`\n"+
-		"**旧版本**: `%s`\n"+
-		"**新版本**: `%s`\n"+
-		"**状态**: %s\n"+
-		"**时间**: `%s`\n\n"+
-		"---\n"+
-		"*由 K8s\\-CICD Agent 自动发送*",
-		safe(service), map[bool]string{true: "成功", false: "失败"}[success],
-		safe(service), safe(env), safe(user), safe(oldVersion), safe(newVersion), status,
-		time.Now().Format("2006-01-02 15:04:05"))
-}
-
-
-// ======================
-// 5. 核心：服务匹配机器人（保留原始设计）
-// ======================
-// getBotForService 根据服务名选择机器人
-func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
-	startTime := time.Now()
-	// 步骤1：遍历所有机器人
-	for _, bot := range bm.Bots {
-		// 步骤2：遍历服务的匹配规则
-		for _, serviceList := range bot.Services {
-			// 步骤3：遍历服务列表中的模式
-			for _, pattern := range serviceList {
-				if bot.RegexMatch {
-					// 使用正则匹配
-					matched, err := regexp.MatchString(pattern, service)
-					if err == nil && matched {
-						logrus.WithFields(logrus.Fields{
-							"time":   time.Now().Format("2006-01-02 15:04:05"),
-							"method": "getBotForService",
-							"took":   time.Since(startTime),
-						}).Infof(color.GreenString("服务 %s 匹配机器人 %s", service, bot.Name))
-						return bot, nil
-					}
-				} else {
-					// 使用前缀匹配（忽略大小写）
-					if strings.HasPrefix(strings.ToUpper(service), strings.ToUpper(pattern)) {
-						logrus.WithFields(logrus.Fields{
-							"time":   time.Now().Format("2006-01-02 15:04:05"),
-							"method": "getBotForService",
-							"took":   time.Since(startTime),
-						}).Infof(color.GreenString("服务 %s 匹配机器人 %s", service, bot.Name))
-						return bot, nil
-					}
-				}
-			}
-		}
-	}
-	// 步骤4：未匹配，返回错误
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "getBotForService",
-		"took":   time.Since(startTime),
-	}).Errorf(color.RedString("服务 %s 未匹配任何机器人", service))
-	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
-}
-
-// ======================
-// 10. 删除消息
-// ======================
-func (bm *BotManager) DeleteMessage(bot *TelegramBot, chatID string, messageID int) error {
-	payload := map[string]interface{}{
-		"chat_id":    chatID,
-		"message_id": messageID,
-	}
-	jsonData, _ := json.Marshal(payload)
-	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage", bot.Token), "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	return nil
 }
