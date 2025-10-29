@@ -402,7 +402,7 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode stri
 	return int(result.Result["message_id"].(float64)), nil
 }
 
-// sendMessageWithKeyboard 发送带键盘消息
+// sendMessageWithKeyboard 发送带键盘消息（增强错误解析）
 func (bm *BotManager) sendMessageWithKeyboard(bot *TelegramBot, chatID, text string, keyboard map[string]interface{}, parseMode string) (int, error) {
 	text = escapeMarkdownV2(text)
 	payload := map[string]interface{}{
@@ -412,23 +412,29 @@ func (bm *BotManager) sendMessageWithKeyboard(bot *TelegramBot, chatID, text str
 		"parse_mode":   parseMode,
 	}
 	jsonData, _ := json.Marshal(payload)
+
 	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token), "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("网络错误: %w", err)
 	}
 	defer resp.Body.Close()
 
+	body, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Ok          bool                   `json:"ok"`
-		Result      map[string]interface{} `json:"result"`
+		Ok          bool   `json:"ok"`
+		ErrorCode   int    `json:"error_code"`
+		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, fmt.Errorf("解析响应失败: %v, 响应: %s", err, string(body))
 	}
+
 	if !result.Ok {
-		return 0, fmt.Errorf("Telegram API 错误")
+		return 0, fmt.Errorf("Telegram API 错误: code=%d, desc=%s", result.ErrorCode, result.Description)
 	}
-	return int(result.Result["message_id"].(float64)), nil
+
+	messageID := int(result.Result.(map[string]interface{})["message_id"].(float64))
+	return messageID, nil
 }
 
 // DeleteMessage 删除消息
