@@ -14,13 +14,8 @@ import (
 
 // QueryRequest /query 请求体
 type QueryRequest struct {
-	Service     string `json:"service"`
 	Environment string `json:"environment"`
-}
-
-// QueryResponse /query 返回体
-type QueryResponse struct {
-	Tasks []models.DeployRequest `json:"tasks"`
+	User        string `json:"user"`
 }
 
 // QueryClient 查询客户端
@@ -39,13 +34,13 @@ func NewQueryClient(baseURL string) *QueryClient {
 	}
 }
 
-// QueryTasks 调用 /query 接口
+// QueryTasks 调用 /query 接口（返回 []DeployRequest）
 func (c *QueryClient) QueryTasks(service, env string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 
 	reqBody := QueryRequest{
-		Service:     service,
 		Environment: env,
+		User:        "deployer", // 可从配置或环境变量读取
 	}
 	jsonData, _ := json.Marshal(reqBody)
 
@@ -67,8 +62,16 @@ func (c *QueryClient) QueryTasks(service, env string) ([]models.DeployRequest, e
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	var result QueryResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// 直接解析为 []models.DeployRequest
+	var tasks []models.DeployRequest
+	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "QueryTasks",
+			"service": service,
+			"env":    env,
+			"took":   time.Since(startTime),
+		}).Errorf("解析 /query 响应失败: %v", err)
 		return nil, err
 	}
 
@@ -77,9 +80,9 @@ func (c *QueryClient) QueryTasks(service, env string) ([]models.DeployRequest, e
 		"method": "QueryTasks",
 		"service": service,
 		"env":    env,
-		"count":  len(result.Tasks),
+		"count":  len(tasks),
 		"took":   time.Since(startTime),
-	}).Infof("查询到 %d 个任务", len(result.Tasks))
+	}).Infof("查询到 %d 个任务", len(tasks))
 
-	return result.Tasks, nil
+	return tasks, nil
 }
