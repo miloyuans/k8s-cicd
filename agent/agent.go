@@ -94,6 +94,11 @@ func NewAgent(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8s
 	}
 	// 步骤6：启动Telegram轮询
 	botMgr.StartPolling()
+
+	// 新增：启动 PollUpdates（处理回调）
+	confirmChan := make(chan models.DeployRequest, 100)
+	rejectChan := make(chan models.StatusRequest, 100)
+	go a.botMgr.PollUpdates(confirmChan, rejectChan, a.mongo)
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "NewAgent",

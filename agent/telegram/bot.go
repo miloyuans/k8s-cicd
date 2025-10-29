@@ -9,11 +9,13 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"context"
 	"time"
 
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
@@ -497,7 +499,7 @@ func extractTag(image string) string {
 // 9. 处理回调（点击后反馈 + 删除原弹窗）
 // ======================
 // HandleCallback 处理弹窗回调（兼容截断的 callback_data）
-func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
+func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest, mongo *client.MongoClient) {
 	callback, ok := update["callback_query"].(map[string]interface{})
 	if !ok {
 		logrus.Warn("无效的 callback_query")
@@ -520,11 +522,11 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 		return
 	}
 
-	// 步骤1：URL 解码（SendConfirmation 中编码了）
+	// 步骤1：URL 解码
 	decodedData, err := url.QueryUnescape(data)
 	if err != nil {
 		logrus.Warnf("callback_data 解码失败: %v", err)
-		decodedData = data // 降级使用原始
+		decodedData = data
 	}
 
 	logrus.WithFields(logrus.Fields{
@@ -555,8 +557,8 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 		return
 	}
 
-	// 步骤4：从 Mongo 模糊匹配任务（关键！）
-	task, err := bm.findTaskByPayload(payload)
+	// 步骤4：从 Mongo 模糊匹配任务
+	task, err := bm.findTaskByPayload(payload, mongo)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -615,18 +617,13 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "HandleCallback",
-		"data":   logrus.Fields{"action": action, "task_id": task.ID},
+		"data":   logrus.Fields{"action": action, "service": task.Service},
 	}).Infof("回调处理完成: %s", action)
 }
 
 // findTaskByPayload 通过 payload 模糊匹配任务
-func (bm *BotManager) findTaskByPayload(payload string) (*models.DeployRequest, error) {
-	// 假设 mongo 客户端可通过 bm 获取，或传入
-	// 这里简化，使用全局 mongo（实际请注入）
-	mongo := client.GetMongoClient() // 你需要实现单例或注入
-
+func (bm *BotManager) findTaskByPayload(payload string, mongo *client.MongoClient) (*models.DeployRequest, error) {
 	ctx := context.Background()
-	// 遍历所有环境集合
 	for env := range mongo.cfg.EnvMapping.Mappings {
 		collection := mongo.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 		filter := bson.M{
@@ -666,11 +663,11 @@ func (bm *BotManager) DeleteMessage(bot *TelegramBot, chatID string, messageID i
 // ======================
 // 11. PollUpdates（供 Agent 调用）
 // ======================
-func (bm *BotManager) PollUpdates(confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest) {
+func (bm *BotManager) PollUpdates(confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest, mongo *client.MongoClient) {
 	for {
 		select {
 		case update := <-bm.updateChan:
-			bm.HandleCallback(update, confirmChan, rejectChan)
+			bm.HandleCallback(update, confirmChan, rejectChan, mongo) // 传入 mongo
 		case <-bm.stopChan:
 			return
 		}
