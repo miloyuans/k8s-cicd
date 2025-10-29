@@ -14,6 +14,7 @@ import (
 
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
+	"k8s-cicd/agent/client"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"github.com/fatih/color"

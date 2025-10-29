@@ -623,7 +623,7 @@ func (c *MongoClient) UpdatePopupMessageID(service, version, environment, user s
 
 // GetLatestImageSnapshot 获取最新快照
 func (c *MongoClient) GetLatestImageSnapshot(service, namespace string) (*models.ImageSnapshot, error) {
-	//collection := c.GetClient().Database("cicd").Collection("image_snapshots")
+	collection := c.GetClient().Database("cicd").Collection("image_snapshots")
 	filter := bson.M{"service": service, "namespace": namespace}
 	var snapshot models.ImageSnapshot
 	err := collection.FindOne(context.Background(), filter, options.FindOne().SetSort(bson.M{"recorded_at": -1})).Decode(&snapshot)
@@ -635,22 +635,20 @@ func (c *MongoClient) GetLatestImageSnapshot(service, namespace string) (*models
 
 // GetTaskByCallbackPayload 通过截断 payload 查找任务（模糊匹配）
 func (c *MongoClient) GetTaskByCallbackPayload(payload string) (*models.DeployRequest, error) {
-    collection := c.GetClient().Database("cicd").Collection("tasks_*") // 需支持通配
-    // 实际使用正则或多集合查询
-    // 简化：遍历所有环境集合
-    for env := range c.cfg.EnvMapping.Mappings {
-        coll := c.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
-        var task models.DeployRequest
-        err := coll.FindOne(context.Background(), bson.M{
-            "service":     bson.M{"$regex": payload},
-            "version":     bson.M{"$regex": payload},
-            "environment": env,
-        }).Decode(&task)
-        if err == nil {
-            return &task, nil
-        }
-    }
-    return nil, fmt.Errorf("task not found")
+	// 通配符集合在 driver 中不支持，保持遍历实现
+	for env := range c.cfg.EnvMapping.Mappings {
+		coll := c.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		var task models.DeployRequest
+		err := coll.FindOne(context.Background(), bson.M{
+			"service":     bson.M{"$regex": payload},
+			"version":     bson.M{"$regex": payload},
+			"environment": env,
+		}).Decode(&task)
+		if err == nil {
+			return &task, nil
+		}
+	}
+	return nil, fmt.Errorf("task not found")
 }
 
 // StoreLastPushRequest 存储当前的PushRequest
