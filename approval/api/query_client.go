@@ -52,7 +52,13 @@ func (c *QueryClient) QueryTasks(service, env string) ([]models.DeployRequest, e
 	url := fmt.Sprintf("%s/query", c.BaseURL)
 	resp, err := c.HTTPClient.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		logrus.Errorf("调用 /query 失败 [%s@%s]: %v", service, env, err)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "QueryTasks",
+			"service": service,
+			"env":    env,
+			"took":   time.Since(startTime),
+		}).Errorf("调用 /query 失败: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -66,11 +72,14 @@ func (c *QueryClient) QueryTasks(service, env string) ([]models.DeployRequest, e
 		return nil, err
 	}
 
-	logrus.With highlighter.WithFields(logrus.Fields{
+	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "QueryTasks",
+		"service": service,
+		"env":    env,
+		"count":  len(result.Tasks),
 		"took":   time.Since(startTime),
-	}).Infof("查询到 %d 个任务 [%s@%s]", len(result.Tasks), service, env)
+	}).Infof("查询到 %d 个任务", len(result.Tasks))
 
 	return result.Tasks, nil
 }
