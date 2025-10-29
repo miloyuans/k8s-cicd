@@ -1,14 +1,14 @@
 package agent
 
 import (
-	"time"
 	"fmt"
+	"time"
 
 	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/client"
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/kubernetes"
-	//"k8s-cicd/agent/models"
+	"k8s-cicd/agent/models"
 	"k8s-cicd/agent/task"
 	"k8s-cicd/agent/telegram"
 
@@ -18,12 +18,12 @@ import (
 
 // Agent 主代理结构
 type Agent struct {
-	cfg       *config.Config
-	mongo     *client.MongoClient
-	k8s       *kubernetes.K8sClient
-	taskQ     *task.TaskQueue
-	botMgr    *telegram.BotManager
-	apiClient *api.APIClient
+	Cfg       *config.Config          // 导出字段
+	Mongo     *client.MongoClient     // 导出字段
+	K8s       *kubernetes.K8sClient   // 导出字段
+	TaskQ     *task.TaskQueue         // 导出字段
+	BotMgr    *telegram.BotManager    // 导出字段
+	ApiClient *api.APIClient          // 导出字段
 }
 
 // Start 启动 Agent
@@ -36,10 +36,10 @@ func (a *Agent) Start() {
 		"method": "Start",
 		"took":   time.Since(startTime),
 	}).Infof(color.GreenString("k8s-cd Agent 启动成功，API=%s, 推送间隔=%v, 查询间隔=%v",
-		a.cfg.API.BaseURL, a.cfg.API.PushInterval, a.cfg.API.QueryInterval))
+		a.Cfg.API.BaseURL, a.Cfg.API.PushInterval, a.Cfg.API.QueryInterval))
 
 	// 步骤2：启动任务队列 Worker
-	a.taskQ.StartWorkers(a.cfg, a.mongo, a.k8s, a.botMgr, a.apiClient)
+	a.TaskQ.StartWorkers(a.Cfg, a.Mongo, a.K8s, a.BotMgr, a.ApiClient)
 
 	// 步骤3：启动周期性服务发现推送
 	go a.periodicPushDiscovery()
@@ -50,7 +50,7 @@ func (a *Agent) Start() {
 
 // periodicPushDiscovery 周期性推送服务发现数据
 func (a *Agent) periodicPushDiscovery() {
-	ticker := time.NewTicker(a.cfg.API.PushInterval)
+	ticker := time.NewTicker(a.Cfg.API.PushInterval)
 	defer ticker.Stop()
 
 	for {
@@ -59,7 +59,7 @@ func (a *Agent) periodicPushDiscovery() {
 			startTime := time.Now()
 
 			// 1. 构建 PushRequest
-			pushReq, err := a.k8s.BuildPushRequest(a.cfg)
+			pushReq, err := a.K8s.BuildPushRequest(a.Cfg)
 			if err != nil {
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -70,7 +70,7 @@ func (a *Agent) periodicPushDiscovery() {
 			}
 
 			// 2. 调用 /push 接口
-			if err := a.apiClient.PushData(pushReq); err != nil {
+			if err := a.ApiClient.PushData(pushReq); err != nil {
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "periodicPushDiscovery",
@@ -93,7 +93,7 @@ func (a *Agent) periodicPushDiscovery() {
 
 // periodicPollTasksFromMongo 周期性从 Mongo 轮询 confirmed 任务
 func (a *Agent) periodicPollTasksFromMongo() {
-	ticker := time.NewTicker(a.cfg.API.QueryInterval)
+	ticker := time.NewTicker(a.Cfg.API.QueryInterval)
 	defer ticker.Stop()
 
 	for {
@@ -102,9 +102,9 @@ func (a *Agent) periodicPollTasksFromMongo() {
 			startTime := time.Now()
 
 			// 1. 遍历所有环境
-			for env, namespace := range a.cfg.EnvMapping.Mappings {
+			for env, namespace := range a.Cfg.EnvMapping.Mappings {
 				// 2. 查询状态为 confirmed 的任务
-				deployReqs, err := a.mongo.GetTasksByStatus(env, "confirmed")
+				deployReqs, err := a.Mongo.GetTasksByStatus(env, "confirmed")
 				if err != nil {
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -125,7 +125,7 @@ func (a *Agent) periodicPollTasksFromMongo() {
 						ID:            fmt.Sprintf("%s-%s", dr.Service, dr.Version),
 						Retries:       0,
 					}
-					a.taskQ.Enqueue(t)
+					a.TaskQ.Enqueue(t)
 				}
 
 				if len(deployReqs) > 0 {
@@ -147,10 +147,10 @@ func (a *Agent) Stop() {
 	startTime := time.Now()
 
 	// 步骤1：停止任务队列
-	a.taskQ.Stop()
+	a.TaskQ.Stop()
 
 	// 步骤2：停止 Telegram 通知（空实现）
-	a.botMgr.Stop()
+	a.BotMgr.Stop()
 
 	// 步骤3：等待完成
 	time.Sleep(2 * time.Second)
