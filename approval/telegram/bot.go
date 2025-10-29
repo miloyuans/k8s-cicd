@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"k8s-cicd/approval/client"
-	//"k8s-cicd/approval/config"
+	"k8s-cicd/approval/config"
 	"k8s-cicd/approval/models"
 
 	"github.com/fatih/color"

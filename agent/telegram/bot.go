@@ -8,26 +8,39 @@ import (
 	"strings"
 	"time"
 
-	"k8s-cicd/agent/config" // 只用于日志
-
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
 
 // BotManager 简化版：仅发送通知
 type BotManager struct {
-	Token   string // 单一 Token
-	GroupID string // 单一群组
+	Token   string // Bot Token
+	GroupID string // 群组ID
 }
 
-// NewBotManager 创建简化版 BotManager
-func NewBotManager(token, groupID string) *BotManager {
+// NewBotManager 创建 BotManager（从环境变量读取）
+func NewBotManager() *BotManager {
+	token := getEnv("TELEGRAM_TOKEN", "")
+	groupID := getEnv("TELEGRAM_GROUP_ID", "")
+
+	if token == "" || groupID == "" {
+		logrus.Fatal(color.RedString("TELEGRAM_TOKEN 和 TELEGRAM_GROUP_ID 必须设置"))
+	}
+
 	bm := &BotManager{
 		Token:   token,
 		GroupID: groupID,
 	}
 	logrus.Info(color.GreenString("Telegram BotManager 创建成功（通知专用）"))
 	return bm
+}
+
+// getEnv 获取环境变量（带默认值）
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }
 
 // escapeMarkdownV2 转义 MarkdownV2
