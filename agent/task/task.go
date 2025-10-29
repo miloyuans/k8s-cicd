@@ -2,7 +2,6 @@ package task
 
 import (
 	"container/list"
-	"fmt"
 	"sync"
 	"time"
 
@@ -118,7 +117,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 // executeTask 执行部署任务
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) error {
 	startTime := time.Now()
-	env := task.DeployRequest.Environments[0]
+	//env := task.DeployRequest.Environments[0]
 	namespace := task.DeployRequest.Namespace
 
 	// 步骤1：捕获快照
