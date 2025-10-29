@@ -269,6 +269,18 @@ func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 	return serviceList, envList, nil
 }
 
+func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
+    coll := m.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", task.Environments[0]))
+    filter := bson.M{
+        "service":     task.Service,
+        "version":     task.Version,
+        "environment": task.Environments[0],
+    }
+    _, err := coll.UpdateOne(context.Background(), filter, bson.M{"$setOnInsert": task}, 
+        options.Update().SetUpsert(true))
+    return err
+}
+
 // StoreTaskIfNotExists 存储任务（防重）
 func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
 	coll := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", task.Environments[0]))

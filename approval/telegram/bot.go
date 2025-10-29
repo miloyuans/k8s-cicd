@@ -139,7 +139,7 @@ func (bm *BotManager) pollUpdates() {
 	}
 }
 
-// pollPendingTasks 周期性查询待弹窗任务
+// pollPendingTasks 周期性查询待弹窗任务（只发一次）
 func (bm *BotManager) pollPendingTasks() {
 	ticker := time.NewTicker(bm.cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -147,15 +147,20 @@ func (bm *BotManager) pollPendingTasks() {
 	for {
 		select {
 		case <-ticker.C:
+			// 1. 遍历所有需要确认的环境
 			for _, env := range bm.cfg.Query.ConfirmEnvs {
+				// 2. 从 Mongo 查询 pending 且未发送弹窗的任务
 				tasks, err := bm.mongo.GetPendingTasks(env)
 				if err != nil {
-					logrus.Errorf("查询 %s 任务失败: %v", env, err)
+					logrus.Errorf("查询 %s 待确认任务失败: %v", env, err)
 					continue
 				}
 
-				for _, task := range tasks {
-					// 内存防重
+				// 3. 遍历每条任务
+				for i := range tasks {
+					task := &tasks[i]
+
+					// 4. 内存防重（防止重复发送）
 					bm.mu.Lock()
 					if bm.sentTasks[task.TaskID] {
 						bm.mu.Unlock()
@@ -164,11 +169,43 @@ func (bm *BotManager) pollPendingTasks() {
 					bm.sentTasks[task.TaskID] = true
 					bm.mu.Unlock()
 
-					// 并发发送弹窗
-					go bm.sendConfirmation(&task)
+					// 5. 并发发送弹窗
+					go func(t *models.DeployRequest) {
+						startTime := time.Now()
+
+						// 发送弹窗
+						err := bm.sendConfirmation(t)
+						if err != nil {
+							logrus.WithFields(logrus.Fields{
+								"time":     time.Now().Format("2006-01-02 15:04:05"),
+								"method":   "pollPendingTasks",
+								"task_id":  t.TaskID,
+								"took":     time.Since(startTime),
+							}).Errorf("弹窗发送失败: %v", err)
+
+							// 失败后释放标记（允许重试）
+							bm.mu.Lock()
+							delete(bm.sentTasks, t.TaskID)
+							bm.mu.Unlock()
+							return
+						}
+
+						// 成功后标记已发送到 Mongo
+						if err := bm.mongo.MarkPopupSent(t.TaskID, 0); err != nil {
+							logrus.Warnf("标记弹窗已发送失败: %v", err)
+						}
+
+						logrus.WithFields(logrus.Fields{
+							"time":    time.Now().Format("2006-01-02 15:04:05"),
+							"method":  "pollPendingTasks",
+							"task_id": t.TaskID,
+							"took":    time.Since(startTime),
+						}).Infof("弹窗发送成功")
+					}(task)
 				}
 			}
 		case <-bm.stopChan:
+			logrus.Info("停止查询待弹窗任务")
 			return
 		}
 	}

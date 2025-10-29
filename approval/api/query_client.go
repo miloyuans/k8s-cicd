@@ -15,8 +15,13 @@ import (
 
 // QueryRequest /query 请求体
 type QueryRequest struct {
-	Service      string   `json:"service"`      // 必填：单个服务名
-	Environments []string `json:"environments"` // 必填：环境数组
+	Service      string   `json:"service"`
+	Environments []string `json:"environments"`
+}
+
+// EmptyResponse 无任务响应
+type EmptyResponse struct {
+	Message string `json:"message"`
 }
 
 // QueryClient 查询客户端
@@ -35,23 +40,16 @@ func NewQueryClient(baseURL string) *QueryClient {
 	}
 }
 
-// QueryTasks 调用 /query 接口（service 必填）
+// QueryTasks 调用 /query 接口（兼容数组和对象）
 func (c *QueryClient) QueryTasks(service string, envs []string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 
-	// 1. 验证 service 非空
-	if service == "" {
-		return nil, fmt.Errorf("service 不能为空")
-	}
-
-	// 2. 构造请求体
 	reqBody := QueryRequest{
 		Service:      service,
 		Environments: envs,
 	}
 	jsonData, _ := json.Marshal(reqBody)
 
-	// 3. 打印请求（debug）
 	logrus.WithFields(logrus.Fields{
 		"time":     time.Now().Format("2006-01-02 15:04:05"),
 		"method":   "QueryTasks",
@@ -60,7 +58,6 @@ func (c *QueryClient) QueryTasks(service string, envs []string) ([]models.Deploy
 		"url":      fmt.Sprintf("%s/query", c.BaseURL),
 	}).Debugf("发送 /query 请求:\n%s", string(jsonData))
 
-	// 4. 发送请求
 	url := fmt.Sprintf("%s/query", c.BaseURL)
 	resp, err := c.HTTPClient.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -68,11 +65,9 @@ func (c *QueryClient) QueryTasks(service string, envs []string) ([]models.Deploy
 	}
 	defer resp.Body.Close()
 
-	// 5. 读取响应
 	body, _ := io.ReadAll(resp.Body)
 	respStr := string(body)
 
-	// 6. 打印响应
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "QueryTasks",
@@ -80,26 +75,34 @@ func (c *QueryClient) QueryTasks(service string, envs []string) ([]models.Deploy
 		"took":   time.Since(startTime),
 	}).Debugf("收到 /query 响应:\n%s", respStr)
 
-	// 7. 处理错误
 	if resp.StatusCode != http.StatusOK {
-		errMsg := respStr
-		if errMsg == "" {
-			errMsg = "空响应"
-		}
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errMsg)
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, respStr)
 	}
 
-	// 8. 解析任务数组
+	// 1. 尝试解析为数组
 	var tasks []models.DeployRequest
-	if err := json.Unmarshal(body, &tasks); err != nil {
-		return nil, fmt.Errorf("解析 JSON 失败: %v, 响应: %s", err, respStr)
+	if err := json.Unmarshal(body, &tasks); err == nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "QueryTasks",
+			"count":  len(tasks),
+			"took":   time.Since(startTime),
+		}).Infof("查询成功")
+		return tasks, nil
 	}
 
-	logrus.WithFields(logrus.Fields{
-		"time":    time.Now().Format("2006-01-02 15:04:05"),
-		"method":  "QueryTasks",
-		"count":   len(tasks),
-		"took":    time.Since(startTime),
-	}).Infof("查询成功")
-	return tasks, nil
+	// 2. 尝试解析为对象（无任务）
+	var empty EmptyResponse
+	if err := json.Unmarshal(body, &empty); err == nil {
+		if empty.Message == "暂无待处理任务" {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "QueryTasks",
+				"took":   time.Since(startTime),
+			}).Infof("无待处理任务")
+			return []models.DeployRequest{}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("未知响应格式: %s", respStr)
 }

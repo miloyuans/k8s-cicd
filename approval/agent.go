@@ -49,67 +49,35 @@ func (a *Approval) Start() {
 }
 
 // periodicQueryAndSync 周期性调用 /query 并同步到 Mongo
-func (a *Approval) periodicQueryAndSync() {
-	ticker := time.NewTicker(a.cfg.API.QueryInterval)
-	defer ticker.Stop()
+for _, service := range services {
+    if service == "" {
+        continue
+    }
+    for _, env := range envs {
+        if !contains(a.cfg.Query.ConfirmEnvs, env) {
+            continue
+        }
 
-	for range ticker.C {
-		startTime := time.Now()
+        tasks, err := a.queryClient.QueryTasks(service, []string{env})
+        if err != nil {
+            logrus.Errorf("查询任务失败 [%s@%s]: %v", service, env, err)
+            continue
+        }
 
-		// 1. 从 Mongo 获取已 push 的服务/环境
-		services, envs, err := a.mongo.GetPushedServicesAndEnvs()
-		if err != nil {
-			logrus.Errorf("获取 push 数据失败: %v", err)
-			continue
-		}
-
-		if len(services) == 0 || len(envs) == 0 {
-			logrus.Info("暂无已 push 的服务/环境")
-			continue
-		}
-
-		// 2. 遍历调用 /query
-		for _, service := range services {
-			if service == "" {
-				logrus.Warn("跳过空服务名")
-				continue
-			}
-
-			for _, env := range envs {
-				// 仅对配置中需确认的环境处理
-				if !contains(a.cfg.Query.ConfirmEnvs, env) {
-					continue
-				}
-
-				// 调用 /query 接口
-				tasks, err := a.queryClient.QueryTasks(service, []string{env})
-				if err != nil {
-					logrus.Errorf("查询任务失败 [%s@%s]: %v", service, env, err)
-					continue
-				}
-
-				// 存储到 Mongo（防重）
-				for i := range tasks {
-					task := &tasks[i]
-					task.Namespace = a.cfg.EnvMapping.Mappings[env]
-					task.ConfirmationStatus = "pending"
-					task.PopupSent = false
-					if task.TaskID == "" {
-						task.TaskID = fmt.Sprintf("%s-%s-%s", task.Service, task.Version, env)
-					}
-					if err := a.mongo.StoreTaskIfNotExists(*task); err != nil {
-						logrus.Warnf("存储任务失败: %v", err)
-					}
-				}
-			}
-		}
-
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "periodicQueryAndSync",
-			"took":   time.Since(startTime),
-		}).Infof("查询同步完成")
-	}
+        // 防重存储
+        for i := range tasks {
+            task := &tasks[i]
+            task.Namespace = a.cfg.EnvMapping.Mappings[env]
+            task.ConfirmationStatus = "pending"
+            task.PopupSent = false
+            if task.TaskID == "" {
+                task.TaskID = fmt.Sprintf("%s-%s-%s", task.Service, task.Version, env)
+            }
+            if err := a.mongo.StoreTaskIfNotExists(*task); err != nil {
+                logrus.Debugf("任务已存在: %s", task.TaskID)
+            }
+        }
+    }
 }
 
 // periodicCleanupDeletedTasks 定期清理 delete_pending 任务
