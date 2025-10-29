@@ -8,76 +8,29 @@ import (
 	"strings"
 	"time"
 
-	"k8s-cicd/agent/config" // 正确路径
+	"k8s-cicd/agent/config" // 只用于日志
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
 
-// TelegramBot 单个机器人配置
-type TelegramBot struct {
-	Name         string              // 机器人名称
-	Token        string              // Bot Token
-	GroupID      string              // 群组ID
-	Services     map[string][]string // 服务匹配规则
-	RegexMatch   bool                // 是否使用正则匹配
-	IsEnabled    bool                // 是否启用
-}
-
-// BotManager 机器人管理器
+// BotManager 简化版：仅发送通知
 type BotManager struct {
-	Bots map[string]*TelegramBot // 机器人映射
+	Token   string // 单一 Token
+	GroupID string // 单一群组
 }
 
-// NewBotManager 创建管理器
-func NewBotManager(bots []config.TelegramBot) *BotManager {
-	m := &BotManager{
-		Bots: make(map[string]*TelegramBot),
+// NewBotManager 创建简化版 BotManager
+func NewBotManager(token, groupID string) *BotManager {
+	bm := &BotManager{
+		Token:   token,
+		GroupID: groupID,
 	}
-
-	for i := range bots {
-		if bots[i].IsEnabled {
-			bot := &TelegramBot{
-				Name:       bots[i].Name,
-				Token:      bots[i].Token,
-				GroupID:    bots[i].GroupID,
-				Services:   bots[i].Services,
-				RegexMatch: bots[i].RegexMatch,
-				IsEnabled:  true,
-			}
-			m.Bots[bot.Name] = bot
-			logrus.Infof(color.GreenString("Telegram机器人 [%s] 已启用"), bot.Name)
-		}
-	}
-
-	if len(m.Bots) == 0 {
-		logrus.Warn("未启用任何Telegram机器人")
-	}
-	logrus.Info(color.GreenString("BotManager创建成功"))
-	return m
+	logrus.Info(color.GreenString("Telegram BotManager 创建成功（通知专用）"))
+	return bm
 }
 
-// getBotForService 根据服务名选择机器人
-func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
-	for _, bot := range bm.Bots {
-		for _, serviceList := range bot.Services {
-			for _, pattern := range serviceList {
-				if bot.RegexMatch {
-					if strings.Contains(service, pattern) {
-						return bot, nil
-					}
-				} else {
-					if strings.HasPrefix(strings.ToUpper(service), strings.ToUpper(pattern)) {
-						return bot, nil
-					}
-				}
-			}
-		}
-	}
-	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
-}
-
-// escapeMarkdownV2 转义 MarkdownV2 特殊字符
+// escapeMarkdownV2 转义 MarkdownV2
 func escapeMarkdownV2(text string) string {
 	escapeChars := []rune{'_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'}
 	var result strings.Builder
@@ -99,16 +52,16 @@ func containsRune(slice []rune, r rune) bool {
 	return false
 }
 
-// sendMessage 发送普通消息
-func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode string) (int, error) {
+// sendMessage 发送消息
+func (bm *BotManager) sendMessage(text, parseMode string) (int, error) {
 	text = escapeMarkdownV2(text)
 	payload := map[string]interface{}{
-		"chat_id":    chatID,
+		"chat_id":    bm.GroupID,
 		"text":       text,
 		"parse_mode": parseMode,
 	}
 	jsonData, _ := json.Marshal(payload)
-	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token),
+	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bm.Token),
 		"application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return 0, err
@@ -132,7 +85,7 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode stri
 	return messageID, nil
 }
 
-// generateMarkdownMessage 生成美观的Markdown部署通知（100% 保留原模板）
+// generateMarkdownMessage 生成通知（100% 保留原模板）
 func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
 	safe := escapeMarkdownV2
 	status := "Success *部署成功*"
@@ -155,26 +108,13 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 		time.Now().Format("2006-01-02 15:04:05"))
 }
 
-// SendNotification 发送部署通知（唯一保留的 Telegram 功能）
+// SendNotification 发送部署通知
 func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
 	startTime := time.Now()
 
-	// 1. 选择机器人
-	bot, err := bm.getBotForService(service)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "SendNotification",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("选择机器人失败: %v"), err)
-		return err
-	}
-
-	// 2. 生成消息
 	message := bm.generateMarkdownMessage(service, env, user, oldVersion, newVersion, success)
 
-	// 3. 发送
-	_, err = bm.sendMessage(bot, bot.GroupID, message, "MarkdownV2")
+	_, err := bm.sendMessage(message, "MarkdownV2")
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -184,7 +124,6 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 		return err
 	}
 
-	// 4. 成功日志
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "SendNotification",
@@ -193,7 +132,7 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 	return nil
 }
 
-// Stop 停止（空实现，保留接口）
+// Stop 空实现
 func (bm *BotManager) Stop() {
 	logrus.Info(color.GreenString("Telegram BotManager 停止"))
 }

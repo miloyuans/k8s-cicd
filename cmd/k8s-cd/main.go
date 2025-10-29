@@ -36,9 +36,19 @@ func main() {
 		logrus.Fatalf("Kubernetes 连接失败: %v", err)
 	}
 
+
+	// 从环境变量或配置读取
+	token := os.Getenv("TELEGRAM_TOKEN")
+	groupID := os.Getenv("TELEGRAM_GROUP_ID")
+
+	if token == "" || groupID == "" {
+		logrus.Fatal("TELEGRAM_TOKEN 和 TELEGRAM_GROUP_ID 必须设置")
+	}
+
+	
+
 	apiClient := agent.NewAPIClient(&cfg.API)
-	botMgr := telegram.NewBotManager(cfg.Telegram.Bots)
-	botMgr.SetGlobalAllowedUsers(cfg.Telegram.AllowedUsers)
+	botMgr := telegram.NewBotManager(token, groupID)
 
 	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers)
 
