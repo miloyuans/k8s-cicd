@@ -41,10 +41,3 @@ type ImageSnapshot struct {
 	RecordedAt time.Time `bson:"recorded_at" json:"recorded_at"`
 	TaskID     string    `bson:"task_id" json:"task_id"`
 }
-
-// Task 任务队列中的任务
-type Task struct {
-	DeployRequest
-	ID      string `json:"id" bson:"_id"`           // task_id
-	Retries int    `json:"retries" bson:"retries"` // 重试次数
-}

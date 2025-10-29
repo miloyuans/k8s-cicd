@@ -103,7 +103,7 @@ func (a *Agent) periodicPollTasksFromMongo() {
 			// 1. 遍历所有环境
 			for env, namespace := range a.cfg.EnvMapping.Mappings {
 				// 2. 查询状态为 confirmed 的任务
-				tasks, err := a.mongo.GetTasksByStatus(env, "confirmed")
+				deployReqs, err := a.mongo.GetTasksByStatus(env, "confirmed")
 				if err != nil {
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -115,24 +115,26 @@ func (a *Agent) periodicPollTasksFromMongo() {
 				}
 
 				// 3. 提交任务到队列
-				for i := range tasks {
-					task := tasks[i]
-					task.Namespace = namespace // 补全 namespace
-					a.taskQ.Enqueue(&models.Task{
-						DeployRequest: task,
-						ID:            task.Service + "-" + task.Version,
+				for _, dr := range deployReqs {
+					// 补全 namespace
+					dr.Namespace = namespace
+					// 创建 task.Task
+					t := &task.Task{
+						DeployRequest: dr,
+						ID:            fmt.Sprintf("%s-%s", dr.Service, dr.Version),
 						Retries:       0,
-					})
+					}
+					a.taskQ.Enqueue(t)
 				}
 
-				if len(tasks) > 0 {
+				if len(deployReqs) > 0 {
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "periodicPollTasksFromMongo",
 						"env":    env,
-						"count":  len(tasks),
+						"count":  len(deployReqs),
 						"took":   time.Since(startTime),
-					}).Infof(color.GreenString("发现 %d 个待部署任务"), len(tasks))
+					}).Infof(color.GreenString("发现 %d 个待部署任务"), len(deployReqs))
 				}
 			}
 		}
