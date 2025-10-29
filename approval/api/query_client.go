@@ -13,11 +13,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// QueryRequest /query 请求体（包含数组）
+// QueryRequest /query 请求体（字段名必须为 environments）
 type QueryRequest struct {
-	Services     []string `json:"services"`      // 必填数组
-	Environments []string `json:"environments"`  // 必填数组
-	User         string   `json:"user"`          // 必填
+	Service      string   `json:"service"`      // 必填
+	Environments []string `json:"environments"` // 必填：数组
 }
 
 // QueryClient 查询客户端
@@ -36,26 +35,36 @@ func NewQueryClient(baseURL string) *QueryClient {
 	}
 }
 
-// QueryTasks 调用 /query 接口
-func (c *QueryClient) QueryTasks(services []string, envs []string, user string) ([]models.DeployRequest, error) {
+// QueryTasks 调用 /query 接口（仅传 service 和 environments 数组）
+func (c *QueryClient) QueryTasks(service string, envs []string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 
+	// 1. 构造请求体
 	reqBody := QueryRequest{
-		Services:     services,
+		Service:      service,
 		Environments: envs,
-		User:         user,
 	}
 	jsonData, _ := json.Marshal(reqBody)
 
+	// 2. 发送请求
 	url := fmt.Sprintf("%s/query", c.BaseURL)
 	resp, err := c.HTTPClient.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return nil, fmt.Errorf("网络错误: %v", err)
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "QueryTasks",
+			"service": service,
+			"envs":    envs,
+			"took":    time.Since(startTime),
+		}).Errorf("调用 /query 网络错误: %v", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
+	// 3. 读取响应体
 	body, _ := io.ReadAll(resp.Body)
 
+	// 4. 处理错误响应
 	if resp.StatusCode != http.StatusOK {
 		errMsg := string(bytes.TrimSpace(body))
 		if errMsg == "" {
@@ -64,9 +73,8 @@ func (c *QueryClient) QueryTasks(services []string, envs []string, user string) 
 		logrus.WithFields(logrus.Fields{
 			"time":     time.Now().Format("2006-01-02 15:04:05"),
 			"method":   "QueryTasks",
-			"services": services,
+			"service":  service,
 			"envs":     envs,
-			"user":     user,
 			"status":   resp.StatusCode,
 			"response": errMsg,
 			"took":     time.Since(startTime),
@@ -74,6 +82,7 @@ func (c *QueryClient) QueryTasks(services []string, envs []string, user string) 
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errMsg)
 	}
 
+	// 5. 解析返回数组
 	var tasks []models.DeployRequest
 	if err := json.Unmarshal(body, &tasks); err != nil {
 		return nil, fmt.Errorf("解析 JSON 失败: %v, 响应: %s", err, string(body))
@@ -82,8 +91,11 @@ func (c *QueryClient) QueryTasks(services []string, envs []string, user string) 
 	logrus.WithFields(logrus.Fields{
 		"time":    time.Now().Format("2006-01-02 15:04:05"),
 		"method":  "QueryTasks",
+		"service": service,
+		"envs":    envs,
 		"count":   len(tasks),
 		"took":    time.Since(startTime),
-	}).Infof("查询成功")
+	}).Infof("查询到 %d 个任务", len(tasks))
+
 	return tasks, nil
 }
