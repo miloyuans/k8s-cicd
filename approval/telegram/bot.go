@@ -147,20 +147,16 @@ func (bm *BotManager) pollPendingTasks() {
 	for {
 		select {
 		case <-ticker.C:
-			// 1. 遍历所有需要确认的环境
 			for _, env := range bm.cfg.Query.ConfirmEnvs {
-				// 2. 从 Mongo 查询 pending 且未发送弹窗的任务
 				tasks, err := bm.mongo.GetPendingTasks(env)
 				if err != nil {
 					logrus.Errorf("查询 %s 待确认任务失败: %v", env, err)
 					continue
 				}
 
-				// 3. 遍历每条任务
 				for i := range tasks {
 					task := &tasks[i]
 
-					// 4. 内存防重（防止重复发送）
 					bm.mu.Lock()
 					if bm.sentTasks[task.TaskID] {
 						bm.mu.Unlock()
@@ -169,13 +165,10 @@ func (bm *BotManager) pollPendingTasks() {
 					bm.sentTasks[task.TaskID] = true
 					bm.mu.Unlock()
 
-					// 5. 并发发送弹窗
 					go func(t *models.DeployRequest) {
 						startTime := time.Now()
 
-						// 修复：sendConfirmation 必须返回 error
-						err := bm.sendConfirmation(t)
-						if err != nil {
+						if err := bm.sendConfirmation(t); err != nil {
 							logrus.WithFields(logrus.Fields{
 								"time":     time.Now().Format("2006-01-02 15:04:05"),
 								"method":   "pollPendingTasks",
@@ -183,14 +176,12 @@ func (bm *BotManager) pollPendingTasks() {
 								"took":     time.Since(startTime),
 							}).Errorf("弹窗发送失败: %v", err)
 
-							// 失败后释放标记（允许重试）
 							bm.mu.Lock()
 							delete(bm.sentTasks, t.TaskID)
 							bm.mu.Unlock()
 							return
 						}
 
-						// 成功后标记已发送到 Mongo
 						if err := bm.mongo.MarkPopupSent(t.TaskID, 0); err != nil {
 							logrus.Warnf("标记弹窗已发送失败: %v", err)
 						}
@@ -211,24 +202,20 @@ func (bm *BotManager) pollPendingTasks() {
 	}
 }
 
-// sendConfirmation 发送确认弹窗
-func (bm *BotManager) sendConfirmation(task *models.DeployRequest) {
+// sendConfirmation 发送确认弹窗（返回 error）
+func (bm *BotManager) sendConfirmation(task *models.DeployRequest) error {
 	startTime := time.Now()
 	env := task.Environments[0]
 
-	// 1. 选择机器人
 	bot, err := bm.getBotForService(task.Service)
 	if err != nil {
-		logrus.Errorf("选择机器人失败: %v", err)
-		return
+		return fmt.Errorf("选择机器人失败: %w", err)
 	}
 
-	// 2. 生成 task_id
 	if task.TaskID == "" {
 		task.TaskID = uuid.New().String()
 	}
 
-	// 3. 构建 @用户 列表
 	var mentions strings.Builder
 	allowed := append(bot.AllowedUsers, bm.globalAllowedUsers...)
 	seen := make(map[string]bool)
@@ -241,7 +228,6 @@ func (bm *BotManager) sendConfirmation(task *models.DeployRequest) {
 		}
 	}
 
-	// 4. 弹窗消息模板（100% 保留）
 	message := fmt.Sprintf("*Deployment Confirmation 部署确认*\n\n"+
 		"**服务**: `%s`\n"+
 		"**环境**: `%s`\n"+
@@ -256,7 +242,6 @@ func (bm *BotManager) sendConfirmation(task *models.DeployRequest) {
 		mentions.String(),
 	)
 
-	// 5. 短 callback_data
 	confirmData := fmt.Sprintf("confirm:%s", task.TaskID)
 	rejectData := fmt.Sprintf("reject:%s", task.TaskID)
 
@@ -269,28 +254,20 @@ func (bm *BotManager) sendConfirmation(task *models.DeployRequest) {
 		},
 	}
 
-	// 6. 发送弹窗
 	messageID, err := bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2")
 	if err != nil {
 		return fmt.Errorf("发送弹窗失败: %w", err)
-		logrus.Errorf(color.RedString("弹窗发送失败: %v"), err)
-		// 失败后释放内存标记
-		bm.mu.Lock()
-		delete(bm.sentTasks, task.TaskID)
-		bm.mu.Unlock()
-		return
-	}
-
-	// 7. 标记已发送
-	if err := bm.mongo.MarkPopupSent(task.TaskID, messageID); err != nil {
-		logrus.Warnf("标记弹窗发送失败: %v", err)
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "sendConfirmation",
-		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("弹窗发送成功: %s v%s [%s] -> task_id=%s"), task.Service, task.Version, env, task.TaskID)
+		"time":       time.Now().Format("2006-01-02 15:04:05"),
+		"method":     "sendConfirmation",
+		"task_id":    task.TaskID,
+		"message_id": messageID,
+		"took":       time.Since(startTime),
+	}).Infof("弹窗发送成功")
+
+	return nil
 }
 
 // HandleCallback 处理回调
@@ -307,13 +284,11 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}) {
 
 	logrus.Infof("收到回调: username=%s, data=%s", userName, data)
 
-	// 1. 权限检查
 	if !bm.isUserAllowed(userName) {
 		logrus.Warnf("用户无权限: %s", userName)
 		return
 	}
 
-	// 2. 解析 action:task_id
 	parts := strings.SplitN(data, ":", 2)
 	if len(parts) != 2 {
 		logrus.Warnf("callback_data 格式错误: %s", data)
@@ -321,21 +296,18 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}) {
 	}
 	action, taskID := parts[0], parts[1]
 
-	// 3. 获取任务
 	task, err := bm.mongo.GetTaskByID(taskID)
 	if err != nil {
 		logrus.Warnf("任务未找到 task_id=%s: %v", taskID, err)
 		return
 	}
 
-	// 4. 删除原弹窗
 	message := callback["message"].(map[string]interface{})
 	messageID := int(message["message_id"].(float64))
 	chatID := fmt.Sprintf("%v", message["chat"].(map[string]interface{})["id"])
 	bot, _ := bm.getBotForService(task.Service)
 	bm.DeleteMessage(bot, chatID, messageID)
 
-	// 5. 反馈消息
 	actionText := map[string]string{"confirm": "确认", "reject": "拒绝"}[action]
 	feedback := fmt.Sprintf("Success 用户 @%s 已 *%s* 部署: `%s` v`%s` 在 `%s`",
 		escapeMarkdownV2(userName), actionText,
@@ -347,10 +319,9 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}) {
 		bm.DeleteMessage(bot, chatID, feedbackID)
 	}()
 
-	// 6. 更新状态
 	newStatus := "confirmed"
 	if action == "reject" {
-		newStatus = "rejected"
+		newStatus = "delete_pending"
 	}
 	if err := bm.mongo.UpdateTaskStatus(taskID, newStatus); err != nil {
 		logrus.Errorf("更新任务状态失败: %v", err)
@@ -360,7 +331,7 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}) {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "HandleCallback",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("回调处理完成: %s task_id=%s"), action, taskID)
+	}).Infof("回调处理完成: %s task_id=%s", action, taskID)
 }
 
 // isUserAllowed 检查用户权限
