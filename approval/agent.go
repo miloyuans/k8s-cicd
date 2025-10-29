@@ -72,25 +72,14 @@ func (a *Approval) periodicQueryAndSync() {
 		// 2. 遍历调用 /query
 		for _, service := range services {
 			for _, env := range envs {
+				// 仅对配置中需确认的环境处理
 				if !contains(a.cfg.Query.ConfirmEnvs, env) {
 					continue
 				}
 
-				// 传入 []string
+				// 修复：使用 = 而不是 :=
+				// 修复：传入 []string{service} 和 []string{env}
 				tasks, err := a.queryClient.QueryTasks([]string{service}, []string{env})
-				if err != nil {
-					logrus.Errorf("查询任务失败 [%s@%s]: %v", service, env, err)
-					continue
-				}
-
-				// 3. 从环境变量或配置获取 user
-				user := os.Getenv("APPROVAL_QUERY_USER")
-				if user == "" {
-					user = "deployer"
-				}
-
-				// 4. 调用 /query 接口（传入 []string{service} 和 []string{env}）
-				tasks, err := a.queryClient.QueryTasks(service, []string{env})
 				if err != nil {
 					logrus.Errorf("查询任务失败 [%s@%s]: %v", service, env, err)
 					continue
