@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"k8s-cicd/agent/config"
+	"k8s-cicd/agent/config" // 正确路径
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
@@ -16,12 +16,12 @@ import (
 
 // TelegramBot 单个机器人配置
 type TelegramBot struct {
-	Name       string              // 机器人名称
-	Token      string              // Bot Token
-	GroupID    string              // 群组ID
-	Services   map[string][]string // 服务匹配规则
-	RegexMatch bool                // 是否使用正则匹配
-	IsEnabled  bool                // 是否启用
+	Name         string              // 机器人名称
+	Token        string              // Bot Token
+	GroupID      string              // 群组ID
+	Services     map[string][]string // 服务匹配规则
+	RegexMatch   bool                // 是否使用正则匹配
+	IsEnabled    bool                // 是否启用
 }
 
 // BotManager 机器人管理器
@@ -63,12 +63,10 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 		for _, serviceList := range bot.Services {
 			for _, pattern := range serviceList {
 				if bot.RegexMatch {
-					// 正则匹配（简化，实际可用 regexp）
 					if strings.Contains(service, pattern) {
 						return bot, nil
 					}
 				} else {
-					// 前缀匹配（忽略大小写）
 					if strings.HasPrefix(strings.ToUpper(service), strings.ToUpper(pattern)) {
 						return bot, nil
 					}

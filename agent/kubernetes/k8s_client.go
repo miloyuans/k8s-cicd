@@ -6,10 +6,7 @@ import (
 	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -267,7 +264,7 @@ func (k *K8sClient) CaptureImageSnapshot(service, namespace string) (*models.Ima
 		c := sts.Spec.Template.Spec.Containers[0]
 		snapshot.Container = c.Name
 		snapshot.Image = c.Image
-		snapshot.Tag = ExtractTag(c.Image)
+  			snapshot.Tag = ExtractTag(c.Image)
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "CaptureImageSnapshot",
