@@ -9,22 +9,37 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// APIConfig API 服务配置
+// TelegramBot 单个机器人配置
+type TelegramBot struct {
+	Name         string              `yaml:"name"`          // 机器人名称
+	Token        string              `yaml:"token"`         // Bot Token
+	GroupID      string              `yaml:"group_id"`      // 群组ID
+	Services     map[string][]string `yaml:"services"`      // 服务匹配规则
+	RegexMatch   bool                `yaml:"regex_match"`   // 是否使用正则匹配
+	IsEnabled    bool                `yaml:"enabled"`       // 是否启用
+	AllowedUsers []string            `yaml:"allowed_users"` // 允许操作的用户
+}
+
+// TelegramConfig Telegram 配置
+type TelegramConfig struct {
+	Bots           []TelegramBot `yaml:"bots"`            // 机器人列表
+	AllowedUsers   []string      `yaml:"allowed_users"`   // 全局允许用户
+	ConfirmTimeout time.Duration `yaml:"confirm_timeout"` // 弹窗超时时间
+}
+
+// APIConfig API 配置（用于查询任务）
 type APIConfig struct {
 	BaseURL       string        `yaml:"base_url"`       // API 基础地址
-	PushInterval  time.Duration `yaml:"push_interval"`  // 推送间隔
-	QueryInterval time.Duration `yaml:"query_interval"` // 任务轮询间隔（从 Mongo）
+	QueryInterval time.Duration `yaml:"query_interval"` // 查询任务间隔
 	MaxRetries    int           `yaml:"max_retries"`    // 最大重试次数
 }
 
-// K8sAuthConfig Kubernetes 认证配置
-type K8sAuthConfig struct {
-	AuthType   string `yaml:"auth_type"`    // 认证类型: kubeconfig / serviceaccount
-	Kubeconfig string `yaml:"kubeconfig"`   // kubeconfig 路径
-	Namespace  string `yaml:"namespace"`    // 默认命名空间
+// QueryConfig 弹窗确认环境配置
+type QueryConfig struct {
+	ConfirmEnvs []string `yaml:"confirm_envs"` // 需要弹窗确认的环境
 }
 
-// MongoConfig MongoDB 配置
+// MongoConfig MongoDB 配置（与 k8s-cd 共享）
 type MongoConfig struct {
 	URI        string           `yaml:"uri"`         // MongoDB 连接 URI
 	TTL        time.Duration    `yaml:"ttl"`         // 数据过期时间
@@ -32,19 +47,11 @@ type MongoConfig struct {
 	EnvMapping EnvMappingConfig `yaml:"env_mapping"` // 环境映射
 }
 
-// TaskConfig 任务队列配置
-type TaskConfig struct {
-	MaxRetries     int `yaml:"max_retries"`         // 最大重试次数
+// PopupConfig 弹窗防重配置
+type PopupConfig struct {
+	MaxRetries     int `yaml:"max_retries"`         // 最大弹窗重试次数
 	RetryDelay     int `yaml:"retry_delay_seconds"` // 重试延迟
-	QueueWorkers   int `yaml:"queue_workers"`       // 工作线程数
-	MaxQueueSize   int `yaml:"max_queue_size"`      // 最大队列大小
-}
-
-// DeployConfig 部署配置
-type DeployConfig struct {
-	WaitTimeout     time.Duration `yaml:"wait_timeout"`     // 部署等待超时
-	RollbackTimeout time.Duration `yaml:"rollback_timeout"` // 回滚等待超时
-	PollInterval    time.Duration `yaml:"poll_interval"`    // 健康检查间隔
+	ConcurrentLimit int `yaml:"concurrent_limit"`   // 并发弹窗限制
 }
 
 // EnvMappingConfig 环境到命名空间的映射
@@ -54,11 +61,11 @@ type EnvMappingConfig struct {
 
 // Config 完整配置结构
 type Config struct {
+	Telegram   TelegramConfig   `yaml:"telegram"`
 	API        APIConfig        `yaml:"api"`
-	Kubernetes K8sAuthConfig    `yaml:"kubernetes"`
+	Query      QueryConfig      `yaml:"query"`
 	Mongo      MongoConfig      `yaml:"mongo"`
-	Task       TaskConfig       `yaml:"task"`
-	Deploy     DeployConfig     `yaml:"deploy"`
+	Popup      PopupConfig      `yaml:"popup"`
 	EnvMapping EnvMappingConfig `yaml:"env_mapping"`
 	LogLevel   string           `yaml:"log_level"` // 日志级别
 }
@@ -110,21 +117,28 @@ func LoadConfig(filename string) (*Config, error) {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "LoadConfig",
 		"took":   time.Since(startTime),
-	}).Info("配置加载成功")
+	}).Info("k8s-approval 配置加载成功")
 	return &cfg, nil
 }
 
 // setDefaults 设置默认值
 func (c *Config) setDefaults() {
 	// API 默认值
-	if c.API.PushInterval == 0 {
-		c.API.PushInterval = 30 * time.Second
-	}
 	if c.API.QueryInterval == 0 {
 		c.API.QueryInterval = 15 * time.Second
 	}
 	if c.API.MaxRetries == 0 {
 		c.API.MaxRetries = 3
+	}
+
+	// Telegram 默认值
+	if c.Telegram.ConfirmTimeout == 0 {
+		c.Telegram.ConfirmTimeout = 24 * time.Hour
+	}
+
+	// 查询默认值
+	if len(c.Query.ConfirmEnvs) == 0 {
+		c.Query.ConfirmEnvs = []string{"eks", "eks-pro"}
 	}
 
 	// MongoDB 默认值
@@ -138,37 +152,15 @@ func (c *Config) setDefaults() {
 		c.Mongo.URI = "mongodb://localhost:27017"
 	}
 
-	// 任务队列默认值
-	if c.Task.MaxRetries == 0 {
-		c.Task.MaxRetries = 3
+	// 弹窗防重默认值
+	if c.Popup.MaxRetries == 0 {
+		c.Popup.MaxRetries = 3
 	}
-	if c.Task.RetryDelay == 0 {
-		c.Task.RetryDelay = 30
+	if c.Popup.RetryDelay == 0 {
+		c.Popup.RetryDelay = 300 // 5 分钟
 	}
-	if c.Task.QueueWorkers == 0 {
-		c.Task.QueueWorkers = 5
-	}
-	if c.Task.MaxQueueSize == 0 {
-		c.Task.MaxQueueSize = 100
-	}
-
-	// 部署默认值
-	if c.Deploy.WaitTimeout == 0 {
-		c.Deploy.WaitTimeout = 5 * time.Minute
-	}
-	if c.Deploy.RollbackTimeout == 0 {
-		c.Deploy.RollbackTimeout = 3 * time.Minute
-	}
-	if c.Deploy.PollInterval == 0 {
-		c.Deploy.PollInterval = 5 * time.Second
-	}
-
-	// Kubernetes 默认值
-	if c.Kubernetes.AuthType == "" {
-		c.Kubernetes.AuthType = "kubeconfig"
-	}
-	if c.Kubernetes.Namespace == "" {
-		c.Kubernetes.Namespace = "default"
+	if c.Popup.ConcurrentLimit == 0 {
+		c.Popup.ConcurrentLimit = 10
 	}
 
 	// 环境映射默认值
@@ -183,6 +175,18 @@ func (c *Config) setDefaults() {
 
 // mergeEnvVars 合并环境变量
 func (c *Config) mergeEnvVars() {
+	// Telegram 环境变量
+	if token := os.Getenv("TELEGRAM_TOKEN"); token != "" {
+		for i := range c.Telegram.Bots {
+			c.Telegram.Bots[i].Token = token
+		}
+	}
+	if groupID := os.Getenv("TELEGRAM_GROUP_ID"); groupID != "" {
+		for i := range c.Telegram.Bots {
+			c.Telegram.Bots[i].GroupID = groupID
+		}
+	}
+
 	// MongoDB 环境变量
 	if uri := os.Getenv("MONGO_URI"); uri != "" {
 		c.Mongo.URI = uri

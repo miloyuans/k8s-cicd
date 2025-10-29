@@ -1,0 +1,45 @@
+```
+telegram:
+  bots:
+    - name: "deploy-bot"
+      token: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+      group_id: "-1001234567890"
+      services:
+        web: ["web", "frontend"]
+        api: ["api", "backend"]
+      regex_match: false
+      enabled: true
+      allowed_users: ["alice", "bob"]
+  allowed_users: ["alice", "bob", "charlie"]
+  confirm_timeout: 24h
+
+api:
+  base_url: "http://k8s-cd:8080"
+  query_interval: 15s
+  max_retries: 3
+
+query:
+  confirm_envs: ["eks", "eks-pro"]
+
+mongo:
+  uri: "mongodb://localhost:27017"
+  ttl: 720h
+  max_retries: 3
+  env_mapping:
+    mappings:
+      eks: ns-eks
+      eks-pro: ns-pro
+      prod: international
+
+popup:
+  max_retries: 3
+  retry_delay_seconds: 300
+  concurrent_limit: 10
+
+env_mapping:
+  mappings:
+    eks: ns-eks
+    eks-pro: ns-pro
+
+log_level: "info"
+```

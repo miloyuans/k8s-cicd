@@ -1,5 +1,3 @@
-// main.go
-//k8s-cicd/cmd/k8s-cd/main.go
 package main
 
 import (
@@ -7,87 +5,57 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"k8s-cicd/agent"
 	"k8s-cicd/agent/client"
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/kubernetes"
+	"k8s-cicd/agent/task"
+	"k8s-cicd/agent/telegram"
 
 	"github.com/sirupsen/logrus"
 )
 
-// main 程序入口
 func main() {
-	startTime := time.Now()
-	// 步骤1：解析命令行参数
-	configFile := flag.String("config", "config.yaml", "配置文件路径")
+	configFile := flag.String("config", "config.yaml", "config file")
 	flag.Parse()
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "main",
-		"took":   time.Since(startTime),
-	}).Info("K8s-CICD Agent v1.0 启动")
-
-	// 步骤2：加载配置
 	cfg, err := config.LoadConfig(*configFile)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "main",
-			"took":   time.Since(startTime),
-		}).Fatalf("配置加载失败: %v", err)
+		logrus.Fatalf("加载配置失败: %v", err)
 	}
 
-	// 步骤3：创建MongoDB客户端
 	mongoClient, err := client.NewMongoClient(&cfg.Mongo)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "main",
-			"took":   time.Since(startTime),
-		}).Fatalf("MongoDB连接失败: %v", err)
+		logrus.Fatalf("MongoDB 连接失败: %v", err)
 	}
-	defer func() {
-		if err := mongoClient.Close(); err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "main",
-				"took":   time.Since(startTime),
-			}).Errorf("关闭MongoDB失败: %v", err)
-		}
-	}()
+	defer mongoClient.Close()
 
-	// 步骤4：创建Kubernetes客户端
 	k8sClient, err := kubernetes.NewK8sClient(&cfg.Kubernetes, &cfg.Deploy)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "main",
-			"took":   time.Since(startTime),
-		}).Fatalf("Kubernetes连接失败: %v", err)
+		logrus.Fatalf("Kubernetes 连接失败: %v", err)
 	}
 
-	// 步骤5：创建并启动Agent
-	ag := agent.NewAgent(cfg, mongoClient, k8sClient)
+	apiClient := agent.NewAPIClient(&cfg.API)
+	botMgr := telegram.NewBotManager(cfg.Telegram.Bots)
+	botMgr.SetGlobalAllowedUsers(cfg.Telegram.AllowedUsers)
+
+	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers)
+
+	ag := &agent.Agent{
+		cfg:       cfg,
+		mongo:     mongoClient,
+		k8s:       k8sClient,
+		taskQ:     taskQ,
+		botMgr:    botMgr,
+		apiClient: apiClient,
+	}
+
 	ag.Start()
 
-	// 步骤6：等待关闭信号
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	<-c
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "main",
-		"took":   time.Since(startTime),
-	}).Info("收到关闭信号，优雅关闭")
 	ag.Stop()
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "main",
-		"took":   time.Since(startTime),
-	}).Info("Agent关闭完成")
 }

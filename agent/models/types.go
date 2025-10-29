@@ -1,81 +1,50 @@
-// types.go
 package models
 
 import (
-	"encoding/json"
 	"time"
 )
 
-// PushRequest 推送请求数据结构
+// PushRequest 推送服务发现数据
 type PushRequest struct {
-	Services     []string `json:"services" bson:"services"`         // 服务列表
-	Environments []string `json:"environments" bson:"environments"` // 环境列表
+	Services     []string `json:"services" bson:"services"`
+	Environments []string `json:"environments" bson:"environments"`
 }
 
-// DeployRequest 单个部署任务请求
+// DeployRequest 部署任务
 type DeployRequest struct {
-	Service           string    `json:"service" bson:"service"`           // 服务名
-	Environments      []string  `json:"environments" bson:"environments"` // 环境列表
-	Namespace         string    `json:"namespace" bson:"namespace"`       // 命名空间
-	Version           string    `json:"version" bson:"version"`           // 版本（完整image:tag）
-	User              string    `json:"user" bson:"user"`                 // 用户
-	Status            string    `json:"status" bson:"status"`             // 状态
-	CreatedAt         time.Time `json:"created_at" bson:"created_at"`     // 创建时间
-	ConfirmationStatus string    `json:"confirmation_status" bson:"confirmation_status"` // 弹窗状态: pending, sent, confirmed, rejected, failed
-	PopupRetries      int       `json:"popup_retries" bson:"popup_retries"` // 弹窗重试次数
-	TaskID            string    `json:"task_id" bson:"task_id"` // 新增：短唯一ID
+	Service      string    `json:"service" bson:"service"`           // 服务名
+	Environments []string  `json:"environments" bson:"environments"` // 环境列表（仅一个）
+	Namespace    string    `json:"namespace" bson:"namespace"`       // 命名空间
+	Version      string    `json:"version" bson:"version"`           // 镜像版本（完整 tag）
+	User         string    `json:"user" bson:"user"`                 // 操作人
+	CreatedAt    time.Time `json:"created_at" bson:"created_at"`     // 创建时间
+	Status       string    `json:"status" bson:"status"`             // 执行状态: pending, running, success, failure
+	TaskID       string    `json:"task_id" bson:"task_id"`           // 唯一任务ID
 }
 
-// QueryRequest 查询请求数据结构
-type QueryRequest struct {
-	Environment string `json:"environment" bson:"environment"` // 环境
-	User        string `json:"user" bson:"user"`               // 用户
-	Service     string `json:"service" bson:"service"`         // 服务名
-}
-
-// StatusRequest 状态更新请求数据结构
+// StatusRequest 状态更新请求
 type StatusRequest struct {
-	Service     string `json:"service" bson:"service"`         // 服务名
-	Version     string `json:"version" bson:"version"`         // 版本
-	Environment string `json:"environment" bson:"environment"` // 环境
-	User        string `json:"user" bson:"user"`               // 用户
-	Status      string `json:"status" bson:"status"`           // 状态
+	Service     string `json:"service" bson:"service"`
+	Version     string `json:"version" bson:"version"`
+	Environment string `json:"environment" bson:"environment"`
+	User        string `json:"user" bson:"user"`
+	Status      string `json:"status" bson:"status"` // success / failure
 }
 
-// Task 任务队列中的任务结构
+// ImageSnapshot 镜像快照（用于回滚）
+type ImageSnapshot struct {
+	Namespace  string    `bson:"namespace" json:"namespace"`
+	Service    string    `bson:"service" json:"service"`
+	Container  string    `bson:"container" json:"container"`
+	Image      string    `bson:"image" json:"image"`
+	Tag        string    `bson:"tag" json:"tag"`
+	RecordedAt time.Time `bson:"recorded_at" json:"recorded_at"`
+	TaskID     string    `bson:"task_id" json:"task_id"`
+}
+
+// Task 任务队列中的任务
 type Task struct {
 	DeployRequest
-	ID        string `json:"id" bson:"_id"`           // 任务ID
-	Retries   int    `json:"retries" bson:"retries"` // 重试次数
-}
-
-// DeploymentStatus 部署状态结果
-type DeploymentStatus struct {
-	OldVersion string `json:"old_version" bson:"old_version"` // 旧版本
-	NewVersion string `json:"new_version" bson:"new_version"` // 新版本
-	IsSuccess  bool   `json:"is_success" bson:"is_success"`   // 是否成功
-	Message    string `json:"message" bson:"message"`         // 消息
-}
-
-// MarshalDeploy 将DeployRequest序列化为JSON字节
-func MarshalDeploy(deploy DeployRequest) ([]byte, error) {
-	return json.Marshal(deploy)
-}
-
-// UnmarshalDeploy 从JSON字节反序列化DeployRequest
-func UnmarshalDeploy(data []byte) (DeployRequest, error) {
-	var deploy DeployRequest
-	err := json.Unmarshal(data, &deploy)
-	return deploy, err
-}
-
-//k8s api image set release
-type ImageSnapshot struct {
-	Namespace   string    `bson:"namespace" json:"namespace"`
-	Service     string    `bson:"service" json:"service"`
-	Container   string    `bson:"container" json:"container"`
-	Image       string    `bson:"image" json:"image"`
-	Tag         string    `bson:"tag" json:"tag"`
-	RecordedAt  time.Time `bson:"recorded_at" json:"recorded_at"`
-	TaskID      string    `bson:"task_id" json:"task_id"`
+	ID      string `json:"id" bson:"_id"`           // task_id
+	Retries int    `json:"retries" bson:"retries"` // 重试次数
 }

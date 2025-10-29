@@ -73,3 +73,44 @@ env_mapping:
 # 日志级别
 log_level: "debug"                 # 日志级别：debug, info, warn, error, fatal
 ```
+##v2
+```
+api:
+  base_url: "http://api:8080"
+  push_interval: 30s
+  query_interval: 15s
+  max_retries: 3
+
+kubernetes:
+  auth_type: "kubeconfig"
+  kubeconfig: "/path/to/kubeconfig"
+  namespace: "default"
+
+mongo:
+  uri: "mongodb://localhost:27017"
+  ttl: 720h
+  max_retries: 3
+  env_mapping:
+    mappings:
+      eks: ns-eks
+      eks-pro: ns-pro
+      prod: international
+
+task:
+  max_retries: 3
+  retry_delay_seconds: 30
+  queue_workers: 5
+  max_queue_size: 100
+
+deploy:
+  wait_timeout: 5m
+  rollback_timeout: 3m
+  poll_interval: 5s
+
+env_mapping:
+  mappings:
+    eks: ns-eks
+    eks-pro: ns-pro
+
+log_level: "info"
+```

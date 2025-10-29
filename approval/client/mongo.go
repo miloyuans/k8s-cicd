@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"k8s-cicd/agent/config"
-	"k8s-cicd/agent/models"
+	"k8s-cicd/approval/config"
+	"k8s-cicd/approval/models"
 
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
@@ -68,7 +68,7 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "NewMongoClient",
 		"took":   time.Since(startTime),
-	}).Info("MongoDB 连接成功")
+	}).Info("k8s-approval MongoDB 连接成功")
 	return &MongoClient{client: client, cfg: cfg}, nil
 }
 
@@ -88,14 +88,14 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 		}
 	}
 
-	// 2. 为版本集合创建唯一索引
-	versionsColl := client.Database("cicd").Collection("versions")
-	_, err := versionsColl.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "service", Value: 1}, {Key: "version", Value: 1}},
-		Options: options.Index().SetUnique(true),
+	// 2. 为 popup_message 集合创建 TTL 索引
+	popupColl := client.Database("cicd").Collection("popup_messages")
+	_, err := popupColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "sent_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(7 * 24 * 60 * 60), // 7 天
 	})
 	if err != nil {
-		return fmt.Errorf("创建版本唯一索引失败: %v", err)
+		return fmt.Errorf("创建弹窗消息 TTL 索引失败: %v", err)
 	}
 
 	return nil
@@ -114,26 +114,25 @@ func (m *MongoClient) GetEnvMappings() map[string]string {
 	return m.cfg.EnvMapping.Mappings
 }
 
-// GetTasksByStatus 查询指定环境和状态的任务
-func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployRequest, error) {
+// GetPendingTasks 查询待确认任务（防重）
+func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 	filter := bson.M{
-		"confirmation_status": status,
-		"status": bson.M{"$nin": []string{"success", "failure"}}, // 避免重复执行
+		"confirmation_status": "pending",
+		"popup_sent":          bson.M{"$ne": true}, // 未发送过弹窗
 	}
 
 	cursor, err := collection.Find(ctx, filter)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetTasksByStatus",
+			"method": "GetPendingTasks",
 			"env":    env,
-			"status": status,
 			"took":   time.Since(startTime),
-		}).Errorf("查询任务失败: %v", err)
+		}).Errorf("查询待确认任务失败: %v", err)
 		return nil, err
 	}
 	defer cursor.Close(ctx)
@@ -142,7 +141,7 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 	if err := cursor.All(ctx, &tasks); err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetTasksByStatus",
+			"method": "GetPendingTasks",
 			"took":   time.Since(startTime),
 		}).Errorf("解码任务失败: %v", err)
 		return nil, err
@@ -150,117 +149,126 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetTasksByStatus",
+		"method": "GetPendingTasks",
 		"env":    env,
-		"status": status,
 		"count":  len(tasks),
 		"took":   time.Since(startTime),
-	}).Infof("查询到 %d 个任务", len(tasks))
+	}).Infof("查询到 %d 个待确认任务", len(tasks))
 	return tasks, nil
 }
 
-// UpdateTaskStatus 更新任务状态
-func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status string) error {
+// MarkPopupSent 标记任务已发送弹窗
+func (m *MongoClient) MarkPopupSent(taskID string, messageID int) error {
 	startTime := time.Now()
 	ctx := context.Background()
 
-	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
-	filter := bson.M{
-		"service":     service,
-		"version":     version,
-		"environment": env,
-		"user":        user,
-	}
-	update := bson.M{
-		"$set": bson.M{
-			"status":      status,
-			"updated_at":  time.Now(),
-		},
+	// 1. 更新任务集合
+	for env := range m.cfg.EnvMapping.Mappings {
+		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		filter := bson.M{"task_id": taskID}
+		update := bson.M{
+			"$set": bson.M{
+				"popup_sent":      true,
+				"popup_message_id": messageID,
+				"popup_sent_at":   time.Now(),
+			},
+		}
+		result, err := collection.UpdateOne(ctx, filter, update)
+		if err != nil {
+			continue
+		}
+		if result.MatchedCount > 0 {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "MarkPopupSent",
+				"task_id": taskID,
+				"took":    time.Since(startTime),
+			}).Infof("任务弹窗标记成功")
+			break
+		}
 	}
 
-	result, err := collection.UpdateOne(ctx, filter, update)
+	// 2. 记录弹窗消息（用于防重）
+	popupColl := m.client.Database("cicd").Collection("popup_messages")
+	_, err := popupColl.InsertOne(ctx, bson.M{
+		"task_id":     taskID,
+		"message_id":  messageID,
+		"sent_at":     time.Now(),
+	})
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "UpdateTaskStatus",
-			"took":   time.Since(startTime),
-		}).Errorf("更新任务状态失败: %v", err)
-		return err
+		logrus.Warnf("记录弹窗消息失败: %v", err)
 	}
 
-	if result.MatchedCount == 0 {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "UpdateTaskStatus",
-			"took":   time.Since(startTime),
-		}).Warnf("未找到匹配任务: %s v%s [%s]", service, version, env)
-		return fmt.Errorf("任务未找到")
+	return nil
+}
+
+// UpdateTaskStatus 更新任务确认状态
+func (m *MongoClient) UpdateTaskStatus(taskID, status string) error {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	for env := range m.cfg.EnvMapping.Mappings {
+		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		filter := bson.M{"task_id": taskID}
+		update := bson.M{
+			"$set": bson.M{
+				"confirmation_status": status,
+				"updated_at":          time.Now(),
+			},
+		}
+		result, err := collection.UpdateOne(ctx, filter, update)
+		if err != nil {
+			continue
+		}
+		if result.MatchedCount > 0 {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "UpdateTaskStatus",
+				"task_id": taskID,
+				"status":  status,
+				"took":    time.Since(startTime),
+			}).Infof("任务状态更新成功")
+			return nil
+		}
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "UpdateTaskStatus",
 		"took":   time.Since(startTime),
-	}).Infof("任务状态更新成功: %s v%s [%s] -> %s", service, version, env, status)
-	return nil
+	}).Warnf("未找到任务 task_id=%s", taskID)
+	return fmt.Errorf("任务未找到")
 }
 
-// StoreImageSnapshot 存储镜像快照
-func (m *MongoClient) StoreImageSnapshot(snapshot *models.ImageSnapshot, taskID string) error {
+// GetTaskByID 根据 task_id 获取任务
+func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 
-	snapshot.TaskID = taskID
-	snapshot.RecordedAt = time.Now()
-
-	collection := m.client.Database("cicd").Collection("image_snapshots")
-	_, err := collection.InsertOne(ctx, snapshot)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "StoreImageSnapshot",
-			"took":   time.Since(startTime),
-		}).Errorf("存储快照失败: %v", err)
-		return err
+	for env := range m.cfg.EnvMapping.Mappings {
+		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		filter := bson.M{
+			"task_id": taskID,
+			"confirmation_status": bson.M{"$in": []string{"pending", "confirmed", "rejected"}},
+		}
+		var task models.DeployRequest
+		if err := collection.FindOne(ctx, filter).Decode(&task); err == nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "GetTaskByID",
+				"task_id": taskID,
+				"took":    time.Since(startTime),
+			}).Infof("任务查询成功")
+			return &task, nil
+		}
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "StoreImageSnapshot",
+		"method": "GetTaskByID",
 		"took":   time.Since(startTime),
-	}).Infof("快照存储成功: %s", taskID)
-	return nil
-}
-
-// CheckDuplicateTask 检查任务是否重复
-func (m *MongoClient) CheckDuplicateTask(task models.DeployRequest) (bool, error) {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", task.Environments[0]))
-	filter := bson.M{
-		"service":     task.Service,
-		"version":     task.Version,
-		"environment": task.Environments[0],
-	}
-
-	count, err := collection.CountDocuments(ctx, filter)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "CheckDuplicateTask",
-			"took":   time.Since(startTime),
-		}).Errorf("检查重复任务失败: %v", err)
-		return false, err
-	}
-
-	isDuplicate := count > 0
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "CheckDuplicateTask",
-		"took":   time.Since(startTime),
-	}).Infof("任务重复检查: %t", isDuplicate)
-	return isDuplicate, nil
+	}).Warnf("任务未找到 task_id=%s", taskID)
+	return nil, fmt.Errorf("task not found")
 }
 
 // Close 关闭连接
