@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io" // 新增：修复 undefined: io
 	"net/http"
 	"regexp"
 	"strings"
@@ -374,7 +375,7 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
 }
 
-// sendMessage 发送消息
+// sendMessage 发送消息（增强错误解析）
 func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode string) (int, error) {
 	text = escapeMarkdownV2(text)
 	payload := map[string]interface{}{
@@ -383,23 +384,34 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode stri
 		"parse_mode": parseMode,
 	}
 	jsonData, _ := json.Marshal(payload)
+
 	resp, err := http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token), "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("网络错误: %w", err)
 	}
 	defer resp.Body.Close()
 
+	body, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Ok          bool                   `json:"ok"`
-		Result      map[string]interface{} `json:"result"`
+		Ok          bool   `json:"ok"`
+		ErrorCode   int    `json:"error_code"`
+		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, fmt.Errorf("解析响应失败: %v, 响应: %s", err, string(body))
 	}
+
 	if !result.Ok {
-		return 0, fmt.Errorf("Telegram API 错误")
+		return 0, fmt.Errorf("Telegram API 错误: code=%d, desc=%s", result.ErrorCode, result.Description)
 	}
-	return int(result.Result["message_id"].(float64)), nil
+
+	// 修复：result.Result 不存在
+	resultMap := make(map[string]interface{})
+	if err := json.Unmarshal(body, &resultMap); err != nil {
+		return 0, fmt.Errorf("解析 result 失败: %v", err)
+	}
+	messageID := int(resultMap["result"].(map[string]interface{})["message_id"].(float64))
+	return messageID, nil
 }
 
 // sendMessageWithKeyboard 发送带键盘消息（增强错误解析）
@@ -433,7 +445,12 @@ func (bm *BotManager) sendMessageWithKeyboard(bot *TelegramBot, chatID, text str
 		return 0, fmt.Errorf("Telegram API 错误: code=%d, desc=%s", result.ErrorCode, result.Description)
 	}
 
-	messageID := int(result.Result.(map[string]interface{})["message_id"].(float64))
+	// 修复：result.Result 不存在
+	resultMap := make(map[string]interface{})
+	if err := json.Unmarshal(body, &resultMap); err != nil {
+		return 0, fmt.Errorf("解析 result 失败: %v", err)
+	}
+	messageID := int(resultMap["result"].(map[string]interface{})["message_id"].(float64))
 	return messageID, nil
 }
 
