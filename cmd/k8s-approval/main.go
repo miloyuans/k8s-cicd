@@ -7,6 +7,8 @@ import (
 	"syscall"
 	"time"
 
+	"k8s-cicd/approval"
+	"k8s-cicd/approval/api"        // 修复：导入 api 包
 	"k8s-cicd/approval/client"
 	"k8s-cicd/approval/config"
 	"k8s-cicd/approval/telegram"
@@ -44,21 +46,22 @@ func main() {
 	botMgr.SetGlobalAllowedUsers(cfg.Telegram.AllowedUsers)
 	botMgr.SetMongoClient(mongoClient)
 
-	// 步骤5：启动 k8s-approval 服务
+	// 步骤5：初始化 Query API 客户端
+	queryClient := api.NewQueryClient(cfg.API.BaseURL)
+
+	// 步骤6：创建 Approval 实例
+	approvalAgent := approval.NewApproval(cfg, mongoClient, queryClient, botMgr)
+
+	// 步骤7：启动 Approval 服务
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "main",
 		"took":   time.Since(startTime),
 	}).Info(color.GreenString("k8s-approval 启动中..."))
 
-	botMgr.Start()
+	approvalAgent.Start()
 
-	queryClient := api.NewQueryClient(cfg.API.BaseURL)
-
-	// 启动查询任务
-	go a.periodicQueryAndSync(queryClient, mongoClient)
-
-	// 步骤6：等待系统信号
+	// 步骤8：等待系统信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -69,11 +72,11 @@ func main() {
 
 	<-sigChan
 
-	// 步骤7：优雅关闭
+	// 步骤9：优雅关闭
 	logrus.Info(color.YellowString("收到关闭信号，开始优雅关闭..."))
 
 	stopStart := time.Now()
-	botMgr.Stop()
+	approvalAgent.Stop()
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
