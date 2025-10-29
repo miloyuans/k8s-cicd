@@ -417,70 +417,94 @@ func truncateString(s string, maxBytes int) string {
 // ======================
 // 7. 发送确认弹窗（返回 message_id）
 // ======================
-// SendConfirmation 发送确认弹窗（自动截断 callback_data）
-func (bm *BotManager) SendConfirmation(service, env, user, version string, allowedUsers []string) (int, error) {
-    bot, err := bm.getBotForService(service)
-    if err != nil {
-        return 0, err
-    }
+// SendConfirmation 发送确认弹窗（保留原 UI，优化 callback_data）
+func (bm *BotManager) SendConfirmation(task *models.DeployRequest, bot *TelegramBot) (int, error) {
+	startTime := time.Now()
 
-    // 构建原始 callback_data
-    rawConfirm := fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, version, user)
-    rawReject := fmt.Sprintf("reject:%s:%s:%s:%s", service, env, version, user)
+	// 1. 生成短唯一 task_id（若未生成）
+	if task.TaskID == "" {
+		task.TaskID = uuid.New().String()
+	}
 
-	// SendConfirmation（关键：截断 + URL 编码）
-	callbackDataConfirm := truncateString(fmt.Sprintf("confirm:%s:%s:%s:%s", service, env, version, user), 64)
-	callbackDataReject := truncateString(fmt.Sprintf("reject:%s:%s:%s:%s", service, env, version, user), 64)
+	env := task.Environments[0]
 
-	callbackDataConfirm = url.QueryEscape(callbackDataConfirm)
-	callbackDataReject = url.QueryEscape(callbackDataReject)
+	// 2. 构建 @用户 列表
+	var mentions strings.Builder
+	for _, uid := range bm.globalAllowedUsers {
+		mentions.WriteString("@")
+		mentions.WriteString(uid)
+		mentions.WriteString(" ")
+	}
 
-    // 自动截断到 64 字节（Telegram 限制）
-    const maxLen = 64
-    callbackConfirm := truncateString(rawConfirm, maxLen)
-    callbackReject := truncateString(rawReject, maxLen)
+	// 3. 构建确认消息（完全保留原模板）
+	message := fmt.Sprintf("*Deployment Confirmation 部署确认*\n\n"+
+		"**服务**: `%s`\n"+
+		"**环境**: `%s`\n"+
+		"**版本**: `%s`\n"+
+		"**用户**: `%s`\n\n"+
+		"*请选择操作*\n\n"+
+		"通知: %s",
+		escapeMarkdownV2(task.Service),
+		escapeMarkdownV2(env),
+		escapeMarkdownV2(task.Version),
+		escapeMarkdownV2(task.User),
+		mentions.String(),
+	)
 
-    // URL 编码（防止特殊字符）
-    callbackConfirm = url.QueryEscape(callbackConfirm)
-    callbackReject = url.QueryEscape(callbackReject)
+	// 4. 短 callback_data：confirm:<task_id>
+	confirmData := fmt.Sprintf("confirm:%s", task.TaskID)
+	rejectData := fmt.Sprintf("reject:%s", task.TaskID)
 
-    // 构建消息
-    var mentions strings.Builder
-    for _, u := range allowedUsers {
-        mentions.WriteString(fmt.Sprintf("@%s ", escapeMarkdownV2(u)))
-    }
+	keyboard := map[string]interface{}{
+		"inline_keyboard": [][]map[string]string{
+			{
+				{"text": "Confirm 确认部署", "callback_data": confirmData},
+				{"text": "Reject 拒绝部署", "callback_data": rejectData},
+			},
+		},
+	}
 
-    safe := escapeMarkdownV2
-    message := fmt.Sprintf("*Deployment Confirmation*\n\n"+
-        "**服务**: `%s`\n"+
-        "**环境**: `%s`\n"+
-        "**版本**: `%s`\n"+
-        "**用户**: `%s`\n\n"+
-        "*请选择操作*\n\n"+
-        "通知: %s", safe(service), safe(env), safe(version), safe(user), mentions.String())
+	// 5. 发送弹窗
+	messageID, err := bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2")
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SendConfirmation",
+		}).Errorf(color.RedString("弹窗发送失败: %v"), err)
+		return 0, err
+	}
 
-    keyboard := map[string]interface{}{
-        "inline_keyboard": [][]map[string]string{
-            {{"text": "Confirm 确认部署", "callback_data": callbackConfirm}},
-            {{"text": "Reject 拒绝部署", "callback_data": callbackReject}},
-        },
-    }
+	// 6. 记录 message_id（用于删除）
+	if bm.mongo != nil {
+		if err := bm.mongo.UpdatePopupMessageID(task.Service, task.Version, env, task.User, messageID); err != nil {
+			logrus.Warnf("记录弹窗消息ID失败: %v", err)
+		}
+	}
 
-    msgID, err := bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2")
-    if err != nil {
-        logrus.WithFields(logrus.Fields{
-            "time":   time.Now().Format("2006-01-02 15:04:05"),
-            "method": "SendConfirmation",
-            "data":   logrus.Fields{"service": service, "version": version, "env": env},
-        }).Errorf(color.RedString("弹窗发送失败: %v", err))
-        return 0, err
-    }
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "SendConfirmation",
+	}).Infof(color.GreenString("弹窗发送成功: %s v%s [%s] -> task_id=%s, message_id=%d",
+		task.Service, task.Version, env, task.TaskID, messageID))
 
-    logrus.WithFields(logrus.Fields{
-        "time":   time.Now().Format("2006-01-02 15:04:05"),
-        "method": "SendConfirmation",
-    }).Infof(color.GreenString("弹窗发送成功: %s v%s [%s] message_id=%d", service, version, env, msgID))
-    return msgID, nil
+	return messageID, nil
+}
+
+// findTaskByTaskID 通过 task_id 精确查找任务（O(1) 级）
+func (bm *BotManager) findTaskByTaskID(taskID string, mongo *client.MongoClient) (*models.DeployRequest, error) {
+	ctx := context.Background()
+	for env := range mongo.GetEnvMappings() {
+		coll := mongo.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		filter := bson.M{
+			"task_id":             taskID,
+			"confirmation_status": bson.M{"$in": []string{"pending", "sent"}},
+		}
+		var task models.DeployRequest
+		if err := coll.FindOne(ctx, filter).Decode(&task); err == nil {
+			return &task, nil
+		}
+	}
+	return nil, fmt.Errorf("task not found for task_id: %s", taskID)
 }
 
 // ======================
@@ -514,126 +538,91 @@ func (bm *BotManager) findTaskByID(taskID string, mongo *client.MongoClient) (*m
 // ======================
 // 9. 处理回调（点击后反馈 + 删除原弹窗）
 // ======================
-// HandleCallback 处理弹窗回调（兼容截断 + Mongo 查询）
-func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest, mongo *client.MongoClient) {
+func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan chan<- models.DeployRequest, rejectChan chan<- models.StatusRequest, mongo *client.MongoClient) {
+	startTime := time.Now()
+
+	// 1. 提取 callback_query
 	callback, ok := update["callback_query"].(map[string]interface{})
 	if !ok {
-		logrus.Warn("无效的 callback_query")
 		return
 	}
 
-	from, ok := callback["from"].(map[string]interface{})
-	if !ok {
-		logrus.Warn("无法获取 from 用户信息")
-		return
-	}
-	userName, _ := from["username"].(string)
-	if userName == "" {
-		userName = from["first_name"].(string)
-	}
-
-	data, ok := callback["data"].(string)
-	if !ok || data == "" {
-		logrus.Warn("callback_data 为空")
-		return
-	}
-
-	// URL 解码
-	decodedData, err := url.QueryUnescape(data)
-	if err != nil {
-		logrus.Warnf("callback_data 解码失败: %v", err)
-		decodedData = data
-	}
+	// 2. 提取用户 & 数据
+	from := callback["from"].(map[string]interface{})
+	userName := from["username"].(string)
+	data := callback["data"].(string)
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "HandleCallback",
-		"data":   logrus.Fields{"raw": data, "decoded": decodedData, "user": userName},
-	}).Infof("收到回调: %s", decodedData)
+	}).Infof("收到回调: username=%s, data=%s", userName, data)
 
-	// 解析 action
-	parts := strings.SplitN(decodedData, ":", 2)
-	if len(parts) < 2 {
-		logrus.Warnf("callback_data 格式错误: %s", decodedData)
-		return
-	}
-	action := parts[0]
-	payload := parts[1]
-
-	// 权限检查
-	allowed := false
-	for _, u := range bm.globalAllowedUsers {
-		if u == userName {
-			allowed = true
-			break
-		}
-	}
-	if !allowed {
+	// 3. 权限检查
+	if !contains(bm.globalAllowedUsers, userName) {
 		logrus.Warnf("用户无权限: %s", userName)
 		return
 	}
 
-	// 模糊匹配任务
-	task, err := bm.findTaskByPayload(payload, mongo)
+	// 4. 解析 action:task_id
+	parts := strings.SplitN(data, ":", 2)
+	if len(parts) != 2 {
+		logrus.Warnf("callback_data 格式错误: %s", data)
+		return
+	}
+	action, taskID := parts[0], parts[1]
+
+	// 5. 精确查找任务
+	task, err := bm.findTaskByTaskID(taskID, mongo)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "HandleCallback",
-		}).Warnf("未找到匹配任务: %s, 错误: %v", payload, err)
+		}).Warnf("任务未找到 task_id=%s: %v", taskID, err)
 		return
 	}
 
-	// 删除原弹窗
-	message, ok := callback["message"].(map[string]interface{})
-	if !ok {
-		logrus.Warn("无法获取消息信息")
-		return
-	}
+	// 6. 删除原弹窗
+	message := callback["message"].(map[string]interface{})
 	messageID := int(message["message_id"].(float64))
 	chatID := fmt.Sprintf("%v", message["chat"].(map[string]interface{})["id"])
-	bot, err := bm.getBotForService(task.Service)
-	if err != nil {
-		logrus.Warnf("获取机器人失败: %v", err)
-		return
-	}
+	bot, _ := bm.getBotForService(task.Service)
 	bm.DeleteMessage(bot, chatID, messageID)
 
-	// 反馈
-	actionName := map[string]string{"confirm": "确认", "reject": "拒绝"}[action]
+	// 7. 反馈消息（保留原模板）
+	actionText := map[string]string{"confirm": "确认", "reject": "拒绝"}[action]
 	feedback := fmt.Sprintf("Success 用户 @%s 已 *%s* 部署: `%s` v`%s` 在 `%s`",
-		escapeMarkdownV2(userName), actionName, escapeMarkdownV2(task.Service),
-		escapeMarkdownV2(task.Version), escapeMarkdownV2(task.Environments[0]))
+		escapeMarkdownV2(userName), actionText,
+		escapeMarkdownV2(task.Service), escapeMarkdownV2(task.Version), escapeMarkdownV2(task.Environments[0]),
+	)
 
-	feedbackID, _ := bm.sendTelegramMessage(bot, chatID, feedback, nil, "MarkdownV2")
-
+	feedbackID, _ := bm.sendMessage(bot, chatID, feedback, "MarkdownV2")
 	go func() {
 		time.Sleep(30 * time.Second)
 		bm.DeleteMessage(bot, chatID, feedbackID)
 	}()
 
-	// 推送到通道
+	// 8. 推送到通道
 	if action == "confirm" {
-		confirmChan <- models.DeployRequest{
-			Service:      task.Service,
-			Environments: task.Environments,
-			Version:      task.Version,
-			User:         task.User,
-		}
+		confirmChan <- *task
 	} else {
 		rejectChan <- models.StatusRequest{
 			Service:     task.Service,
 			Version:     task.Version,
 			Environment: task.Environments[0],
 			User:        task.User,
-			Status:      "no_action",
+			Status:      "rejected",
 		}
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "HandleCallback",
-		"data":   logrus.Fields{"action": action, "service": task.Service},
-	}).Infof("回调处理完成: %s", action)
+	}).Infof(color.GreenString("回调处理完成: %s task_id=%s", action, taskID))
+}
+
+// SetMongoClient 注入 Mongo 客户端（Agent 创建时调用）
+func (bm *BotManager) SetMongoClient(mongo *client.MongoClient) {
+	bm.mongo = mongo
 }
 
 // findTaskByPayload 通过 payload 模糊匹配任务

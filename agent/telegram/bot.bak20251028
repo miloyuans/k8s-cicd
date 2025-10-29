@@ -1,3 +1,4 @@
+/*
 // bot.go
 package telegram
 
@@ -904,3 +905,4 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 	}).Debugf(color.GreenString("生成Markdown消息成功"))
 	return message.String()
 }
+*/

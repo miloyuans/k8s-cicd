@@ -31,6 +31,14 @@ type Agent struct {
 	envMapper  *EnvMapper           // 环境映射器
 }
 
+type BotManager struct {
+	Bots              map[string]*TelegramBot
+	globalAllowedUsers []string
+	mongo             *client.MongoClient // 新增
+	updateChan        chan map[string]interface{}
+	stopChan          chan struct{}
+}
+
 // EnvMapper 环境到命名空间的映射器
 type EnvMapper struct {
 	mappings map[string]string // env -> namespace
@@ -76,6 +84,9 @@ func NewAgent(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8s
 	// 步骤1：创建Telegram机器人管理器
 	botMgr := telegram.NewBotManager(cfg.Telegram.Bots)
 	botMgr.SetGlobalAllowedUsers(cfg.Telegram.AllowedUsers)
+	botMgr := telegram.NewBotManager(cfg.Telegram.Bots)
+	botMgr.SetGlobalAllowedUsers(cfg.Telegram.AllowedUsers)
+	botMgr.SetMongoClient(mongoClient) // 注入
 	// 步骤2：创建任务队列
 	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers)
 	// 步骤3：创建API客户端
@@ -125,8 +136,8 @@ func (a *Agent) Start() {
 	a.botMgr.StartPolling()
 	confirmChan := make(chan models.DeployRequest, 100)
 	rejectChan := make(chan models.StatusRequest, 100)
-	go a.botMgr.PollUpdates(confirmChan, rejectChan, a.mongo)
-	go a.handleConfirmationChannels(confirmChan, rejectChan)
+	go botMgr.PollUpdates(confirmChan, rejectChan, mongoClient)
+	go a.handleConfirmationChannels(confirmChan, rejectChan)	
 }
 
 // recoverPendingOrFailedPopupTasks 恢复待处理或失败的弹窗任务
