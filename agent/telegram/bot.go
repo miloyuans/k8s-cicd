@@ -624,7 +624,7 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 // findTaskByPayload 通过 payload 模糊匹配任务
 func (bm *BotManager) findTaskByPayload(payload string, mongo *client.MongoClient) (*models.DeployRequest, error) {
 	ctx := context.Background()
-	for env := range mongo.cfg.EnvMapping.Mappings {
+	for env := range mongo.GetEnvMappings() {
 		collection := mongo.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 		filter := bson.M{
 			"$or": []bson.M{

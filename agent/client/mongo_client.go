@@ -27,6 +27,14 @@ func (m *MongoClient) GetClient() *mongo.Client {
 	return m.client
 }
 
+// GetEnvMappings 导出环境映射（供 telegram 包使用）
+func (m *MongoClient) GetEnvMappings() map[string]string {
+	if m.cfg == nil || m.cfg.EnvMapping.Mappings == nil {
+		return make(map[string]string)
+	}
+	return m.cfg.EnvMapping.Mappings
+}
+
 // NewMongoClient 创建MongoDB客户端
 func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	startTime := time.Now()
@@ -636,7 +644,7 @@ func (c *MongoClient) GetLatestImageSnapshot(service, namespace string) (*models
 // GetTaskByCallbackPayload 通过截断 payload 查找任务（模糊匹配）
 func (c *MongoClient) GetTaskByCallbackPayload(payload string) (*models.DeployRequest, error) {
 	// 通配符集合在 driver 中不支持，保持遍历实现
-	for env := range c.cfg.EnvMapping.Mappings {
+	for env := range c.GetEnvMappings() {
 		coll := c.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 		var task models.DeployRequest
 		err := coll.FindOne(context.Background(), bson.M{
