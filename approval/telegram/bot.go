@@ -173,8 +173,9 @@ func (bm *BotManager) pollPendingTasks() {
 					go func(t *models.DeployRequest) {
 						startTime := time.Now()
 
-						// 发送弹窗（返回 error）
-						if err := bm.sendConfirmation(t); err != nil {
+						// 修复：sendConfirmation 必须返回 error
+						err := bm.sendConfirmation(t)
+						if err != nil {
 							logrus.WithFields(logrus.Fields{
 								"time":     time.Now().Format("2006-01-02 15:04:05"),
 								"method":   "pollPendingTasks",
@@ -271,6 +272,7 @@ func (bm *BotManager) sendConfirmation(task *models.DeployRequest) {
 	// 6. 发送弹窗
 	messageID, err := bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2")
 	if err != nil {
+		return fmt.Errorf("发送弹窗失败: %w", err)
 		logrus.Errorf(color.RedString("弹窗发送失败: %v"), err)
 		// 失败后释放内存标记
 		bm.mu.Lock()
