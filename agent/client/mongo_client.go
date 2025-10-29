@@ -623,7 +623,7 @@ func (c *MongoClient) UpdatePopupMessageID(service, version, environment, user s
 
 // GetLatestImageSnapshot 获取最新快照
 func (c *MongoClient) GetLatestImageSnapshot(service, namespace string) (*models.ImageSnapshot, error) {
-	collection := c.GetClient().Database("cicd").Collection("image_snapshots")
+	//collection := c.GetClient().Database("cicd").Collection("image_snapshots")
 	filter := bson.M{"service": service, "namespace": namespace}
 	var snapshot models.ImageSnapshot
 	err := collection.FindOne(context.Background(), filter, options.FindOne().SetSort(bson.M{"recorded_at": -1})).Decode(&snapshot)

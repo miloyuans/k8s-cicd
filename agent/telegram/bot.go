@@ -498,7 +498,7 @@ func extractTag(image string) string {
 // ======================
 // 9. 处理回调（点击后反馈 + 删除原弹窗）
 // ======================
-// HandleCallback 处理弹窗回调（兼容截断的 callback_data）
+// HandleCallback 处理弹窗回调（兼容截断 + Mongo 查询）
 func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan chan models.DeployRequest, rejectChan chan models.StatusRequest, mongo *client.MongoClient) {
 	callback, ok := update["callback_query"].(map[string]interface{})
 	if !ok {
@@ -522,7 +522,7 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 		return
 	}
 
-	// 步骤1：URL 解码
+	// URL 解码
 	decodedData, err := url.QueryUnescape(data)
 	if err != nil {
 		logrus.Warnf("callback_data 解码失败: %v", err)
@@ -535,7 +535,7 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 		"data":   logrus.Fields{"raw": data, "decoded": decodedData, "user": userName},
 	}).Infof("收到回调: %s", decodedData)
 
-	// 步骤2：解析 action
+	// 解析 action
 	parts := strings.SplitN(decodedData, ":", 2)
 	if len(parts) < 2 {
 		logrus.Warnf("callback_data 格式错误: %s", decodedData)
@@ -544,7 +544,7 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 	action := parts[0]
 	payload := parts[1]
 
-	// 步骤3：权限检查
+	// 权限检查
 	allowed := false
 	for _, u := range bm.globalAllowedUsers {
 		if u == userName {
@@ -557,7 +557,7 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 		return
 	}
 
-	// 步骤4：从 Mongo 模糊匹配任务
+	// 模糊匹配任务
 	task, err := bm.findTaskByPayload(payload, mongo)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -567,7 +567,7 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 		return
 	}
 
-	// 步骤5：删除原弹窗
+	// 删除原弹窗
 	message, ok := callback["message"].(map[string]interface{})
 	if !ok {
 		logrus.Warn("无法获取消息信息")
@@ -582,7 +582,7 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 	}
 	bm.DeleteMessage(bot, chatID, messageID)
 
-	// 步骤6：发送反馈
+	// 反馈
 	actionName := map[string]string{"confirm": "确认", "reject": "拒绝"}[action]
 	feedback := fmt.Sprintf("Success 用户 @%s 已 *%s* 部署: `%s` v`%s` 在 `%s`",
 		escapeMarkdownV2(userName), actionName, escapeMarkdownV2(task.Service),
@@ -590,13 +590,12 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}, confirmChan 
 
 	feedbackID, _ := bm.sendTelegramMessage(bot, chatID, feedback, nil, "MarkdownV2")
 
-	// 30秒后删除反馈
 	go func() {
 		time.Sleep(30 * time.Second)
 		bm.DeleteMessage(bot, chatID, feedbackID)
 	}()
 
-	// 步骤7：推送到通道
+	// 推送到通道
 	if action == "confirm" {
 		confirmChan <- models.DeployRequest{
 			Service:      task.Service,
