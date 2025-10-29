@@ -92,13 +92,7 @@ func NewAgent(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8s
 		apiClient: apiClient,
 		envMapper: envMapper,
 	}
-	// 步骤6：启动Telegram轮询
-	botMgr.StartPolling()
 
-	// 新增：启动 PollUpdates（处理回调）
-	confirmChan := make(chan models.DeployRequest, 100)
-	rejectChan := make(chan models.StatusRequest, 100)
-	go a.botMgr.PollUpdates(confirmChan, rejectChan, a.mongo)
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "NewAgent",
@@ -126,6 +120,13 @@ func (a *Agent) Start() {
 	go a.periodicQueryTasks()
 	// 步骤5：恢复待处理或失败的弹窗任务
 	go a.recoverPendingOrFailedPopupTasks()
+
+		// 步骤6：启动 Telegram 轮询和回调处理
+	a.botMgr.StartPolling()
+	confirmChan := make(chan models.DeployRequest, 100)
+	rejectChan := make(chan models.StatusRequest, 100)
+	go a.botMgr.PollUpdates(confirmChan, rejectChan, a.mongo)
+	go a.handleConfirmationChannels(confirmChan, rejectChan)
 }
 
 // recoverPendingOrFailedPopupTasks 恢复待处理或失败的弹窗任务
