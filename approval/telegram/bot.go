@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io" // 新增：修复 undefined: io
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -203,7 +203,7 @@ func (bm *BotManager) pollPendingTasks() {
 	}
 }
 
-// sendConfirmation 发送确认弹窗（返回 error）
+// sendConfirmation 发送确认弹窗（安全模板）
 func (bm *BotManager) sendConfirmation(task *models.DeployRequest) error {
 	startTime := time.Now()
 	env := task.Environments[0]
@@ -217,30 +217,19 @@ func (bm *BotManager) sendConfirmation(task *models.DeployRequest) error {
 		task.TaskID = uuid.New().String()
 	}
 
-	var mentions strings.Builder
-	allowed := append(bot.AllowedUsers, bm.globalAllowedUsers...)
-	seen := make(map[string]bool)
-	for _, u := range allowed {
-		if !seen[u] {
-			mentions.WriteString("@")
-			mentions.WriteString(u)
-			mentions.WriteString(" ")
-			seen[u] = true
-		}
-	}
+	// 安全模板：纯文本，无 Markdown
+	message := fmt.Sprintf(`[部署确认]
+服务: %s
+环境: %s
+版本: %s
+操作人: %s
 
-	message := fmt.Sprintf("*Deployment Confirmation 部署确认*\n\n"+
-		"**服务**: `%s`\n"+
-		"**环境**: `%s`\n"+
-		"**版本**: `%s`\n"+
-		"**用户**: `%s`\n\n"+
-		"*请选择操作*\n\n"+
-		"通知: %s",
-		escapeMarkdownV2(task.Service),
-		escapeMarkdownV2(env),
-		escapeMarkdownV2(task.Version),
-		escapeMarkdownV2(task.User),
-		mentions.String(),
+请选择:
+[确认部署] / [拒绝部署]`,
+		task.Service,
+		env,
+		task.Version,
+		task.User,
 	)
 
 	confirmData := fmt.Sprintf("confirm:%s", task.TaskID)
@@ -249,13 +238,14 @@ func (bm *BotManager) sendConfirmation(task *models.DeployRequest) error {
 	keyboard := map[string]interface{}{
 		"inline_keyboard": [][]map[string]string{
 			{
-				{"text": "Confirm 确认部署", "callback_data": confirmData},
-				{"text": "Reject 拒绝部署", "callback_data": rejectData},
+				{"text": "确认部署", "callback_data": confirmData},
+				{"text": "拒绝部署", "callback_data": rejectData},
 			},
 		},
 	}
 
-	messageID, err := bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "MarkdownV2")
+	// 不使用 parse_mode
+	messageID, err := bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "")
 	if err != nil {
 		return fmt.Errorf("发送弹窗失败: %w", err)
 	}
@@ -310,11 +300,10 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}) {
 	bm.DeleteMessage(bot, chatID, messageID)
 
 	actionText := map[string]string{"confirm": "确认", "reject": "拒绝"}[action]
-	feedback := fmt.Sprintf("Success 用户 @%s 已 *%s* 部署: `%s` v`%s` 在 `%s`",
-		escapeMarkdownV2(userName), actionText,
-		escapeMarkdownV2(task.Service), escapeMarkdownV2(task.Version), escapeMarkdownV2(task.Environments[0]))
+	feedback := fmt.Sprintf("用户 @%s 已 %s 部署: %s v%s 在 %s",
+		userName, actionText, task.Service, task.Version, task.Environments[0])
 
-	feedbackID, _ := bm.sendMessage(bot, chatID, feedback, "MarkdownV2")
+	feedbackID, _ := bm.sendMessage(bot, chatID, feedback, "")
 	go func() {
 		time.Sleep(30 * time.Second)
 		bm.DeleteMessage(bot, chatID, feedbackID)
@@ -377,11 +366,12 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 
 // sendMessage 发送消息（增强错误解析）
 func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode string) (int, error) {
-	text = escapeMarkdownV2(text)
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
 		"text":       text,
-		"parse_mode": parseMode,
+	}
+	if parseMode != "" {
+		payload["parse_mode"] = parseMode
 	}
 	jsonData, _ := json.Marshal(payload)
 
@@ -405,7 +395,6 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode stri
 		return 0, fmt.Errorf("Telegram API 错误: code=%d, desc=%s", result.ErrorCode, result.Description)
 	}
 
-	// 修复：result.Result 不存在
 	resultMap := make(map[string]interface{})
 	if err := json.Unmarshal(body, &resultMap); err != nil {
 		return 0, fmt.Errorf("解析 result 失败: %v", err)
@@ -414,14 +403,15 @@ func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode stri
 	return messageID, nil
 }
 
-// sendMessageWithKeyboard 发送带键盘消息（增强错误解析）
+// sendMessageWithKeyboard 发送带键盘消息
 func (bm *BotManager) sendMessageWithKeyboard(bot *TelegramBot, chatID, text string, keyboard map[string]interface{}, parseMode string) (int, error) {
-	text = escapeMarkdownV2(text)
 	payload := map[string]interface{}{
 		"chat_id":      chatID,
 		"text":         text,
 		"reply_markup": keyboard,
-		"parse_mode":   parseMode,
+	}
+	if parseMode != "" {
+		payload["parse_mode"] = parseMode
 	}
 	jsonData, _ := json.Marshal(payload)
 
@@ -445,7 +435,6 @@ func (bm *BotManager) sendMessageWithKeyboard(bot *TelegramBot, chatID, text str
 		return 0, fmt.Errorf("Telegram API 错误: code=%d, desc=%s", result.ErrorCode, result.Description)
 	}
 
-	// 修复：result.Result 不存在
 	resultMap := make(map[string]interface{})
 	if err := json.Unmarshal(body, &resultMap); err != nil {
 		return 0, fmt.Errorf("解析 result 失败: %v", err)
@@ -469,26 +458,4 @@ func (bm *BotManager) DeleteMessage(bot *TelegramBot, chatID string, messageID i
 func (bm *BotManager) Stop() {
 	close(bm.stopChan)
 	logrus.Info(color.GreenString("k8s-approval BotManager 停止"))
-}
-
-// escapeMarkdownV2 转义
-func escapeMarkdownV2(text string) string {
-	escapeChars := []rune{'_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'}
-	var result strings.Builder
-	for _, c := range text {
-		if containsRune(escapeChars, c) {
-			result.WriteString("\\")
-		}
-		result.WriteRune(c)
-	}
-	return result.String()
-}
-
-func containsRune(slice []rune, r rune) bool {
-	for _, s := range slice {
-		if s == r {
-			return true
-		}
-	}
-	return false
 }
