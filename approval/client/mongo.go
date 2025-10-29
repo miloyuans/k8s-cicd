@@ -114,36 +114,26 @@ func (m *MongoClient) GetEnvMappings() map[string]string {
 	return m.cfg.EnvMapping.Mappings
 }
 
-// GetPendingTasks 查询待确认任务（防重）
+// GetPendingTasks 查询 pending 且未发送弹窗的任务
 func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
-	ctx := context.Background()
 
-	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+	coll := m.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 	filter := bson.M{
+		"environment":         env,
 		"confirmation_status": "pending",
-		"popup_sent":          bson.M{"$ne": true}, // 未发送过弹窗
+		"popup_sent":          bson.M{"$ne": true}, // 关键：未发送弹窗
 	}
 
-	cursor, err := collection.Find(ctx, filter)
+	cursor, err := coll.Find(context.Background(), filter)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPendingTasks",
-			"env":    env,
-			"took":   time.Since(startTime),
-		}).Errorf("查询待确认任务失败: %v", err)
+		logrus.Errorf("查询 %s 待确认任务失败: %v", env, err)
 		return nil, err
 	}
-	defer cursor.Close(ctx)
+	defer cursor.Close(context.Background())
 
 	var tasks []models.DeployRequest
-	if err := cursor.All(ctx, &tasks); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPendingTasks",
-			"took":   time.Since(startTime),
-		}).Errorf("解码任务失败: %v", err)
+	if err := cursor.All(context.Background(), &tasks); err != nil {
 		return nil, err
 	}
 
@@ -154,6 +144,7 @@ func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error
 		"count":  len(tasks),
 		"took":   time.Since(startTime),
 	}).Infof("查询到 %d 个待确认任务", len(tasks))
+
 	return tasks, nil
 }
 
@@ -272,7 +263,7 @@ func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 // StoreTaskIfNotExists 存储任务（防重：service+version+env 唯一）
 func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
 	startTime := time.Now()
-
+	task.PopupSent = false
 	// 1. 验证环境
 	if len(task.Environments) == 0 {
 		return fmt.Errorf("task.Environments 不能为空")
