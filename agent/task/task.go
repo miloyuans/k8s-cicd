@@ -76,11 +76,11 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				"method": "worker",
 				"data": logrus.Fields{
 					"task_id":     task.ID,
-					"service":     task.Service,
-					"version":     task.Version,
-					"environment": task.Environments[0],
-					"user":        task.User,
-					"namespace":   task.Namespace,
+					"service":     task.DeployRequest.Service,
+					"version":     task.DeployRequest.Version,
+					"environment": task.DeployRequest.Environments[0],
+					"user":        task.DeployRequest.User,
+					"namespace":   task.DeployRequest.Namespace,
 				},
 			}).Infof(color.GreenString("Worker-%d 开始执行任务: %s"), workerID, task.ID)
 
@@ -118,11 +118,11 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 // executeTask 执行部署任务
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) error {
 	startTime := time.Now()
-	env := task.Environments[0]
-	namespace := task.Namespace
+	env := task.DeployRequest.Environments[0]
+	namespace := task.DeployRequest.Namespace
 
 	// 步骤1：捕获快照
-	snapshot, err := k8s.CaptureImageSnapshot(task.Service, namespace)
+	snapshot, err := k8s.CaptureImageSnapshot(task.DeployRequest.Service, namespace)
 	if err != nil {
 		q.handleFailure(mongo, apiClient, botMgr, task, "unknown")
 		return err
@@ -135,15 +135,15 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	}
 
 	// 步骤3：更新镜像
-	if err := k8s.UpdateWorkloadImage(task.Service, namespace, task.Version); err != nil {
+	if err := k8s.UpdateWorkloadImage(task.DeployRequest.Service, namespace, task.DeployRequest.Version); err != nil {
 		q.handleFailure(mongo, apiClient, botMgr, task, oldImage)
 		return err
 	}
 
 	// 步骤4：等待 rollout
-	if err := k8s.WaitForRolloutComplete(task.Service, namespace, cfg.Deploy.WaitTimeout); err != nil {
+	if err := k8s.WaitForRolloutComplete(task.DeployRequest.Service, namespace, cfg.Deploy.WaitTimeout); err != nil {
 		// 回滚
-		if rollbackErr := k8s.RollbackWithSnapshot(task.Service, namespace, snapshot); rollbackErr != nil {
+		if rollbackErr := k8s.RollbackWithSnapshot(task.DeployRequest.Service, namespace, snapshot); rollbackErr != nil {
 			logrus.Errorf(color.RedString("回滚失败: %v"), rollbackErr)
 		}
 		q.handleFailure(mongo, apiClient, botMgr, task, oldImage)
@@ -160,7 +160,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		"data": logrus.Fields{
 			"task_id":  task.ID,
 			"old_tag":  kubernetes.ExtractTag(oldImage),
-			"new_tag":  task.Version,
+			"new_tag":  task.DeployRequest.Version,
 		},
 	}).Infof(color.GreenString("任务执行完成: %s, 状态: success"), task.ID)
 	return nil
@@ -168,26 +168,26 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 
 // handleSuccess 成功处理
 func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string) {
-	env := task.Environments[0]
+	env := task.DeployRequest.Environments[0]
 
 	// 1. 更新 Mongo 状态
-	if err := mongo.UpdateTaskStatus(task.Service, task.Version, env, task.User, "success"); err != nil {
+	if err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "success"); err != nil {
 		logrus.Errorf(color.RedString("更新MongoDB状态失败: %v"), err)
 	}
 
 	// 2. 调用 /status 接口
 	if err := apiClient.UpdateStatus(models.StatusRequest{
-		Service:     task.Service,
-		Version:     task.Version,
+		Service:     task.DeployRequest.Service,
+		Version:     task.DeployRequest.Version,
 		Environment: env,
-		User:        task.User,
+		User:        task.DeployRequest.User,
 		Status:      "success",
 	}); err != nil {
 		logrus.Errorf(color.RedString("推送成功状态失败: %v"), err)
 	}
 
 	// 3. 发送通知
-	if err := botMgr.SendNotification(task.Service, env, task.User, oldImage, task.Version, true); err != nil {
+	if err := botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, oldImage, task.DeployRequest.Version, true); err != nil {
 		logrus.Errorf(color.RedString("发送成功通知失败: %v"), err)
 	} else {
 		logrus.Infof(color.GreenString("通知发送成功"))
@@ -196,22 +196,22 @@ func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, apiClient *api.APIC
 
 // handleFailure 失败处理
 func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string) {
-	env := task.Environments[0]
+	env := task.DeployRequest.Environments[0]
 
 	// 1. 更新 Mongo 状态
-	_ = mongo.UpdateTaskStatus(task.Service, task.Version, env, task.User, "failure")
+	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "failure")
 
 	// 2. 调用 /status 接口
 	_ = apiClient.UpdateStatus(models.StatusRequest{
-		Service:     task.Service,
-		Version:     task.Version,
+		Service:     task.DeployRequest.Service,
+		Version:     task.DeployRequest.Version,
 		Environment: env,
-		User:        task.User,
+		User:        task.DeployRequest.User,
 		Status:      "failure",
 	})
 
 	// 3. 发送通知
-	_ = botMgr.SendNotification(task.Service, env, task.User, oldImage, task.Version, false)
+	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, oldImage, task.DeployRequest.Version, false)
 }
 
 // handlePermanentFailure 永久失败处理
