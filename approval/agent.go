@@ -3,6 +3,7 @@ package approval
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -10,7 +11,7 @@ import (
 	"k8s-cicd/approval/api"
 	"k8s-cicd/approval/client"
 	"k8s-cicd/approval/config"
-	"k8s-cicd/approval/telegram" // 修复：导入 telegram
+	"k8s-cicd/approval/telegram"
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
@@ -76,13 +77,20 @@ func (a *Approval) periodicQueryAndSync() {
 					continue
 				}
 
-				tasks, err := a.queryClient.QueryTasks(service, env)
+				// 3. 从环境变量或配置获取 user
+				user := os.Getenv("APPROVAL_QUERY_USER")
+				if user == "" {
+					user = "deployer" // 默认用户
+				}
+
+				// 4. 调用 /query 接口（传入 service, env, user）
+				tasks, err := a.queryClient.QueryTasks(service, env, user)
 				if err != nil {
 					logrus.Errorf("查询任务失败 [%s@%s]: %v", service, env, err)
 					continue
 				}
 
-				// 3. 存储到 Mongo（防重）
+				// 5. 存储到 Mongo（防重）
 				for i := range tasks {
 					task := &tasks[i]
 					task.Namespace = a.cfg.EnvMapping.Mappings[env]
