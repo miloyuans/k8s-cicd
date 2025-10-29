@@ -23,6 +23,7 @@ type DeployRequest struct {
 	CreatedAt         time.Time `json:"created_at" bson:"created_at"`     // 创建时间
 	ConfirmationStatus string    `json:"confirmation_status" bson:"confirmation_status"` // 弹窗状态: pending, sent, confirmed, rejected, failed
 	PopupRetries      int       `json:"popup_retries" bson:"popup_retries"` // 弹窗重试次数
+	TaskID            string    `json:"task_id" bson:"task_id"` // 新增：短唯一ID
 }
 
 // QueryRequest 查询请求数据结构

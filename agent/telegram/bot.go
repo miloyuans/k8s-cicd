@@ -494,7 +494,22 @@ func extractTag(image string) string {
 	return image
 }
 
-
+// 通过 task_id 查找任务
+func (bm *BotManager) findTaskByID(taskID string, mongo *client.MongoClient) (*models.DeployRequest, error) {
+	ctx := context.Background()
+	for env := range mongo.GetEnvMappings() {
+		coll := mongo.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		filter := bson.M{
+			"task_id":             taskID,
+			"confirmation_status": bson.M{"$in": []string{"pending", "sent"}},
+		}
+		var task models.DeployRequest
+		if err := coll.FindOne(ctx, filter).Decode(&task); err == nil {
+			return &task, nil
+		}
+	}
+	return nil, fmt.Errorf("task not found for task_id: %s", taskID)
+}
 
 // ======================
 // 9. 处理回调（点击后反馈 + 删除原弹窗）

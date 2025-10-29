@@ -9,6 +9,7 @@ import (
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
 
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -211,25 +212,33 @@ func (m *MongoClient) CheckDuplicateTask(deploy models.DeployRequest) (bool, err
 	return isDuplicate, nil
 }
 
-// StoreTaskWithDeduplication 存储任务并去重
-func (m *MongoClient) StoreTaskWithDeduplication(deploy models.DeployRequest) error {
-	startTime := time.Now()
-	// 步骤1：检查重复
-	isDuplicate, err := m.CheckDuplicateTask(deploy)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "StoreTaskWithDeduplication",
-			"took":   time.Since(startTime),
-		}).Errorf("检查重复任务失败: %v", err)
-		return err
-	}
-	if isDuplicate {
-		return nil // 重复任务直接返回
+// 在 StoreTaskWithDeduplication 中生成 task_id
+func (m *MongoClient) StoreTaskWithDeduplication(task models.DeployRequest) error {
+	if task.TaskID == "" {
+		task.TaskID = uuid.New().String()
 	}
 
-	// 步骤2：存储任务
-	return m.PushDeployments([]models.DeployRequest{deploy})
+	collection := m.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", task.Environments[0]))
+	filter := bson.M{
+		"service":     task.Service,
+		"version":     task.Version,
+		"environment": task.Environments[0],
+	}
+	update := bson.M{
+		"$setOnInsert": bson.M{
+			"service":             task.Service,
+			"version":             task.Version,
+			"environment":         task.Environments[0],
+			"namespace":           task.Namespace,
+			"user":                task.User,
+			"created_at":          time.Now(),
+			"confirmation_status": "pending",
+			"popup_retries":       0,
+			"task_id":             task.TaskID, // 存储 task_id
+		},
+	}
+	_, err := collection.UpdateOne(context.Background(), filter, update, options.Update().SetUpsert(true))
+	return err
 }
 
 // DeleteTask 删除任务
