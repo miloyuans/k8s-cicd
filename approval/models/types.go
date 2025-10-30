@@ -12,7 +12,7 @@ type DeployRequest struct {
 	Version            string    `json:"version" bson:"version"`                       // 镜像版本
 	User               string    `json:"user" bson:"user"`                             // 操作人
 	CreatedAt          time.Time `json:"created_at" bson:"created_at"`                 // 创建时间
-	ConfirmationStatus string    `json:"confirmation_status" bson:"confirmation_status"` // pending, confirmed, rejected
+	ConfirmationStatus string    `json:"confirmation_status" bson:"confirmation_status"` // 待确认, 已确认, 已拒绝 (默认: 待确认)
 	PopupSent          bool      `json:"popup_sent" bson:"popup_sent"`                 // 是否已发送弹窗
 	PopupMessageID     int       `json:"popup_message_id" bson:"popup_message_id"`     // Telegram 消息ID
 	PopupSentAt        time.Time `json:"popup_sent_at" bson:"popup_sent_at"`           // 弹窗发送时间

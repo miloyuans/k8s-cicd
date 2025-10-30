@@ -412,7 +412,7 @@ func (bm *BotManager) answerCallback(callbackID, text string) {
 	http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery", bot.Token), "application/json", bytes.NewBuffer(jsonData))
 }
 
-// 修复: HandleCallback - 用户选择后立即删除原弹窗，发送反馈（不删除），并更新状态
+// 修复: HandleCallback - 用户选择后立即删除原弹窗，发送反馈（不删除），并更新状态 使用中文状态更新
 func (bm *BotManager) HandleCallback(data map[string]interface{}) {
 	startTime := time.Now()
 	id := data["id"].(string)
@@ -463,17 +463,17 @@ func (bm *BotManager) HandleCallback(data map[string]interface{}) {
 		return
 	}
 
-	// 更新状态
-	status := "confirmed"
+	// 更新状态 - 使用中文状态
+	status := "已确认"
 	if action == "reject" {
-		status = "rejected"
+		status = "已拒绝"
 	}
 	if err := bm.mongo.UpdateTaskStatus(taskID, status, username); err != nil {
 		bm.answerCallback(id, "状态更新失败")
 		return
 	}
 
-	// 修复: 立即删除原弹窗消息（使用 popup_message_id）
+	// 立即删除原弹窗消息（使用 popup_message_id）
 	if task.PopupMessageID > 0 {
 		if err := bm.DeleteMessage(bot, bot.GroupID, task.PopupMessageID); err != nil {
 			logrus.WithFields(logrus.Fields{
@@ -500,8 +500,8 @@ func (bm *BotManager) HandleCallback(data map[string]interface{}) {
 
 	// 发送结果反馈信息（不删除）
 	chatID := bot.GroupID
-	feedbackText := fmt.Sprintf("✅ <b>%s 部署请求</b>\n\n服务: <code>%s</code>\n版本: <code>%s</code>\n环境: <code>%s</code>\n操作人: <code>%s</code>\n任务ID: <code>%s</code>", 
-		strings.ToUpper(action), task.Service, task.Version, task.Environments[0], username, taskID)
+	feedbackText := fmt.Sprintf("✅ <b>%s 部署请求</b>\n\n服务: <code>%s</code>\n版本: <code>%s</code>\n环境: <code>%s</code>\n操作人: <code>%s</code>\n任务ID: <code>%s</code>\n状态: <code>%s</code>", 
+		strings.ToUpper(action), task.Service, task.Version, task.Environments[0], username, taskID, status)
 	feedbackID, err := bm.sendMessage(bot, chatID, feedbackText, "HTML")
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -525,7 +525,7 @@ func (bm *BotManager) HandleCallback(data map[string]interface{}) {
 			"method":  "HandleCallback",
 			"task_id": taskID,
 			"full_task": fmt.Sprintf("%+v", task), // 完整任务数据日志
-		}).Infof("用户 %s 拒绝部署，准备删除任务", username)
+		}).Infof("用户 %s 拒绝部署，准备删除任务 (状态: %s)", username, status)
 
 		if err := bm.mongo.DeleteTask(taskID); err != nil {
 			logrus.WithFields(logrus.Fields{
@@ -539,11 +539,11 @@ func (bm *BotManager) HandleCallback(data map[string]interface{}) {
 				"method":  "HandleCallback",
 				"task_id": taskID,
 				"full_task": fmt.Sprintf("%+v", task),
-			}).Infof("已立即删除 rejected 任务")
+			}).Infof("已立即删除 已拒绝 任务")
 		}
 	}
 
-	bm.answerCallback(id, fmt.Sprintf("操作已执行: %s (弹窗已删除，反馈已发送)", action))
+	bm.answerCallback(id, fmt.Sprintf("操作已执行: %s (弹窗已删除，反馈已发送，状态: %s)", action, status))
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -552,8 +552,9 @@ func (bm *BotManager) HandleCallback(data map[string]interface{}) {
 		"user_id": userID,
 		"action": action,
 		"task_id": taskID,
+		"status": status,
 		"took":   time.Since(startTime),
-	}).Infof("回调处理完成: 原弹窗删除 + 反馈发送")
+	}).Infof("回调处理完成: 原弹窗删除 + 反馈发送 (状态变更: %s)", status)
 }
 
 // 修改: isUserAllowed 支持机器人级权限

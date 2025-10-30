@@ -38,7 +38,7 @@ func (a *Approval) Start() {
 	go a.periodicQueryAndSync()
 }
 
-// 确认实现: periodicQueryAndSync 在存储后再次查询最新数据并打印 - 增强日志突出
+// 修复: periodicQueryAndSync 使用 "待确认" 状态设置、更新和验证
 func (a *Approval) periodicQueryAndSync() {
 	ticker := time.NewTicker(a.cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -129,7 +129,7 @@ func (a *Approval) periodicQueryAndSync() {
 				for i := range tasks {
 					task := &tasks[i]
 					task.Namespace = a.cfg.EnvMapping.Mappings[env]
-					task.ConfirmationStatus = "pending"
+					task.ConfirmationStatus = "待确认" // 修复: 设置为 "待确认"
 					task.PopupSent = false
 					if task.TaskID == "" {
 						task.TaskID = fmt.Sprintf("%s-%s-%s", task.Service, task.Version, env)
@@ -142,7 +142,8 @@ func (a *Approval) periodicQueryAndSync() {
 						"service": task.Service,
 						"version": task.Version,
 						"env":     env,
-					}).Debugf("准备存储任务: %+v", task) // 打印完整任务
+						"set_status": task.ConfirmationStatus, // 日志记录设置的状态
+					}).Debugf("准备存储任务 (设置 status=待确认): %+v", task) // 打印完整任务
 
 					if err := a.mongo.StoreTaskIfNotExists(*task); err != nil {
 						logrus.WithFields(logrus.Fields{
@@ -153,37 +154,70 @@ func (a *Approval) periodicQueryAndSync() {
 					} else {
 						totalNewTasks++
 
-						// 确认实现: 存储成功后，立即再次查询该任务的最新数据并打印
+						// 修复: 存储成功后，立即更新状态为 "待确认"（如果未设置）并验证
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "periodicQueryAndSync",
 							"task_id": task.TaskID,
-						}).Info("=== 开始查询最新存储任务数据 ===")
+						}).Info("=== 开始存储后状态更新和验证 ===")
 
-						latestTask, err := a.mongo.GetTaskByID(task.TaskID)
-						if err != nil {
+						// 立即更新状态为 待确认（冗余确保）
+						updateErr := a.mongo.UpdateTaskStatus(task.TaskID, "待确认", "system") // system 表示系统自动设置
+						if updateErr != nil {
 							logrus.WithFields(logrus.Fields{
 								"time":   time.Now().Format("2006-01-02 15:04:05"),
 								"method": "periodicQueryAndSync",
 								"task_id": task.TaskID,
-							}).Errorf("存储后查询最新任务失败: %v", err)
+							}).Errorf("存储后更新状态为 待确认 失败: %v", updateErr)
 						} else {
 							logrus.WithFields(logrus.Fields{
 								"time":   time.Now().Format("2006-01-02 15:04:05"),
 								"method": "periodicQueryAndSync",
 								"task_id": task.TaskID,
-								"latest_task_status": latestTask.ConfirmationStatus,
-								"latest_task_popup_sent": latestTask.PopupSent,
-								"latest_task_full": fmt.Sprintf("%+v", latestTask), // 完整最新数据
-							}).Infof("=== 任务存储成功，最新数据查询完成: status=%s, popup_sent=%t ===\nFull Data: %+v", 
-								latestTask.ConfirmationStatus, latestTask.PopupSent, latestTask)
+							}).Infof("状态更新为 待确认 成功")
+						}
+
+						// 查询最新数据验证
+						latestTask, queryErr := a.mongo.GetTaskByID(task.TaskID)
+						if queryErr != nil {
+							logrus.WithFields(logrus.Fields{
+								"time":   time.Now().Format("2006-01-02 15:04:05"),
+								"method": "periodicQueryAndSync",
+								"task_id": task.TaskID,
+							}).Errorf("存储后查询最新任务失败: %v", queryErr)
+						} else if latestTask.ConfirmationStatus != "待确认" {
+							logrus.WithFields(logrus.Fields{
+								"time":   time.Now().Format("2006-01-02 15:04:05"),
+								"method": "periodicQueryAndSync",
+								"task_id": task.TaskID,
+								"current_status": latestTask.ConfirmationStatus,
+							}).Errorf("最新状态非 待确认，重新更新")
+							// 强制重新更新
+							a.mongo.UpdateTaskStatus(task.TaskID, "待确认", "system")
+							latestTask, _ = a.mongo.GetTaskByID(task.TaskID)
+						} else {
+							logrus.WithFields(logrus.Fields{
+								"time":   time.Now().Format("2006-01-02 15:04:05"),
+								"method": "periodicQueryAndSync",
+								"task_id": task.TaskID,
+							}).Infof("状态验证成功: %s", latestTask.ConfirmationStatus)
 						}
 
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "periodicQueryAndSync",
 							"task_id": task.TaskID,
-						}).Infof("新任务存储成功")
+							"latest_task_status": latestTask.ConfirmationStatus,
+							"latest_task_popup_sent": latestTask.PopupSent,
+							"latest_task_full": fmt.Sprintf("%+v", latestTask), // 完整最新数据
+						}).Infof("=== 任务存储成功，状态变更完成 (待确认): status=%s, popup_sent=%t ===\nFull Latest Data: %+v", 
+							latestTask.ConfirmationStatus, latestTask.PopupSent, latestTask)
+
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "periodicQueryAndSync",
+							"task_id": task.TaskID,
+						}).Infof("新任务存储成功 (状态已更新为 待确认)")
 					}
 				}
 			}

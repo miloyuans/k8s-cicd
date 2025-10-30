@@ -116,13 +116,14 @@ func (m *MongoClient) GetEnvMappings() map[string]string {
 }
 
 // GetPendingTasks 查询 pending 且未发送弹窗的任务
+// 修复: GetPendingTasks 过滤 "confirmation_status": "待确认"，确保匹配弹窗逻辑
 func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 
 	coll := m.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 	filter := bson.M{
 		"environment":         env,
-		"confirmation_status": "pending",
+		"confirmation_status": "待确认", // 修复: 匹配 "待确认" 状态
 		"popup_sent":          bson.M{"$ne": true},
 	}
 
@@ -131,7 +132,7 @@ func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error
 		"method": "GetPendingTasks",
 		"env":    env,
 		"filter": filter,
-	}).Debug("执行 pending 任务查询")
+	}).Debug("执行 pending 任务查询 (状态: 待确认)")
 
 	cursor, err := coll.Find(context.Background(), filter)
 	if err != nil {
@@ -221,7 +222,7 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 		filter := bson.M{"task_id": taskID}
 		update := bson.M{
 			"$set": bson.M{
-				"confirmation_status": status,
+				"confirmation_status": status, // 支持 "待确认", "已确认", "已拒绝"
 				"updated_by":          user,
 				"updated_at":          time.Now(),
 			},
@@ -241,11 +242,11 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 				"time":     time.Now().Format("2006-01-02 15:04:05"),
 				"method":   "UpdateTaskStatus",
 				"task_id":  taskID,
-				"status":   status,
-				"user":     user,
+				"status":   status, // 日志中文状态
+				"user":     user, // 记录更新者 (system 或 用户名)
 				"env":      env,
 				"took":     time.Since(startTime),
-			}).Infof("任务状态更新成功")
+			}).Infof("任务状态更新成功: %s (by %s)", status, user)
 			break
 		}
 	}
@@ -260,6 +261,7 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 	}
 	return nil
 }
+
 
 // GetPushedServicesAndEnvs 获取所有已 push 的服务和环境
 func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
@@ -399,7 +401,7 @@ func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) 
 		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 		filter := bson.M{
 			"task_id": taskID,
-			"confirmation_status": bson.M{"$in": []string{"pending", "confirmed", "rejected"}},
+			"confirmation_status": bson.M{"$in": []string{"待确认", "已确认", "已拒绝"}}, // 修复: 中文状态过滤
 		}
 		var task models.DeployRequest
 		if err := collection.FindOne(ctx, filter).Decode(&task); err == nil {
@@ -409,9 +411,10 @@ func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) 
 				"task_id": taskID,
 				"env":     env,
 				"popup_message_id": task.PopupMessageID, // 确保包含用于删除
+				"status": task.ConfirmationStatus, // 日志当前状态
 				"full_task": fmt.Sprintf("%+v", task), // 打印完整任务数据
 				"took":    time.Since(startTime),
-			}).Debugf("任务查询成功: %+v", task)
+			}).Debugf("任务查询成功: status=%s", task.ConfirmationStatus)
 			return &task, nil
 		}
 	}
