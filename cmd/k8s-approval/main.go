@@ -1,3 +1,4 @@
+// 文件: main.go (确保 Debug 日志，并添加完整输出)
 package main
 
 import (
@@ -8,7 +9,7 @@ import (
 	"time"
 
 	"k8s-cicd/approval"
-	"k8s-cicd/approval/api"        // 修复：导入 api 包
+	"k8s-cicd/approval/api"
 	"k8s-cicd/approval/client"
 	"k8s-cicd/approval/config"
 	"k8s-cicd/approval/telegram"
@@ -20,14 +21,14 @@ import (
 func main() {
 	startTime := time.Now()
 
-	// 开启 debug 日志
-    logrus.SetLevel(logrus.DebugLevel)
-    logrus.SetFormatter(&logrus.TextFormatter{
-        FullTimestamp:    true,
-        TimestampFormat:  "2006-01-02 15:04:05",
-        ForceColors:      true,
-        DisableTimestamp: false,
-    })
+	// 开启 debug 日志，确保完整输出
+	logrus.SetLevel(logrus.DebugLevel)
+	logrus.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp:   true,
+		TimestampFormat: "2006-01-02 15:04:05",
+		ForceColors:     true,
+		DisableSorting:  false, // 确保完整输出
+	})
 
 	// 步骤1：解析命令行参数
 	configFile := flag.String("config", "config.yaml", "配置文件路径")

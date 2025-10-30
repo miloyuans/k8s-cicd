@@ -38,6 +38,7 @@ func (a *Approval) Start() {
 	go a.periodicQueryAndSync()
 }
 
+// 修复: periodicQueryAndSync 打印完整列表
 func (a *Approval) periodicQueryAndSync() {
 	ticker := time.NewTicker(a.cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -57,15 +58,17 @@ func (a *Approval) periodicQueryAndSync() {
 			continue
 		}
 
-		// 2. 打印完整服务和环境列表（需求4）
+		// 2. 打印完整服务和环境列表
 		logrus.WithFields(logrus.Fields{
 			"time":     time.Now().Format("2006-01-02 15:04:05"),
 			"method":   "periodicQueryAndSync",
-			"services": services,
-			"envs":     envs,
-		}).Infof("开始查询 /query 接口，待查服务数=%d，环境数=%d", len(services), len(envs))
+			"services": services, // 完整切片输出
+			"envs":     envs,     // 完整切片输出
+			"count_svc": len(services),
+			"count_env": len(envs),
+		}).Infof("开始查询 /query 接口，待查服务: %v，环境: %v", services, envs)
 
-		// 3. 并发查询
+		// 3. 并发查询 (保持原逻辑)
 		for _, service := range services {
 			if service == "" {
 				logrus.Warn("跳过空服务名")
