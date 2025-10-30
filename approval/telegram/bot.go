@@ -142,6 +142,16 @@ func (bm *BotManager) pollUpdates() {
 	}
 }
 
+// 新增: contains 函数 (从 agent.go 复制，供 bot.go 使用)
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
 // 修复: pollPendingTasks 增强触发逻辑，确保只在配置环境中触发，并打印用户信息相关日志
 func (bm *BotManager) pollPendingTasks() {
 	ticker := time.NewTicker(bm.cfg.API.QueryInterval)
