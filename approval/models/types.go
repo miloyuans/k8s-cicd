@@ -7,16 +7,16 @@ import (
 // DeployRequest 部署任务（从 k8s-cd 同步）
 type DeployRequest struct {
 	Service            string    `json:"service" bson:"service"`                       // 服务名
-	Environments       []string  `json:"environments" bson:"environments"`             // 环境列表（仅一个）
+	Environments       []string  `json:"environments" bson:"environments"`             // 环境列表（多环境拆分时单值）
 	Namespace          string    `json:"namespace" bson:"namespace"`                   // 命名空间
 	Version            string    `json:"version" bson:"version"`                       // 镜像版本
 	User               string    `json:"user" bson:"user"`                             // 操作人
-	CreatedAt          time.Time `json:"created_at" bson:"created_at"`                 // 创建时间
-	ConfirmationStatus string    `json:"confirmation_status" bson:"confirmation_status"` // 待确认, 已确认, 已拒绝 (默认: 待确认)
+	CreatedAt          time.Time `json:"created_at" bson:"created_at,index"`           // 创建时间 (排序字段，升序索引)
+	ConfirmationStatus string    `json:"confirmation_status" bson:"confirmation_status"` // 待确认, 已确认, 已拒绝
 	PopupSent          bool      `json:"popup_sent" bson:"popup_sent"`                 // 是否已发送弹窗
 	PopupMessageID     int       `json:"popup_message_id" bson:"popup_message_id"`     // Telegram 消息ID
 	PopupSentAt        time.Time `json:"popup_sent_at" bson:"popup_sent_at"`           // 弹窗发送时间
-	TaskID             string    `json:"task_id" bson:"task_id"`                       // 唯一任务ID
+	TaskID             string    `json:"task_id" bson:"task_id,unique"`                // UUID v4 唯一ID (全局唯一，避免并发冲突)
 }
 
 // PopupMessage 弹窗消息记录（防重）

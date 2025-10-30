@@ -132,6 +132,7 @@ func (a *Approval) periodicQueryAndSync() {
 
 				for i := range tasks {
 					task := &tasks[i]
+					task.CreatedAt = time.Now() // 新增: 设置 CreatedAt (查询顺序 = 存储顺序)
 					task.Namespace = a.cfg.EnvMapping.Mappings[env]
 					// 注意: TaskID 初始设置，但多环境时会重设
 					if task.TaskID == "" {
