@@ -123,12 +123,23 @@ func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error
 	filter := bson.M{
 		"environment":         env,
 		"confirmation_status": "pending",
-		"popup_sent":          bson.M{"$ne": true}, // 关键：未发送弹窗
+		"popup_sent":          bson.M{"$ne": true},
 	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetPendingTasks",
+		"env":    env,
+		"filter": filter,
+	}).Debug("执行 pending 任务查询")
 
 	cursor, err := coll.Find(context.Background(), filter)
 	if err != nil {
-		logrus.Errorf("查询 %s 待确认任务失败: %v", env, err)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPendingTasks",
+			"env":    env,
+		}).Errorf("查询 %s 待确认任务失败: %v", env, err)
 		return nil, err
 	}
 	defer cursor.Close(context.Background())
@@ -144,7 +155,7 @@ func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error
 		"env":    env,
 		"count":  len(tasks),
 		"took":   time.Since(startTime),
-	}).Infof("查询到 %d 个待确认任务", len(tasks))
+	}).Infof("查询到 %d 个待确认任务: %v", len(tasks), tasks) // 打印任务列表
 
 	return tasks, nil
 }
@@ -252,20 +263,56 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 
 // GetPushedServicesAndEnvs 获取所有已 push 的服务和环境
 func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
+	startTime := time.Now()
 	services := make(map[string]bool)
 	envs := make(map[string]bool)
 
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetPushedServicesAndEnvs",
+	}).Debugf("开始扫描所有环境的任务集合")
+
 	for env := range m.cfg.EnvMapping.Mappings {
 		coll := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPushedServicesAndEnvs",
+			"env":    env,
+			"coll":   fmt.Sprintf("tasks_%s", env),
+		}).Debugf("扫描环境 %s 的任务集合", env)
+
 		cursor, err := coll.Find(context.Background(), bson.M{})
 		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "GetPushedServicesAndEnvs",
+				"env":    env,
+			}).Errorf("扫描集合失败: %v", err)
 			continue
 		}
 		var tasks []models.DeployRequest
-		cursor.All(context.Background(), &tasks)
+		if err := cursor.All(context.Background(), &tasks); err != nil {
+			logrus.Warnf("解析任务失败 [%s]: %v", env, err)
+			continue
+		}
+		cursor.Close(context.Background())
+
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPushedServicesAndEnvs",
+			"env":    env,
+			"task_count": len(tasks),
+		}).Debugf("环境 %s 有 %d 个任务", env, len(tasks))
+
 		for _, t := range tasks {
 			services[t.Service] = true
 			envs[env] = true
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "GetPushedServicesAndEnvs",
+				"service": t.Service,
+				"env":     env,
+			}).Tracef("发现服务: %s in %s", t.Service, env) // Trace 级日志，避免过多
 		}
 	}
 
@@ -276,6 +323,15 @@ func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 	for e := range envs {
 		envList = append(envList, e)
 	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":     time.Now().Format("2006-01-02 15:04:05"),
+		"method":   "GetPushedServicesAndEnvs",
+		"services": serviceList,
+		"envs":     envList,
+		"took":     time.Since(startTime),
+	}).Infof("扫描完成: 服务 %v, 环境 %v", serviceList, envList)
+
 	return serviceList, envList, nil
 }
 

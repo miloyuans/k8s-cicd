@@ -45,30 +45,49 @@ func (a *Approval) periodicQueryAndSync() {
 
 	for range ticker.C {
 		startTime := time.Now()
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "periodicQueryAndSync",
+		}).Debug("=== 开始新一轮查询同步循环 ===")
 
-		// 1. 获取已 push 的服务和环境
+		// 1. 获取已 push 的服务和环境 - 添加日志
 		services, envs, err := a.mongo.GetPushedServicesAndEnvs()
 		if err != nil {
-			logrus.Errorf("获取 push 数据失败: %v", err)
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "periodicQueryAndSync",
+			}).Errorf("获取 push 数据失败: %v", err)
 			continue
 		}
 
-		if len(services) == 0 || len(envs) == 0 {
-			logrus.Info("暂无已 push 的服务/环境，跳过本次查询")
-			continue
-		}
-
-		// 2. 打印完整服务和环境列表
 		logrus.WithFields(logrus.Fields{
 			"time":     time.Now().Format("2006-01-02 15:04:05"),
 			"method":   "periodicQueryAndSync",
-			"services": services, // 完整切片输出
-			"envs":     envs,     // 完整切片输出
+			"services": services,
+			"envs":     envs,
+			"confirm_envs": a.cfg.Query.ConfirmEnvs,
+		}).Infof("已获取服务列表: %v, 环境列表: %v (确认环境: %v)", services, envs, a.cfg.Query.ConfirmEnvs)
+
+		if len(services) == 0 || len(envs) == 0 {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "periodicQueryAndSync",
+			}).Warn("暂无已 push 的服务/环境，跳过本次查询")
+			continue
+		}
+
+		// 2. 打印完整服务和环境列表 - 已存在，增强
+		logrus.WithFields(logrus.Fields{
+			"time":     time.Now().Format("2006-01-02 15:04:05"),
+			"method":   "periodicQueryAndSync",
+			"services": services,
+			"envs":     envs,
 			"count_svc": len(services),
 			"count_env": len(envs),
 		}).Infof("开始查询 /query 接口，待查服务: %v，环境: %v", services, envs)
 
-		// 3. 并发查询 (保持原逻辑)
+		// 3. 并发查询 - 添加每个 service/env 的日志
+		totalNewTasks := 0
 		for _, service := range services {
 			if service == "" {
 				logrus.Warn("跳过空服务名")
@@ -77,14 +96,35 @@ func (a *Approval) periodicQueryAndSync() {
 
 			for _, env := range envs {
 				if !contains(a.cfg.Query.ConfirmEnvs, env) {
+					logrus.Debugf("跳过非确认环境: %s", env)
 					continue
 				}
 
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "periodicQueryAndSync",
+					"service": service,
+					"env":     env,
+				}).Debugf("调用 /query 接口查询任务")
+
 				tasks, err := a.queryClient.QueryTasks(service, []string{env})
 				if err != nil {
-					logrus.Errorf("查询任务失败 [%s@%s]: %v", service, env, err)
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "periodicQueryAndSync",
+						"service": service,
+						"env":     env,
+					}).Errorf("查询任务失败: %v", err)
 					continue
 				}
+
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "periodicQueryAndSync",
+					"service": service,
+					"env":     env,
+					"task_count": len(tasks),
+				}).Debugf("查询到 %d 个任务", len(tasks))
 
 				for i := range tasks {
 					task := &tasks[i]
@@ -94,18 +134,40 @@ func (a *Approval) periodicQueryAndSync() {
 					if task.TaskID == "" {
 						task.TaskID = fmt.Sprintf("%s-%s-%s", task.Service, task.Version, env)
 					}
+
+					logrus.WithFields(logrus.Fields{
+						"time":   time.Now().Format("2006-01-02 15:04:05"),
+						"method": "periodicQueryAndSync",
+						"task_id": task.TaskID,
+						"service": task.Service,
+						"version": task.Version,
+						"env":     env,
+					}).Debugf("准备存储任务: %+v", task) // 打印完整任务
+
 					if err := a.mongo.StoreTaskIfNotExists(*task); err != nil {
-						logrus.Debugf("任务已存在: %s", task.TaskID)
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "periodicQueryAndSync",
+							"task_id": task.TaskID,
+						}).Debugf("任务已存在，跳过存储: %v", err)
+					} else {
+						totalNewTasks++
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "periodicQueryAndSync",
+							"task_id": task.TaskID,
+						}).Infof("新任务存储成功")
 					}
 				}
 			}
 		}
 
 		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "periodicQueryAndSync",
-			"took":   time.Since(startTime),
-		}).Infof("查询同步完成")
+			"time":         time.Now().Format("2006-01-02 15:04:05"),
+			"method":       "periodicQueryAndSync",
+			"new_tasks":    totalNewTasks,
+			"took":         time.Since(startTime),
+		}).Infof("查询同步完成，本轮新增 %d 个任务", totalNewTasks)
 	}
 }
 
