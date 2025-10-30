@@ -24,13 +24,41 @@ type MongoClient struct {
 }
 
 // 修改: NewMongoClient 添加复合唯一索引 (service+version+environment+created_at) 防重
+// 修复: NewMongoClient 完整，确保 client 定义和传递
 func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	startTime := time.Now()
 
-	// ... (原有连接逻辑不变)
+	// 步骤1：创建客户端配置
+	clientOptions := options.Client().
+		ApplyURI(cfg.URI).
+		SetConnectTimeout(5*time.Second).
+		SetMaxPoolSize(10).
+		SetMinPoolSize(2)
 
-	// 步骤4：创建 TTL 索引 + 复合唯一索引
-	if err := createIndexes(client, cfg); err != nil { // 修改: createIndexes
+	// 步骤2：连接 MongoDB
+	client, err := mongo.Connect(context.Background(), clientOptions) // client 定义
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewMongoClient",
+			"took":   time.Since(startTime),
+		}).Errorf("MongoDB 连接失败: %v", err)
+		return nil, fmt.Errorf("MongoDB 连接失败: %v", err)
+	}
+
+	// 步骤3：测试连接
+	ctx := context.Background()
+	if err := client.Ping(ctx, readpref.Primary()); err != nil { // readpref 使用
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewMongoClient",
+			"took":   time.Since(startTime),
+		}).Errorf("MongoDB ping 失败: %v", err)
+		return nil, fmt.Errorf("MongoDB ping 失败: %v", err)
+	}
+
+	// 步骤4：创建索引
+	if err := createIndexes(client, cfg); err != nil { // client 传递
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "NewMongoClient",
@@ -48,14 +76,15 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 }
 
 // 新增: createIndexes 创建 TTL + 复合唯一索引 + created_at 排序索引
-func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
+// 修复: createIndexes 完整，确保 client param 定义 (line 33/47: client.Database)
+func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error { // client param
 	ctx := context.Background()
 
 	// 1. 为每个环境的任务集合创建索引
 	for env := range cfg.EnvMapping.Mappings {
-		collection := client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		collection := client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env)) // client 定义
 
-		// TTL 索引 (不变)
+		// TTL 索引
 		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
 			Keys:    bson.D{{Key: "created_at", Value: 1}},
 			Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
@@ -64,13 +93,13 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 			return fmt.Errorf("创建任务 TTL 索引失败 [%s]: %v", env, err)
 		}
 
-		// 新增: 复合唯一索引 (防并发重: service+version+environment+created_at)
+		// 复合唯一索引 (防重: service+version+environment+created_at)
 		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
 			Keys: bson.D{
 				{Key: "service", Value: 1},
 				{Key: "version", Value: 1},
 				{Key: "environment", Value: 1},
-				{Key: "created_at", Value: 1}, // 包含时间防同秒冲突
+				{Key: "created_at", Value: 1},
 			},
 			Options: options.Index().SetUnique(true),
 		})
@@ -78,7 +107,7 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 			return fmt.Errorf("创建复合唯一索引失败 [%s]: %v", env, err)
 		}
 
-		// 新增: created_at 升序排序索引 (查询优化)
+		// created_at 升序排序索引
 		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
 			Keys:    bson.D{{Key: "created_at", Value: 1}},
 			Options: options.Index().SetName("created_at_asc"),
@@ -88,8 +117,8 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 		}
 	}
 
-	// 2. popup_messages TTL (不变)
-	popupColl := client.Database("cicd").Collection("popup_messages")
+	// 2. popup_messages TTL
+	popupColl := client.Database("cicd").Collection("popup_messages") // client 定义
 	_, err := popupColl.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "sent_at", Value: 1}},
 		Options: options.Index().SetExpireAfterSeconds(7 * 24 * 60 * 60),
