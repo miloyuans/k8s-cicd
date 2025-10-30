@@ -390,7 +390,7 @@ func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
 	return nil
 }
 
-// 增强: GetTaskByID 添加日志，打印查询到的完整任务数据
+// 确认: GetTaskByID 已包含 PopupMessageID 字段，确保日志打印
 func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -408,6 +408,7 @@ func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) 
 				"method": "GetTaskByID",
 				"task_id": taskID,
 				"env":     env,
+				"popup_message_id": task.PopupMessageID, // 确保包含用于删除
 				"full_task": fmt.Sprintf("%+v", task), // 打印完整任务数据
 				"took":    time.Since(startTime),
 			}).Debugf("任务查询成功: %+v", task)

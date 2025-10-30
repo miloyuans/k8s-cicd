@@ -38,7 +38,7 @@ func (a *Approval) Start() {
 	go a.periodicQueryAndSync()
 }
 
-// 修复: periodicQueryAndSync 打印完整列表
+// 确认实现: periodicQueryAndSync 在存储后再次查询最新数据并打印 - 增强日志突出
 func (a *Approval) periodicQueryAndSync() {
 	ticker := time.NewTicker(a.cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -153,7 +153,13 @@ func (a *Approval) periodicQueryAndSync() {
 					} else {
 						totalNewTasks++
 
-						// 修复1: 存储成功后，立即再次查询该任务的最新数据并打印
+						// 确认实现: 存储成功后，立即再次查询该任务的最新数据并打印
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "periodicQueryAndSync",
+							"task_id": task.TaskID,
+						}).Info("=== 开始查询最新存储任务数据 ===")
+
 						latestTask, err := a.mongo.GetTaskByID(task.TaskID)
 						if err != nil {
 							logrus.WithFields(logrus.Fields{
@@ -166,8 +172,11 @@ func (a *Approval) periodicQueryAndSync() {
 								"time":   time.Now().Format("2006-01-02 15:04:05"),
 								"method": "periodicQueryAndSync",
 								"task_id": task.TaskID,
-								"latest_task": fmt.Sprintf("%+v", latestTask), // 打印最新完整数据
-							}).Infof("任务存储成功，最新数据: %+v", latestTask)
+								"latest_task_status": latestTask.ConfirmationStatus,
+								"latest_task_popup_sent": latestTask.PopupSent,
+								"latest_task_full": fmt.Sprintf("%+v", latestTask), // 完整最新数据
+							}).Infof("=== 任务存储成功，最新数据查询完成: status=%s, popup_sent=%t ===\nFull Data: %+v", 
+								latestTask.ConfirmationStatus, latestTask.PopupSent, latestTask)
 						}
 
 						logrus.WithFields(logrus.Fields{

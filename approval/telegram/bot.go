@@ -412,7 +412,7 @@ func (bm *BotManager) answerCallback(callbackID, text string) {
 	http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery", bot.Token), "application/json", bytes.NewBuffer(jsonData))
 }
 
-// 修改: HandleCallback 完整实现权限检查、日志、拒绝删除
+// 修复: HandleCallback - 用户选择后立即删除原弹窗，发送反馈（不删除），并更新状态
 func (bm *BotManager) HandleCallback(data map[string]interface{}) {
 	startTime := time.Now()
 	id := data["id"].(string)
@@ -438,7 +438,7 @@ func (bm *BotManager) HandleCallback(data map[string]interface{}) {
 	}
 
 	// 获取 bot 并检查权限
-	bot, err := bm.getBotForTask(taskID) // 新增: 根据任务获取 bot
+	bot, err := bm.getBotForTask(taskID)
 	if err != nil {
 		bm.answerCallback(id, "机器人未找到")
 		return
@@ -473,33 +473,49 @@ func (bm *BotManager) HandleCallback(data map[string]interface{}) {
 		return
 	}
 
-	// 发送结果通知
+	// 修复: 立即删除原弹窗消息（使用 popup_message_id）
+	if task.PopupMessageID > 0 {
+		if err := bm.DeleteMessage(bot, bot.GroupID, task.PopupMessageID); err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":    time.Now().Format("2006-01-02 15:04:05"),
+				"method":  "HandleCallback",
+				"task_id": taskID,
+				"message_id": task.PopupMessageID,
+			}).Errorf("删除原弹窗失败: %v", err)
+		} else {
+			logrus.WithFields(logrus.Fields{
+				"time":    time.Now().Format("2006-01-02 15:04:05"),
+				"method":  "HandleCallback",
+				"task_id": taskID,
+				"message_id": task.PopupMessageID,
+			}).Infof("原弹窗已立即删除")
+		}
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "HandleCallback",
+			"task_id": taskID,
+		}).Warnf("无弹窗 message_id，无法删除")
+	}
+
+	// 发送结果反馈信息（不删除）
 	chatID := bot.GroupID
-	feedbackText := fmt.Sprintf("✅ <b>%s 部署</b>\n\n服务: <code>%s</code>\n版本: <code>%s</code>\n环境: <code>%s</code>\n操作人: <code>%s</code>", 
-		strings.ToUpper(action), task.Service, task.Version, task.Environments[0], username)
+	feedbackText := fmt.Sprintf("✅ <b>%s 部署请求</b>\n\n服务: <code>%s</code>\n版本: <code>%s</code>\n环境: <code>%s</code>\n操作人: <code>%s</code>\n任务ID: <code>%s</code>", 
+		strings.ToUpper(action), task.Service, task.Version, task.Environments[0], username, taskID)
 	feedbackID, err := bm.sendMessage(bot, chatID, feedbackText, "HTML")
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":    time.Now().Format("2006-01-02 15:04:05"),
 			"method":  "HandleCallback",
 			"task_id": taskID,
-		}).Errorf("结果通知失败: %v", err)
+		}).Errorf("结果反馈发送失败: %v", err)
 	} else {
 		logrus.WithFields(logrus.Fields{
 			"time":     time.Now().Format("2006-01-02 15:04:05"),
 			"method":   "HandleCallback",
 			"task_id":  taskID,
-			"feedback": feedbackID,
-		}).Infof("结果通知已发送")
-		// 30秒后删除通知
-		go func(fid int) {
-			time.Sleep(30 * time.Second)
-			if err := bm.DeleteMessage(bot, chatID, fid); err != nil {
-				logrus.Warnf("删除结果通知失败: %v", err)
-			} else {
-				logrus.Debugf("已删除结果通知 message_id=%d", fid)
-			}
-		}(feedbackID)
+			"feedback_id": feedbackID,
+		}).Infof("结果反馈已发送 (不删除): %s", feedbackText)
 	}
 
 	// 拒绝时立即删除任务 + 打印完整任务数据
@@ -527,7 +543,7 @@ func (bm *BotManager) HandleCallback(data map[string]interface{}) {
 		}
 	}
 
-	bm.answerCallback(id, fmt.Sprintf("操作已执行: %s", action))
+	bm.answerCallback(id, fmt.Sprintf("操作已执行: %s (弹窗已删除，反馈已发送)", action))
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -537,7 +553,7 @@ func (bm *BotManager) HandleCallback(data map[string]interface{}) {
 		"action": action,
 		"task_id": taskID,
 		"took":   time.Since(startTime),
-	}).Infof("回调处理完成")
+	}).Infof("回调处理完成: 原弹窗删除 + 反馈发送")
 }
 
 // 修改: isUserAllowed 支持机器人级权限
