@@ -1,3 +1,4 @@
+// 文件: mongo.go (完整文件，添加了 DeleteTask 函数)
 package client
 
 import (
@@ -173,24 +174,28 @@ func (m *MongoClient) MarkPopupSent(taskID string, messageID int) error {
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "MarkPopupSent",
 				"task_id": taskID,
-				"took":    time.Since(startTime),
-			}).Infof("任务弹窗标记成功")
-			break
+				"took":   time.Since(startTime),
+			}).Infof("标记弹窗已发送成功")
+			// 2. 记录弹窗消息（用于防重）
+			popupColl := m.client.Database("cicd").Collection("popup_messages")
+			_, err := popupColl.InsertOne(ctx, bson.M{
+				"task_id":     taskID,
+				"message_id":  messageID,
+				"sent_at":     time.Now(),
+			})
+			if err != nil {
+				logrus.Warnf("记录弹窗消息失败: %v", err)
+			}
+			return nil
 		}
 	}
 
-	// 2. 记录弹窗消息（用于防重）
-	popupColl := m.client.Database("cicd").Collection("popup_messages")
-	_, err := popupColl.InsertOne(ctx, bson.M{
-		"task_id":     taskID,
-		"message_id":  messageID,
-		"sent_at":     time.Now(),
-	})
-	if err != nil {
-		logrus.Warnf("记录弹窗消息失败: %v", err)
-	}
-
-	return nil
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "MarkPopupSent",
+		"took":   time.Since(startTime),
+	}).Warnf("未找到任务 task_id=%s", taskID)
+	return fmt.Errorf("任务未找到")
 }
 
 // UpdateTaskStatus 更新任务确认状态
@@ -344,6 +349,37 @@ func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) 
 		"took":   time.Since(startTime),
 	}).Warnf("任务未找到 task_id=%s", taskID)
 	return nil, fmt.Errorf("task not found")
+}
+
+// DeleteTask 删除指定任务（立即执行删除操作）
+func (m *MongoClient) DeleteTask(taskID string) error {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	for env := range m.cfg.EnvMapping.Mappings {
+		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		filter := bson.M{"task_id": taskID}
+		result, err := collection.DeleteOne(ctx, filter)
+		if err != nil {
+			continue
+		}
+		if result.DeletedCount > 0 {
+			logrus.WithFields(logrus.Fields{
+				"time":    time.Now().Format("2006-01-02 15:04:05"),
+				"method":  "DeleteTask",
+				"task_id": taskID,
+				"took":    time.Since(startTime),
+			}).Infof("任务删除成功")
+			return nil
+		}
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":    time.Now().Format("2006-01-02 15:04:05"),
+		"method":  "DeleteTask",
+		"took":    time.Since(startTime),
+	}).Warnf("未找到要删除的任务 task_id=%s", taskID)
+	return fmt.Errorf("task not found")
 }
 
 // Close 关闭连接

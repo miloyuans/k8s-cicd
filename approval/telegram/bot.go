@@ -1,3 +1,4 @@
+// 文件: bot.go (完整文件，优化了 HandleCallback 函数：调整状态、反馈消息，并添加立即删除操作)
 package telegram
 
 import (
@@ -210,79 +211,53 @@ func (bm *BotManager) sendConfirmation(task *models.DeployRequest) error {
 
 	bot, err := bm.getBotForService(task.Service)
 	if err != nil {
-		return fmt.Errorf("选择机器人失败: %w", err)
+		return err
 	}
 
-	if task.TaskID == "" {
-		task.TaskID = uuid.New().String()
-	}
-
-	// 安全模板：纯文本，无 Markdown
-	message := fmt.Sprintf(`[部署确认]
-服务: %s
-环境: %s
-版本: %s
-操作人: %s
-
-请选择:
-[确认部署] / [拒绝部署]`,
-		task.Service,
-		env,
-		task.Version,
-		task.User,
+	text := fmt.Sprintf(
+		"部署确认:\n服务: %s\n版本: %s\n环境: %s\n用户: %s\n时间: %s",
+		task.Service, task.Version, env, task.User, task.CreatedAt.Format("2006-01-02 15:04:05"),
 	)
 
-	confirmData := fmt.Sprintf("confirm:%s", task.TaskID)
-	rejectData := fmt.Sprintf("reject:%s", task.TaskID)
-
 	keyboard := map[string]interface{}{
-		"inline_keyboard": [][]map[string]string{
-			{
-				{"text": "确认部署", "callback_data": confirmData},
-				{"text": "拒绝部署", "callback_data": rejectData},
-			},
-		},
+		"inline_keyboard": [][]map[string]string{{
+			{"text": "✅ 确认", "callback_data": fmt.Sprintf("confirm_%s", task.TaskID)},
+			{"text": "❌ 拒绝", "callback_data": fmt.Sprintf("reject_%s", task.TaskID)},
+		}},
 	}
 
-	// 不使用 parse_mode
-	messageID, err := bm.sendMessageWithKeyboard(bot, bot.GroupID, message, keyboard, "")
+	messageID, err := bm.sendMessageWithKeyboard(bot, bot.GroupID, text, keyboard, "Markdown")
 	if err != nil {
-		return fmt.Errorf("发送弹窗失败: %w", err)
+		return err
 	}
+
+	// 更新 messageID
+	bm.mongo.MarkPopupSent(task.TaskID, messageID)
 
 	logrus.WithFields(logrus.Fields{
-		"time":       time.Now().Format("2006-01-02 15:04:05"),
-		"method":     "sendConfirmation",
-		"task_id":    task.TaskID,
-		"message_id": messageID,
-		"took":       time.Since(startTime),
-	}).Infof("弹窗发送成功")
-
+		"time":    time.Now().Format("2006-01-02 15:04:05"),
+		"method":  "sendConfirmation",
+		"task_id": task.TaskID,
+		"took":    time.Since(startTime),
+	}).Infof("确认弹窗发送成功")
 	return nil
 }
 
-// HandleCallback 处理回调
-func (bm *BotManager) HandleCallback(update map[string]interface{}) {
+// HandleCallback 处理回调（优化：调整状态和反馈消息，拒绝时立即删除）
+func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
 	startTime := time.Now()
-	callback, ok := update["callback_query"].(map[string]interface{})
-	if !ok {
-		return
-	}
 
-	from := callback["from"].(map[string]interface{})
-	userName := from["username"].(string)
-	data := callback["data"].(string)
-
-	logrus.Infof("收到回调: username=%s, data=%s", userName, data)
+	user := callback["from"].(map[string]interface{})
+	userName := user["username"].(string)
 
 	if !bm.isUserAllowed(userName) {
-		logrus.Warnf("用户无权限: %s", userName)
+		logrus.Warnf("未授权用户尝试操作: @%s", userName)
 		return
 	}
 
-	parts := strings.SplitN(data, ":", 2)
+	data := callback["data"].(string)
+	parts := strings.SplitN(data, "_", 2)
 	if len(parts) != 2 {
-		logrus.Warnf("callback_data 格式错误: %s", data)
 		return
 	}
 	action, taskID := parts[0], parts[1]
@@ -299,9 +274,10 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}) {
 	bot, _ := bm.getBotForService(task.Service)
 	bm.DeleteMessage(bot, chatID, messageID)
 
-	actionText := map[string]string{"confirm": "确认", "reject": "拒绝"}[action]
-	feedback := fmt.Sprintf("用户 @%s 已 %s 部署: %s v%s 在 %s",
-		userName, actionText, task.Service, task.Version, task.Environments[0])
+	actionText := map[string]string{"confirm": "同意", "reject": "拒绝"}[action]
+	queueText := map[string]string{"confirm": "执行", "reject": "删除"}[action]
+	feedback := fmt.Sprintf("任务已经由用户 @%s %s %s v%s 在 %s 进入发布队列 %s中",
+		userName, actionText, task.Service, task.Version, task.Environments[0], queueText)
 
 	feedbackID, _ := bm.sendMessage(bot, chatID, feedback, "")
 	go func() {
@@ -311,10 +287,17 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}) {
 
 	newStatus := "confirmed"
 	if action == "reject" {
-		newStatus = "delete_pending"
+		newStatus = "rejected"
 	}
 	if err := bm.mongo.UpdateTaskStatus(taskID, newStatus); err != nil {
 		logrus.Errorf("更新任务状态失败: %v", err)
+	}
+
+	// 拒绝时立即执行删除操作
+	if action == "reject" {
+		if err := bm.mongo.DeleteTask(taskID); err != nil {
+			logrus.Errorf("立即删除任务失败: %v", err)
+		}
 	}
 
 	logrus.WithFields(logrus.Fields{
