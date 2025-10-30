@@ -77,6 +77,7 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 
 // 新增: createIndexes 创建 TTL + 复合唯一索引 + created_at 排序索引
 // 修复: createIndexes 完整，确保 client param 定义 (line 33/47: client.Database)
+// 修复: createIndexes 移除单独 created_at_asc 索引 (TTL 已支持 {created_at: 1} 排序)
 func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error { // client param
 	ctx := context.Background()
 
@@ -84,7 +85,7 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error { // cli
 	for env := range cfg.EnvMapping.Mappings {
 		collection := client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env)) // client 定义
 
-		// TTL 索引
+		// TTL 索引 (keys: created_at:1 + expireAfterSeconds，支持排序)
 		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
 			Keys:    bson.D{{Key: "created_at", Value: 1}},
 			Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
@@ -93,7 +94,7 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error { // cli
 			return fmt.Errorf("创建任务 TTL 索引失败 [%s]: %v", env, err)
 		}
 
-		// 复合唯一索引 (防重: service+version+environment+created_at)
+		// 复合唯一索引 (防重: service+version+environment+created_at，支持排序)
 		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
 			Keys: bson.D{
 				{Key: "service", Value: 1},
@@ -107,17 +108,10 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error { // cli
 			return fmt.Errorf("创建复合唯一索引失败 [%s]: %v", env, err)
 		}
 
-		// created_at 升序排序索引
-		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
-			Keys:    bson.D{{Key: "created_at", Value: 1}},
-			Options: options.Index().SetName("created_at_asc"),
-		})
-		if err != nil {
-			return fmt.Errorf("创建排序索引失败 [%s]: %v", env, err)
-		}
+		// 移除: 单独 created_at_asc 索引 (TTL/复合已覆盖排序需求，避免冲突)
 	}
 
-	// 2. popup_messages TTL
+	// 2. popup_messages TTL (不变)
 	popupColl := client.Database("cicd").Collection("popup_messages") // client 定义
 	_, err := popupColl.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "sent_at", Value: 1}},
