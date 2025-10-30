@@ -339,10 +339,9 @@ func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 	return serviceList, envList, nil
 }
 
-// 新增: StoreTaskIfNotExistsEnv 指定 env 存储 (支持多环境拆分)
+// 完善: StoreTaskIfNotExistsEnv 支持传入的动态状态/PopupSent (无变更，直接使用 task 的值)
 func (m *MongoClient) StoreTaskIfNotExistsEnv(task models.DeployRequest, env string) error {
 	startTime := time.Now()
-	task.PopupSent = false // 确保
 
 	// 验证环境
 	if len(task.Environments) == 0 || task.Environments[0] != env {
@@ -359,7 +358,7 @@ func (m *MongoClient) StoreTaskIfNotExistsEnv(task models.DeployRequest, env str
 		"environment": env,
 	}
 
-	// 仅在不存在时插入
+	// 仅在不存在时插入 (使用传入的 ConfirmationStatus 和 PopupSent)
 	opts := options.Update().SetUpsert(true)
 	update := bson.M{"$setOnInsert": task}
 
@@ -370,6 +369,8 @@ func (m *MongoClient) StoreTaskIfNotExistsEnv(task models.DeployRequest, env str
 			"method":  "StoreTaskIfNotExistsEnv",
 			"task_id": task.TaskID,
 			"env":     env,
+			"status":  task.ConfirmationStatus, // 日志动态状态
+			"popup_sent": task.PopupSent,
 			"took":    time.Since(startTime),
 		}).Errorf("存储任务失败: %v", err)
 		return err
@@ -382,8 +383,10 @@ func (m *MongoClient) StoreTaskIfNotExistsEnv(task models.DeployRequest, env str
 			"method":  "StoreTaskIfNotExistsEnv",
 			"task_id": task.TaskID,
 			"env":     env,
+			"status":  task.ConfirmationStatus,
+			"popup_sent": task.PopupSent,
 			"took":    time.Since(startTime),
-		}).Infof("任务存储成功（新插入） - env-specific")
+		}).Infof("任务存储成功（新插入） - env-specific (状态: %s)", task.ConfirmationStatus)
 	} else {
 		logrus.WithFields(logrus.Fields{
 			"time":    time.Now().Format("2006-01-02 15:04:05"),
