@@ -2,7 +2,7 @@
 package approval
 
 import (
-	//"context"
+	"context"
 	"fmt"
 	"time"
 
@@ -13,6 +13,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 type Approval struct {
@@ -41,6 +42,7 @@ func (a *Approval) Start() {
 // 修复: periodicQueryAndSync 使用 "待确认" 状态设置、更新和验证
 // 修改: periodicQueryAndSync 支持多环境拆分存储 + 独立验证
 // 完善: periodicQueryAndSync 支持多环境拆分 + 动态状态 (confirm_envs 决定待确认/已确认)
+// 修复: periodicQueryAndSync (line 193: 改为 _, ok := a.cfg.EnvMapping.Mappings[subEnv])
 func (a *Approval) periodicQueryAndSync() {
 	ticker := time.NewTicker(a.cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -190,8 +192,13 @@ func (a *Approval) periodicQueryAndSync() {
 						}).Infof("检测到多环境任务，开始拆分存储 + 动态状态")
 
 						for _, subEnv := range task.Environments {
-							if !contains(a.cfg.EnvMapping.Mappings, subEnv) { // 确保 env 在映射中
-								logrus.Debugf("跳过多环境子任务无效环境: %s", subEnv)
+							// 修复 line 193: 检查 map key 存在
+							if _, ok := a.cfg.EnvMapping.Mappings[subEnv]; !ok {
+								logrus.WithFields(logrus.Fields{
+									"time":   time.Now().Format("2006-01-02 15:04:05"),
+									"method": "periodicQueryAndSync",
+									"sub_env": subEnv,
+								}).Debugf("跳过多环境子任务无效环境 (不在 EnvMapping): %s", subEnv)
 								continue
 							}
 
@@ -254,6 +261,7 @@ func (a *Approval) periodicQueryAndSync() {
 
 // 新增: handleStoredTask 统一处理存储后验证 (提取复用)
 // 完善: handleStoredTask 支持动态验证 (基于 isConfirmEnv 检查状态正确性)
+// 完善: handleStoredTask 支持动态验证 (基于 isConfirmEnv 检查状态正确性) - line 319 修复: 使用 context.Background() 和 bson.M
 func (a *Approval) handleStoredTask(taskID, env string, isConfirmEnv bool) {
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -314,9 +322,10 @@ func (a *Approval) handleStoredTask(taskID, env string, isConfirmEnv bool) {
 		}).Errorf("最新状态不匹配预期，强制更新")
 		// 强制重新更新
 		a.mongo.UpdateTaskStatus(taskID, expectedStatus, "system")
-		// 更新 PopupSent (需额外 UpdateOne)
+		// 更新 PopupSent (需额外 UpdateOne) - 修复: 使用 context.Background() 和 bson.M
 		coll := a.mongo.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
-		coll.UpdateOne(context.Background(), bson.M{"task_id": taskID}, bson.M{"$set": bson.M{"popup_sent": expectedPopupSent}})
+		ctx := context.Background() // 修复: context.Background()
+		coll.UpdateOne(ctx, bson.M{"task_id": taskID}, bson.M{"$set": bson.M{"popup_sent": expectedPopupSent}}) // 修复: bson.M
 		latestTask, _ = a.mongo.GetTaskByID(taskID)
 	} else {
 		logrus.WithFields(logrus.Fields{
