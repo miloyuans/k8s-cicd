@@ -339,27 +339,27 @@ func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 	return serviceList, envList, nil
 }
 
-// StoreTaskIfNotExists 存储任务（防重：service+version+env 唯一）
-func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
+// 新增: StoreTaskIfNotExistsEnv 指定 env 存储 (支持多环境拆分)
+func (m *MongoClient) StoreTaskIfNotExistsEnv(task models.DeployRequest, env string) error {
 	startTime := time.Now()
-	task.PopupSent = false
-	// 1. 验证环境
-	if len(task.Environments) == 0 {
-		return fmt.Errorf("task.Environments 不能为空")
-	}
-	env := task.Environments[0]
+	task.PopupSent = false // 确保
 
-	// 2. 获取集合
+	// 验证环境
+	if len(task.Environments) == 0 || task.Environments[0] != env {
+		return fmt.Errorf("task.Environments[0] 必须为 %s", env)
+	}
+
+	// 获取集合 (env-specific)
 	coll := m.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 
-	// 3. 唯一键过滤
+	// 唯一键过滤 (env-specific)
 	filter := bson.M{
 		"service":     task.Service,
 		"version":     task.Version,
 		"environment": env,
 	}
 
-	// 4. 仅在不存在时插入
+	// 仅在不存在时插入
 	opts := options.Update().SetUpsert(true)
 	update := bson.M{"$setOnInsert": task}
 
@@ -367,31 +367,42 @@ func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "StoreTaskIfNotExists",
+			"method":  "StoreTaskIfNotExistsEnv",
 			"task_id": task.TaskID,
+			"env":     env,
 			"took":    time.Since(startTime),
 		}).Errorf("存储任务失败: %v", err)
 		return err
 	}
 
-	// 5. 判断是否插入
+	// 判断是否插入
 	if result.UpsertedCount > 0 {
 		logrus.WithFields(logrus.Fields{
 			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "StoreTaskIfNotExists",
+			"method":  "StoreTaskIfNotExistsEnv",
 			"task_id": task.TaskID,
+			"env":     env,
 			"took":    time.Since(startTime),
-		}).Infof("任务存储成功（新插入）")
+		}).Infof("任务存储成功（新插入） - env-specific")
 	} else {
 		logrus.WithFields(logrus.Fields{
 			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "StoreTaskIfNotExists",
+			"method":  "StoreTaskIfNotExistsEnv",
 			"task_id": task.TaskID,
+			"env":     env,
 			"took":    time.Since(startTime),
-		}).Debugf("任务已存在（跳过）")
+		}).Debugf("任务已存在（跳过） - env-specific")
 	}
 
 	return nil
+}
+
+// StoreTaskIfNotExists 存储任务（防重：service+version+env 唯一）
+func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
+	if len(task.Environments) == 0 {
+		return fmt.Errorf("task.Environments 不能为空")
+	}
+	return m.StoreTaskIfNotExistsEnv(task, task.Environments[0])
 }
 
 // 确认: GetTaskByID 已包含 PopupMessageID 字段，确保日志打印
