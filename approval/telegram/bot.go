@@ -142,7 +142,7 @@ func (bm *BotManager) pollUpdates() {
 	}
 }
 
-// pollPendingTasks 周期性查询待弹窗任务（只发一次）
+// 修复: pollPendingTasks 增强触发逻辑，确保只在配置环境中触发，并打印用户信息相关日志
 func (bm *BotManager) pollPendingTasks() {
 	ticker := time.NewTicker(bm.cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -153,15 +153,16 @@ func (bm *BotManager) pollPendingTasks() {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "pollPendingTasks",
+				"confirm_envs": bm.cfg.Query.ConfirmEnvs, // 打印配置环境
 			}).Debug("=== 开始新一轮 pending 任务轮询 ===")
 
 			totalSent := 0
-			for _, env := range bm.cfg.Query.ConfirmEnvs {
+			for _, env := range bm.cfg.Query.ConfirmEnvs { // 严格使用配置的 confirm_envs
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "pollPendingTasks",
 					"env":    env,
-				}).Debugf("查询 %s 环境的 pending 任务", env)
+				}).Debugf("查询 %s 环境的 pending 任务 (配置确认环境)", env)
 
 				tasks, err := bm.mongo.GetPendingTasks(env)
 				if err != nil {
@@ -183,6 +184,17 @@ func (bm *BotManager) pollPendingTasks() {
 				for i := range tasks {
 					task := &tasks[i]
 
+					// 修复2: 检查任务环境是否在配置中（冗余检查）
+					if !contains(bm.cfg.Query.ConfirmEnvs, task.Environments[0]) {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "pollPendingTasks",
+							"task_id": task.TaskID,
+							"env":     task.Environments[0],
+						}).Warnf("任务环境 %s 不在确认列表中，跳过弹窗", task.Environments[0])
+						continue
+					}
+
 					bm.mu.Lock()
 					if bm.sentTasks[task.TaskID] {
 						logrus.WithFields(logrus.Fields{
@@ -200,7 +212,32 @@ func (bm *BotManager) pollPendingTasks() {
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "pollPendingTasks",
 						"task_id": task.TaskID,
-					}).Infof("准备发送弹窗: %s", task.TaskID)
+						"env":     task.Environments[0],
+					}).Infof("准备发送弹窗: %s (环境: %s)", task.TaskID, task.Environments[0])
+
+					// 获取 bot 并检查 allowed_users
+					bot, err := bm.getBotForService(task.Service)
+					if err != nil || len(bot.AllowedUsers) == 0 {
+						logrus.WithFields(logrus.Fields{
+							"time":   time.Now().Format("2006-01-02 15:04:05"),
+							"method": "pollPendingTasks",
+							"task_id": task.TaskID,
+							"service": task.Service,
+							"allowed_users": bot.AllowedUsers,
+						}).Warnf("无匹配机器人或 allowed_users 为空，跳过弹窗: %v", err)
+						bm.mu.Lock()
+						delete(bm.sentTasks, task.TaskID)
+						bm.mu.Unlock()
+						continue
+					}
+
+					logrus.WithFields(logrus.Fields{
+						"time":     time.Now().Format("2006-01-02 15:04:05"),
+						"method":   "pollPendingTasks",
+						"task_id":  task.TaskID,
+						"bot":      bot.Name,
+						"allowed_users": bot.AllowedUsers, // 打印用户信息
+					}).Debugf("使用机器人 %s 发送弹窗，通知用户: %v", bot.Name, bot.AllowedUsers)
 
 					startTime := time.Now()
 					if err := bm.sendConfirmation(task); err != nil {
@@ -223,7 +260,8 @@ func (bm *BotManager) pollPendingTasks() {
 						"method":   "pollPendingTasks",
 						"task_id":  task.TaskID,
 						"took":     time.Since(startTime),
-					}).Infof("弹窗发送成功")
+						"allowed_users": bot.AllowedUsers,
+					}).Infof("弹窗发送成功，通知用户: %v", bot.AllowedUsers)
 				}
 			}
 
@@ -231,7 +269,8 @@ func (bm *BotManager) pollPendingTasks() {
 				"time":     time.Now().Format("2006-01-02 15:04:05"),
 				"method":   "pollPendingTasks",
 				"sent_count": totalSent,
-			}).Debugf("本轮轮询发送 %d 个弹窗", totalSent)
+				"confirm_envs": bm.cfg.Query.ConfirmEnvs,
+			}).Debugf("本轮轮询发送 %d 个弹窗 (配置环境: %v)", totalSent, bm.cfg.Query.ConfirmEnvs)
 		case <-bm.stopChan:
 			return
 		}

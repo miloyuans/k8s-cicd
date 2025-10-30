@@ -152,6 +152,24 @@ func (a *Approval) periodicQueryAndSync() {
 						}).Debugf("任务已存在，跳过存储: %v", err)
 					} else {
 						totalNewTasks++
+
+						// 修复1: 存储成功后，立即再次查询该任务的最新数据并打印
+						latestTask, err := a.mongo.GetTaskByID(task.TaskID)
+						if err != nil {
+							logrus.WithFields(logrus.Fields{
+								"time":   time.Now().Format("2006-01-02 15:04:05"),
+								"method": "periodicQueryAndSync",
+								"task_id": task.TaskID,
+							}).Errorf("存储后查询最新任务失败: %v", err)
+						} else {
+							logrus.WithFields(logrus.Fields{
+								"time":   time.Now().Format("2006-01-02 15:04:05"),
+								"method": "periodicQueryAndSync",
+								"task_id": task.TaskID,
+								"latest_task": fmt.Sprintf("%+v", latestTask), // 打印最新完整数据
+							}).Infof("任务存储成功，最新数据: %+v", latestTask)
+						}
+
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "periodicQueryAndSync",

@@ -390,7 +390,7 @@ func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
 	return nil
 }
 
-// GetTaskByID 根据 task_id 获取任务
+// 增强: GetTaskByID 添加日志，打印查询到的完整任务数据
 func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -407,8 +407,10 @@ func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) 
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "GetTaskByID",
 				"task_id": taskID,
+				"env":     env,
+				"full_task": fmt.Sprintf("%+v", task), // 打印完整任务数据
 				"took":    time.Since(startTime),
-			}).Infof("任务查询成功")
+			}).Debugf("任务查询成功: %+v", task)
 			return &task, nil
 		}
 	}
