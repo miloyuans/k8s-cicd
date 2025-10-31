@@ -1,3 +1,5 @@
+// 修正后的 client/mongo_client.go：在新增方法中添加 "github.com/fatih/color" import，并使用 color 在日志中。
+
 package client
 
 import (
@@ -8,6 +10,7 @@ import (
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
 
+	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -39,7 +42,7 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "NewMongoClient",
 			"took":   time.Since(startTime),
-		}).Errorf("MongoDB 连接失败: %v", err)
+		}).Errorf(color.RedString("MongoDB 连接失败: %v"), err)
 		return nil, fmt.Errorf("MongoDB 连接失败: %v", err)
 	}
 
@@ -50,7 +53,7 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "NewMongoClient",
 			"took":   time.Since(startTime),
-		}).Errorf("MongoDB ping 失败: %v", err)
+		}).Errorf(color.RedString("MongoDB ping 失败: %v"), err)
 		return nil, fmt.Errorf("MongoDB ping 失败: %v", err)
 	}
 
@@ -60,7 +63,7 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "NewMongoClient",
 			"took":   time.Since(startTime),
-		}).Errorf("创建 TTL 索引失败: %v", err)
+		}).Errorf(color.RedString("创建 TTL 索引失败: %v"), err)
 		return nil, err
 	}
 
@@ -68,118 +71,8 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "NewMongoClient",
 		"took":   time.Since(startTime),
-	}).Info("MongoDB 连接成功")
+	}).Info(color.GreenString("MongoDB 连接成功"))
 	return &MongoClient{client: client, cfg: cfg}, nil
-}
-
-// StorePushData 存储推送数据到 pushlist 数据库
-func (m *MongoClient) StorePushData(data *models.PushData) error {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	collection := m.client.Database("pushlist").Collection("push_data")
-	data.UpdatedAt = time.Now()
-
-	// 使用 Upsert 模式：替换整个文档
-	filter := bson.M{"_id": "global_push_data"} // 固定 ID 用于全量存储
-	update := bson.M{"$set": data}
-
-	_, err := collection.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true))
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "StorePushData",
-			"took":   time.Since(startTime),
-		}).Errorf("存储推送数据失败: %v", err)
-		return err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "StorePushData",
-		"took":   time.Since(startTime),
-		"data": logrus.Fields{
-			"service_count": len(data.Services),
-			"env_count":     len(data.Environments),
-		},
-	}).Infof(color.GreenString("推送数据存储成功"))
-	return nil
-}
-
-// GetPushData 获取存储的推送数据
-func (m *MongoClient) GetPushData() (*models.PushData, error) {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	collection := m.client.Database("pushlist").Collection("push_data")
-	filter := bson.M{"_id": "global_push_data"}
-
-	var data models.PushData
-	err := collection.FindOne(ctx, filter).Decode(&data)
-	if err == mongo.ErrNoDocuments {
-		return nil, nil // 无数据视为首次
-	}
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPushData",
-			"took":   time.Since(startTime),
-		}).Errorf("获取推送数据失败: %v", err)
-		return nil, err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushData",
-		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("推送数据获取成功"))
-	return &data, nil
-}
-
-// HasChanges 检查当前发现数据是否有变化（返回 true 如果变化）
-func (m *MongoClient) HasChanges(currentServices, currentEnvs []string, stored *models.PushData) bool {
-	if stored == nil {
-		return true // 首次，无存储数据
-	}
-
-	// 去重当前
-	currentServiceSet := make(map[string]struct{})
-	for _, s := range currentServices {
-		currentServiceSet[s] = struct{}{}
-	}
-	currentEnvSet := make(map[string]struct{})
-	for _, e := range currentEnvs {
-		currentEnvSet[e] = struct{}{}
-	}
-
-	// 比较
-	storedServiceSet := make(map[string]struct{})
-	for _, s := range stored.Services {
-		storedServiceSet[s] = struct{}{}
-	}
-	if len(currentServiceSet) != len(storedServiceSet) {
-		return true
-	}
-	for s := range currentServiceSet {
-		if _, ok := storedServiceSet[s]; !ok {
-			return true
-		}
-	}
-
-	storedEnvSet := make(map[string]struct{})
-	for _, e := range stored.Environments {
-		storedEnvSet[e] = struct{}{}
-	}
-	if len(currentEnvSet) != len(storedEnvSet) {
-		return true
-	}
-	for e := range currentEnvSet {
-		if _, ok := storedEnvSet[e]; !ok {
-			return true
-		}
-	}
-
-	return false
 }
 
 // createTTLIndexes 创建 TTL 索引
@@ -243,7 +136,7 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 			"env":    env,
 			"status": status,
 			"took":   time.Since(startTime),
-		}).Errorf("查询任务失败: %v", err)
+		}).Errorf(color.RedString("查询任务失败: %v"), err)
 		return nil, err
 	}
 	defer cursor.Close(ctx)
@@ -254,7 +147,7 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetTasksByStatus",
 			"took":   time.Since(startTime),
-		}).Errorf("解码任务失败: %v", err)
+		}).Errorf(color.RedString("解码任务失败: %v"), err)
 		return nil, err
 	}
 
@@ -265,7 +158,7 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 		"status": status,
 		"count":  len(tasks),
 		"took":   time.Since(startTime),
-	}).Infof("查询到 %d 个任务", len(tasks))
+	}).Infof(color.GreenString("查询到 %d 个任务"), len(tasks))
 	return tasks, nil
 }
 
@@ -294,7 +187,7 @@ func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status strin
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateTaskStatus",
 			"took":   time.Since(startTime),
-		}).Errorf("更新任务状态失败: %v", err)
+		}).Errorf(color.RedString("更新任务状态失败: %v"), err)
 		return err
 	}
 
@@ -303,7 +196,7 @@ func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status strin
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateTaskStatus",
 			"took":   time.Since(startTime),
-		}).Warnf("未找到匹配任务: %s v%s [%s]", service, version, env)
+		}).Warnf(color.YellowString("未找到匹配任务: %s v%s [%s]"), service, version, env)
 		return fmt.Errorf("任务未找到")
 	}
 
@@ -311,7 +204,7 @@ func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status strin
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "UpdateTaskStatus",
 		"took":   time.Since(startTime),
-	}).Infof("任务状态更新成功: %s v%s [%s] -> %s", service, version, env, status)
+	}).Infof(color.GreenString("任务状态更新成功: %s v%s [%s] -> %s"), service, version, env, status)
 	return nil
 }
 
@@ -330,7 +223,7 @@ func (m *MongoClient) StoreImageSnapshot(snapshot *models.ImageSnapshot, taskID 
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "StoreImageSnapshot",
 			"took":   time.Since(startTime),
-		}).Errorf("存储快照失败: %v", err)
+		}).Errorf(color.RedString("存储快照失败: %v"), err)
 		return err
 	}
 
@@ -338,7 +231,7 @@ func (m *MongoClient) StoreImageSnapshot(snapshot *models.ImageSnapshot, taskID 
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "StoreImageSnapshot",
 		"took":   time.Since(startTime),
-	}).Infof("快照存储成功: %s", taskID)
+	}).Infof(color.GreenString("快照存储成功: %s"), taskID)
 	return nil
 }
 
@@ -360,7 +253,7 @@ func (m *MongoClient) CheckDuplicateTask(task models.DeployRequest) (bool, error
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "CheckDuplicateTask",
 			"took":   time.Since(startTime),
-		}).Errorf("检查重复任务失败: %v", err)
+		}).Errorf(color.RedString("检查重复任务失败: %v"), err)
 		return false, err
 	}
 
@@ -369,8 +262,118 @@ func (m *MongoClient) CheckDuplicateTask(task models.DeployRequest) (bool, error
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "CheckDuplicateTask",
 		"took":   time.Since(startTime),
-	}).Infof("任务重复检查: %t", isDuplicate)
+	}).Infof(color.GreenString("任务重复检查: %t"), isDuplicate)
 	return isDuplicate, nil
+}
+
+// StorePushData 存储推送数据到 pushlist 数据库
+func (m *MongoClient) StorePushData(data *models.PushData) error {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	collection := m.client.Database("pushlist").Collection("push_data")
+	data.UpdatedAt = time.Now()
+
+	// 使用 Upsert 模式：替换整个文档
+	filter := bson.M{"_id": "global_push_data"} // 固定 ID 用于全量存储
+	update := bson.M{"$set": data}
+
+	_, err := collection.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true))
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "StorePushData",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("存储推送数据失败: %v"), err)
+		return err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "StorePushData",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"service_count": len(data.Services),
+			"env_count":     len(data.Environments),
+		},
+	}).Infof(color.GreenString("推送数据存储成功"))
+	return nil
+}
+
+// GetPushData 获取存储的推送数据
+func (m *MongoClient) GetPushData() (*models.PushData, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	collection := m.client.Database("pushlist").Collection("push_data")
+	filter := bson.M{"_id": "global_push_data"}
+
+	var data models.PushData
+	err := collection.FindOne(ctx, filter).Decode(&data)
+	if err == mongo.ErrNoDocuments {
+		return nil, nil // 无数据视为首次
+	}
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPushData",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("获取推送数据失败: %v"), err)
+		return nil, err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetPushData",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("推送数据获取成功"))
+	return &data, nil
+}
+
+// HasChanges 检查当前发现数据是否有变化（返回 true 如果变化）
+func (m *MongoClient) HasChanges(currentServices, currentEnvs []string, stored *models.PushData) bool {
+	if stored == nil {
+		return true // 首次，无存储数据
+	}
+
+	// 去重当前
+	currentServiceSet := make(map[string]struct{})
+	for _, s := range currentServices {
+		currentServiceSet[s] = struct{}{}
+	}
+	currentEnvSet := make(map[string]struct{})
+	for _, e := range currentEnvs {
+		currentEnvSet[e] = struct{}{}
+	}
+
+	// 比较
+	storedServiceSet := make(map[string]struct{})
+	for _, s := range stored.Services {
+		storedServiceSet[s] = struct{}{}
+	}
+	if len(currentServiceSet) != len(storedServiceSet) {
+		return true
+	}
+	for s := range currentServiceSet {
+		if _, ok := storedServiceSet[s]; !ok {
+			return true
+		}
+	}
+
+	storedEnvSet := make(map[string]struct{})
+	for _, e := range stored.Environments {
+		storedEnvSet[e] = struct{}{}
+	}
+	if len(currentEnvSet) != len(storedEnvSet) {
+		return true
+	}
+	for e := range currentEnvSet {
+		if _, ok := storedEnvSet[e]; !ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Close 关闭连接

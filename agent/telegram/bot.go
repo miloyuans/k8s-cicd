@@ -1,4 +1,4 @@
-// 修改后的 telegram/bot.go：NewBotManager 接收 TelegramConfig。
+// 修正后的 telegram/bot.go：移除未使用的 "os" import。
 
 package telegram
 
@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
 	"net/http"
 	"strings"
 	"time"
@@ -39,8 +38,6 @@ func NewBotManager(cfg *config.TelegramConfig) *BotManager {
 	logrus.Info(color.GreenString("Telegram BotManager 创建成功（通知专用）"))
 	return bm
 }
-
-// getEnv 获取环境变量（带默认值） - 已移除，因为从配置获取
 
 // escapeMarkdownV2 转义 MarkdownV2
 func escapeMarkdownV2(text string) string {
