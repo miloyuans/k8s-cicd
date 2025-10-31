@@ -1,4 +1,4 @@
-// 修改后的 agent/agent.go：调整 periodicPollTasksFromMongo 中的状态查询为 "已确认"，并确保 namespace 匹配。
+// 修改后的 agent/agent.go：在 Enqueue 时确保 CreatedAt 和 TaskID（task.go 已处理）；查询状态 "已确认"。
 
 package agent
 
@@ -43,7 +43,7 @@ func (a *Agent) Start() {
 	// 步骤2：启动任务队列 Worker
 	a.TaskQ.StartWorkers(a.Cfg, a.Mongo, a.K8s, a.BotMgr, a.ApiClient)
 
-	// 步骤3：启动周期性任务轮询（从 Mongo 获取 confirmed 任务）
+	// 步骤3：启动周期性任务轮询（从 Mongo 获取 "已确认" 任务，按 created_at 排序）
 	go a.periodicPollTasksFromMongo()
 
 	// 步骤4：全量推送一次发现数据（启动时）
@@ -186,7 +186,7 @@ func (a *Agent) periodicPushDiscovery() {
 	}
 }
 
-// periodicPollTasksFromMongo 周期性从 Mongo 轮询 "已确认" 任务（调整状态为 "已确认"，确保 namespace 匹配）
+// periodicPollTasksFromMongo 周期性从 Mongo 轮询 "已确认" 任务（Sort 已处理，确保按顺序 Enqueue）
 func (a *Agent) periodicPollTasksFromMongo() {
 	ticker := time.NewTicker(a.Cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -198,7 +198,7 @@ func (a *Agent) periodicPollTasksFromMongo() {
 
 			// 1. 遍历所有环境
 			for env, namespace := range a.Cfg.EnvMapping.Mappings {
-				// 2. 查询状态为 "已确认" 的任务
+				// 2. 查询状态为 "已确认" 的任务 (已按 created_at 排序)
 				deployReqs, err := a.Mongo.GetTasksByStatus(env, "已确认")
 				if err != nil {
 					logrus.WithFields(logrus.Fields{
@@ -210,11 +210,11 @@ func (a *Agent) periodicPollTasksFromMongo() {
 					continue
 				}
 
-				// 3. 提交任务到队列（补全 namespace 以匹配环境映射）
+				// 3. 提交任务到队列（按顺序 Enqueue，确保 FIFO + lock 串行）
 				for _, dr := range deployReqs {
 					// 补全 namespace（根据环境映射匹配）
 					dr.Namespace = namespace
-					// 创建 task.Task
+					// 创建 task.Task (TaskID/CreatedAt 已存在)
 					t := &task.Task{
 						DeployRequest: dr,
 						ID:            fmt.Sprintf("%s-%s", dr.Service, dr.Version),
@@ -230,7 +230,7 @@ func (a *Agent) periodicPollTasksFromMongo() {
 						"env":    env,
 						"count":  len(deployReqs),
 						"took":   time.Since(startTime),
-					}).Infof(color.GreenString("发现 %d 个待部署任务"), len(deployReqs))
+					}).Infof(color.GreenString("发现 %d 个待部署任务 (按 created_at 排序)"), len(deployReqs))
 				}
 			}
 		}

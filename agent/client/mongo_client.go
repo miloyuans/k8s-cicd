@@ -1,4 +1,4 @@
-// 修改后的 client/mongo_client.go：调整 GetTasksByStatus 中的状态过滤为 "已确认"，并在 UpdateTaskStatus 中支持中文状态。
+// 修改后的 client/mongo_client.go：添加复合唯一索引和 created_at 升序索引；GetTasksByStatus 添加 Sort。
 
 package client
 
@@ -57,13 +57,13 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 		return nil, fmt.Errorf("MongoDB ping 失败: %v", err)
 	}
 
-	// 步骤4：创建 TTL 索引
+	// 步骤4：创建 TTL 索引和排序/唯一索引
 	if err := createTTLIndexes(client, cfg); err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "NewMongoClient",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("创建 TTL 索引失败: %v"), err)
+		}).Errorf(color.RedString("创建索引失败: %v"), err)
 		return nil, err
 	}
 
@@ -75,13 +75,15 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	return &MongoClient{client: client, cfg: cfg}, nil
 }
 
-// createTTLIndexes 创建 TTL 索引
+// createTTLIndexes 创建 TTL、排序和唯一索引
 func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	ctx := context.Background()
 
-	// 1. 为每个环境的任务集合创建 TTL 索引
+	// 1. 为每个环境的任务集合创建 TTL 索引 (created_at 升序，用于排序)
 	for env := range cfg.EnvMapping.Mappings {
 		collection := client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		
+		// TTL 索引 (已包含升序)
 		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
 			Keys:    bson.D{{Key: "created_at", Value: 1}},
 			Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
@@ -89,9 +91,23 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 		if err != nil {
 			return fmt.Errorf("创建任务 TTL 索引失败 [%s]: %v", env, err)
 		}
+
+		// 复合唯一索引: service + version + environment + created_at (防重，排序支持)
+		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys: bson.D{
+				{Key: "service", Value: 1},
+				{Key: "version", Value: 1},
+				{Key: "environment", Value: 1},
+				{Key: "created_at", Value: 1},
+			},
+			Options: options.Index().SetUnique(true),
+		})
+		if err != nil {
+			return fmt.Errorf("创建任务复合唯一索引失败 [%s]: %v", env, err)
+		}
 	}
 
-	// 2. 为版本集合创建唯一索引
+	// 2. 为版本集合创建唯一索引 (不变)
 	versionsColl := client.Database("cicd").Collection("versions")
 	_, err := versionsColl.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "service", Value: 1}, {Key: "version", Value: 1}},
@@ -117,18 +133,22 @@ func (m *MongoClient) GetEnvMappings() map[string]string {
 	return m.cfg.EnvMapping.Mappings
 }
 
-// GetTasksByStatus 查询指定环境和状态的任务（调整：状态为 "已确认"）
+// GetTasksByStatus 查询指定环境和状态的任务（添加 Sort by created_at asc）
 func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 	filter := bson.M{
-		"confirmation_status": status, // 现在 status="已确认"
-		"status": bson.M{"$nin": []string{"执行成功", "执行失败", "异常"}}, // 避免重复执行，调整为中文状态
+		"confirmation_status": status, // "已确认"
+		"status": bson.M{"$nin": []string{"执行成功", "执行失败", "异常"}}, // 避免重复执行
 	}
 
-	cursor, err := collection.Find(ctx, filter)
+	// 添加排序：按 created_at 升序
+	findOptions := options.Find()
+	findOptions.SetSort(bson.D{{Key: "created_at", Value: 1}})
+
+	cursor, err := collection.Find(ctx, filter, findOptions)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -158,11 +178,11 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 		"status": status,
 		"count":  len(tasks),
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("查询到 %d 个任务"), len(tasks))
+	}).Infof(color.GreenString("查询到 %d 个任务 (按 created_at 排序)"), len(tasks))
 	return tasks, nil
 }
 
-// UpdateTaskStatus 更新任务状态（调整：支持中文状态）
+// UpdateTaskStatus 更新任务状态
 func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status string) error {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -176,7 +196,7 @@ func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status strin
 	}
 	update := bson.M{
 		"$set": bson.M{
-			"status":      status, // 现在 status 可以是 "执行成功"、"执行失败"、"异常"
+			"status":      status,
 			"updated_at":  time.Now(),
 		},
 	}
@@ -235,7 +255,7 @@ func (m *MongoClient) StoreImageSnapshot(snapshot *models.ImageSnapshot, taskID 
 	return nil
 }
 
-// CheckDuplicateTask 检查任务是否重复
+// CheckDuplicateTask 检查任务是否重复（使用复合键）
 func (m *MongoClient) CheckDuplicateTask(task models.DeployRequest) (bool, error) {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -245,6 +265,7 @@ func (m *MongoClient) CheckDuplicateTask(task models.DeployRequest) (bool, error
 		"service":     task.Service,
 		"version":     task.Version,
 		"environment": task.Environments[0],
+		"created_at":  task.CreatedAt, // 包含 created_at 防重
 	}
 
 	count, err := collection.CountDocuments(ctx, filter)
