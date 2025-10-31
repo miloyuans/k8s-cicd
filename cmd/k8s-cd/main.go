@@ -1,3 +1,5 @@
+// 修改后的 main.go：Telegram 从 cfg.Telegram 获取，不是 os.Getenv；K8s 配置已支持两种方式，无需改（NewK8sClient 已处理）。
+
 package main
 
 import (
@@ -43,7 +45,7 @@ func main() {
 		}
 	}()
 
-	// 步骤4：初始化 Kubernetes 客户端
+	// 步骤4：初始化 Kubernetes 客户端（支持 kubeconfig / serviceaccount）
 	k8sClient, err := kubernetes.NewK8sClient(&cfg.Kubernetes, &cfg.Deploy)
 	if err != nil {
 		logrus.Fatalf(color.RedString("Kubernetes 连接失败: %v"), err)
@@ -52,13 +54,11 @@ func main() {
 	// 步骤5：初始化 API 客户端
 	apiClient := api.NewAPIClient(&cfg.API)
 
-	// 步骤6：初始化 Telegram BotManager（从环境变量读取）
-	telegramToken := os.Getenv("TELEGRAM_TOKEN")
-	telegramGroupID := os.Getenv("TELEGRAM_GROUP_ID")
-	if telegramToken == "" || telegramGroupID == "" {
-		logrus.Warn(color.YellowString("TELEGRAM_TOKEN 或 TELEGRAM_GROUP_ID 未设置，通知功能将禁用"))
+	// 步骤6：初始化 Telegram BotManager（从配置读取）
+	if !cfg.Telegram.Enabled || cfg.Telegram.Token == "" || cfg.Telegram.GroupID == "" {
+		logrus.Warn(color.YellowString("Telegram 配置未完整，通知功能将禁用"))
 	}
-	botMgr := telegram.NewBotManager()
+	botMgr := telegram.NewBotManager(&cfg.Telegram) // 传入配置
 
 	// 步骤7：初始化任务队列
 	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers)

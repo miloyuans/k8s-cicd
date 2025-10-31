@@ -1,3 +1,5 @@
+// 修改后的 telegram/bot.go：NewBotManager 接收 TelegramConfig。
+
 package telegram
 
 import (
@@ -9,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s-cicd/agent/config" // 新增导入 config
+
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
@@ -17,32 +21,26 @@ import (
 type BotManager struct {
 	Token   string // Bot Token
 	GroupID string // 群组ID
+	Enabled bool   // 是否启用
 }
 
-// NewBotManager 创建 BotManager（从环境变量读取）
-func NewBotManager() *BotManager {
-	token := getEnv("TELEGRAM_TOKEN", "")
-	groupID := getEnv("TELEGRAM_GROUP_ID", "")
-
-	if token == "" || groupID == "" {
-		logrus.Fatal(color.RedString("TELEGRAM_TOKEN 和 TELEGRAM_GROUP_ID 必须设置"))
+// NewBotManager 创建 BotManager（从配置读取）
+func NewBotManager(cfg *config.TelegramConfig) *BotManager {
+	if cfg == nil || !cfg.Enabled || cfg.Token == "" || cfg.GroupID == "" {
+		logrus.Warn(color.YellowString("Telegram 配置无效，通知功能禁用"))
+		return &BotManager{Enabled: false}
 	}
 
 	bm := &BotManager{
-		Token:   token,
-		GroupID: groupID,
+		Token:   cfg.Token,
+		GroupID: cfg.GroupID,
+		Enabled: true,
 	}
 	logrus.Info(color.GreenString("Telegram BotManager 创建成功（通知专用）"))
 	return bm
 }
 
-// getEnv 获取环境变量（带默认值）
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
+// getEnv 获取环境变量（带默认值） - 已移除，因为从配置获取
 
 // escapeMarkdownV2 转义 MarkdownV2
 func escapeMarkdownV2(text string) string {
@@ -68,6 +66,9 @@ func containsRune(slice []rune, r rune) bool {
 
 // sendMessage 发送消息
 func (bm *BotManager) sendMessage(text, parseMode string) (int, error) {
+	if !bm.Enabled {
+		return 0, fmt.Errorf("Telegram 未启用")
+	}
 	text = escapeMarkdownV2(text)
 	payload := map[string]interface{}{
 		"chat_id":    bm.GroupID,
@@ -124,6 +125,9 @@ func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, ne
 
 // SendNotification 发送部署通知
 func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
+	if !bm.Enabled {
+		return nil // 无需错误，静默跳过
+	}
 	startTime := time.Now()
 
 	message := bm.generateMarkdownMessage(service, env, user, oldVersion, newVersion, success)

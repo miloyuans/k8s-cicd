@@ -41,3 +41,10 @@ type ImageSnapshot struct {
 	RecordedAt time.Time `bson:"recorded_at" json:"recorded_at"`
 	TaskID     string    `bson:"task_id" json:"task_id"`
 }
+
+// PushData 推送数据存储模型（新增）
+type PushData struct {
+	Services     []string    `bson:"services" json:"services"`
+	Environments []string    `bson:"environments" json:"environments"`
+	UpdatedAt    time.Time   `bson:"updated_at" json:"updated_at"`
+}

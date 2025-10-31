@@ -1,3 +1,5 @@
+// 修改后的 agent/agent.go：修改 Start() 和 periodicPushDiscovery，实现优化逻辑。
+
 package agent
 
 import (
@@ -8,6 +10,7 @@ import (
 	"k8s-cicd/agent/client"
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/kubernetes"
+	"k8s-cicd/agent/models"
 	"k8s-cicd/agent/task"
 	"k8s-cicd/agent/telegram"
 
@@ -15,17 +18,17 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Agent 主代理结构
+// Agent 主代理结构（不变）
 type Agent struct {
-	Cfg       *config.Config          // 导出字段
-	Mongo     *client.MongoClient     // 导出字段
-	K8s       *kubernetes.K8sClient   // 导出字段
-	TaskQ     *task.TaskQueue         // 导出字段
-	BotMgr    *telegram.BotManager    // 导出字段
-	ApiClient *api.APIClient          // 导出字段
+	Cfg       *config.Config
+	Mongo     *client.MongoClient
+	K8s       *kubernetes.K8sClient
+	TaskQ     *task.TaskQueue
+	BotMgr    *telegram.BotManager
+	ApiClient *api.APIClient
 }
 
-// Start 启动 Agent
+// Start 启动 Agent（修改：启动时全量推送一次）
 func (a *Agent) Start() {
 	startTime := time.Now()
 
@@ -40,14 +43,71 @@ func (a *Agent) Start() {
 	// 步骤2：启动任务队列 Worker
 	a.TaskQ.StartWorkers(a.Cfg, a.Mongo, a.K8s, a.BotMgr, a.ApiClient)
 
-	// 步骤3：启动周期性服务发现推送
-	go a.periodicPushDiscovery()
-
-	// 步骤4：启动周期性任务轮询（从 Mongo 获取 confirmed 任务）
+	// 步骤3：启动周期性任务轮询（从 Mongo 获取 confirmed 任务）
 	go a.periodicPollTasksFromMongo()
+
+	// 步骤4：全量推送一次发现数据（启动时）
+	a.initialFullPush()
+
+	// 步骤5：启动周期性推送（优化后逻辑）
+	go a.periodicPushDiscovery()
 }
 
-// periodicPushDiscovery 周期性推送服务发现数据
+// initialFullPush 启动时全量推送（新增）
+func (a *Agent) initialFullPush() {
+	startTime := time.Now()
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "initialFullPush",
+	}).Info(color.GreenString("执行启动时全量推送..."))
+
+	// 1. 构建 PushRequest
+	pushReq, err := a.K8s.BuildPushRequest(a.Cfg)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "initialFullPush",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("构建 PushRequest 失败: %v"), err)
+		return
+	}
+
+	// 2. 调用 /push 接口
+	if err := a.ApiClient.PushData(pushReq); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "initialFullPush",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("全量推送 /push 失败: %v"), err)
+		return
+	}
+
+	// 3. 存储到 Mongo pushlist
+	pushData := &models.PushData{
+		Services:     pushReq.Services,
+		Environments: pushReq.Environments,
+	}
+	if err := a.Mongo.StorePushData(pushData); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "initialFullPush",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("存储全量推送数据失败: %v"), err)
+		return
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "initialFullPush",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"service_count": len(pushReq.Services),
+			"env_count":     len(pushReq.Environments),
+		},
+	}).Infof(color.GreenString("启动时全量推送成功"))
+}
+
+// periodicPushDiscovery 周期性推送服务发现数据（优化：对比 Mongo pushlist）
 func (a *Agent) periodicPushDiscovery() {
 	ticker := time.NewTicker(a.Cfg.API.PushInterval)
 	defer ticker.Stop()
@@ -57,7 +117,7 @@ func (a *Agent) periodicPushDiscovery() {
 		case <-ticker.C:
 			startTime := time.Now()
 
-			// 1. 构建 PushRequest
+			// 1. 构建当前 PushRequest
 			pushReq, err := a.K8s.BuildPushRequest(a.Cfg)
 			if err != nil {
 				logrus.WithFields(logrus.Fields{
@@ -68,29 +128,65 @@ func (a *Agent) periodicPushDiscovery() {
 				continue
 			}
 
-			// 2. 调用 /push 接口
+			// 2. 获取存储的推送数据
+			storedData, err := a.Mongo.GetPushData()
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "periodicPushDiscovery",
+					"took":   time.Since(startTime),
+				}).Errorf(color.RedString("获取存储推送数据失败: %v"), err)
+				continue
+			}
+
+			// 3. 检查是否有变化
+			if !a.Mongo.HasChanges(pushReq.Services, pushReq.Environments, storedData) {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "periodicPushDiscovery",
+					"took":   time.Since(startTime),
+				}).Info(color.GreenString("推送数据无变化，跳过执行"))
+				continue
+			}
+
+			// 4. 有变化：推送全量数据
 			if err := a.ApiClient.PushData(pushReq); err != nil {
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "periodicPushDiscovery",
 					"took":   time.Since(startTime),
 				}).Errorf(color.RedString("推送 /push 失败: %v"), err)
-			} else {
+				continue
+			}
+
+			// 5. 更新存储数据
+			pushData := &models.PushData{
+				Services:     pushReq.Services,
+				Environments: pushReq.Environments,
+			}
+			if err := a.Mongo.StorePushData(pushData); err != nil {
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "periodicPushDiscovery",
 					"took":   time.Since(startTime),
-					"data": logrus.Fields{
-						"service_count": len(pushReq.Services),
-						"env_count":     len(pushReq.Environments),
-					},
-				}).Infof(color.GreenString("推送 /push 成功"))
+				}).Errorf(color.RedString("更新推送数据失败: %v"), err)
+				continue
 			}
+
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "periodicPushDiscovery",
+				"took":   time.Since(startTime),
+				"data": logrus.Fields{
+					"service_count": len(pushReq.Services),
+					"env_count":     len(pushReq.Environments),
+				},
+			}).Infof(color.GreenString("周期推送 /push 成功（数据已更新）"))
 		}
 	}
 }
 
-// periodicPollTasksFromMongo 周期性从 Mongo 轮询 confirmed 任务
+// periodicPollTasksFromMongo 周期性从 Mongo 轮询 confirmed 任务（不变）
 func (a *Agent) periodicPollTasksFromMongo() {
 	ticker := time.NewTicker(a.Cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -141,14 +237,14 @@ func (a *Agent) periodicPollTasksFromMongo() {
 	}
 }
 
-// Stop 优雅停止 Agent
+// Stop 优雅停止 Agent（不变）
 func (a *Agent) Stop() {
 	startTime := time.Now()
 
 	// 步骤1：停止任务队列
 	a.TaskQ.Stop()
 
-	// 步骤2：停止 Telegram 通知（空实现）
+	// 步骤2：停止 Telegram 通知
 	a.BotMgr.Stop()
 
 	// 步骤3：等待完成

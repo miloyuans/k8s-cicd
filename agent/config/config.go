@@ -1,3 +1,6 @@
+// 修改后的 config.go：添加 TelegramConfig 到 Config 结构，并从 YAML 加载。
+// 在 LoadConfig 中处理默认值和合并（如果需要环境变量覆盖，可选）。
+
 package config
 
 import (
@@ -20,7 +23,7 @@ type APIConfig struct {
 // K8sAuthConfig Kubernetes 认证配置
 type K8sAuthConfig struct {
 	AuthType   string `yaml:"auth_type"`    // 认证类型: kubeconfig / serviceaccount
-	Kubeconfig string `yaml:"kubeconfig"`   // kubeconfig 路径
+	Kubeconfig string `yaml:"kubeconfig"`   // kubeconfig 路径（完整路径）
 	Namespace  string `yaml:"namespace"`    // 默认命名空间
 }
 
@@ -52,7 +55,14 @@ type EnvMappingConfig struct {
 	Mappings map[string]string `yaml:"mappings"` // env -> namespace
 }
 
-// Config 完整配置结构
+// TelegramConfig Telegram 配置（新增）
+type TelegramConfig struct {
+	Token     string `yaml:"token"`     // Bot Token
+	GroupID   string `yaml:"group_id"`  // 群组ID
+	Enabled   bool   `yaml:"enabled"`   // 是否启用（默认true）
+}
+
+// Config 完整配置结构（添加 Telegram）
 type Config struct {
 	API        APIConfig        `yaml:"api"`
 	Kubernetes K8sAuthConfig    `yaml:"kubernetes"`
@@ -60,10 +70,11 @@ type Config struct {
 	Task       TaskConfig       `yaml:"task"`
 	Deploy     DeployConfig     `yaml:"deploy"`
 	EnvMapping EnvMappingConfig `yaml:"env_mapping"`
+	Telegram   TelegramConfig   `yaml:"telegram"` // 新增
 	LogLevel   string           `yaml:"log_level"` // 日志级别
 }
 
-// LoadConfig 加载配置文件
+// LoadConfig 加载配置文件（不变，但会加载 Telegram）
 func LoadConfig(filename string) (*Config, error) {
 	startTime := time.Now()
 
@@ -92,7 +103,7 @@ func LoadConfig(filename string) (*Config, error) {
 	// 步骤3：设置默认值
 	cfg.setDefaults()
 
-	// 步骤4：合并环境变量
+	// 步骤4：合并环境变量（可选覆盖 Telegram 等）
 	cfg.mergeEnvVars()
 
 	// 步骤5：设置日志级别
@@ -114,7 +125,7 @@ func LoadConfig(filename string) (*Config, error) {
 	return &cfg, nil
 }
 
-// setDefaults 设置默认值
+// setDefaults 设置默认值（添加 Telegram 默认）
 func (c *Config) setDefaults() {
 	// API 默认值
 	if c.API.PushInterval == 0 {
@@ -179,9 +190,20 @@ func (c *Config) setDefaults() {
 			"prod":    "international",
 		}
 	}
+
+	// Telegram 默认值（新增）
+	if c.Telegram.Token == "" {
+		c.Telegram.Token = os.Getenv("TELEGRAM_TOKEN") // fallback to env if not set
+	}
+	if c.Telegram.GroupID == "" {
+		c.Telegram.GroupID = os.Getenv("TELEGRAM_GROUP_ID") // fallback to env if not set
+	}
+	if !c.Telegram.Enabled && (c.Telegram.Token != "" || c.Telegram.GroupID != "") {
+		c.Telegram.Enabled = true
+	}
 }
 
-// mergeEnvVars 合并环境变量
+// mergeEnvVars 合并环境变量（添加 Telegram 覆盖）
 func (c *Config) mergeEnvVars() {
 	// MongoDB 环境变量
 	if uri := os.Getenv("MONGO_URI"); uri != "" {
@@ -196,5 +218,18 @@ func (c *Config) mergeEnvVars() {
 	// API 环境变量
 	if url := os.Getenv("API_BASE_URL"); url != "" {
 		c.API.BaseURL = url
+	}
+
+	// Telegram 环境变量覆盖（可选）
+	if token := os.Getenv("TELEGRAM_TOKEN"); token != "" {
+		c.Telegram.Token = token
+	}
+	if groupID := os.Getenv("TELEGRAM_GROUP_ID"); groupID != "" {
+		c.Telegram.GroupID = groupID
+	}
+	if enabledStr := os.Getenv("TELEGRAM_ENABLED"); enabledStr != "" {
+		if e, err := strconv.ParseBool(enabledStr); err == nil {
+			c.Telegram.Enabled = e
+		}
 	}
 }

@@ -72,6 +72,116 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	return &MongoClient{client: client, cfg: cfg}, nil
 }
 
+// StorePushData 存储推送数据到 pushlist 数据库
+func (m *MongoClient) StorePushData(data *models.PushData) error {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	collection := m.client.Database("pushlist").Collection("push_data")
+	data.UpdatedAt = time.Now()
+
+	// 使用 Upsert 模式：替换整个文档
+	filter := bson.M{"_id": "global_push_data"} // 固定 ID 用于全量存储
+	update := bson.M{"$set": data}
+
+	_, err := collection.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true))
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "StorePushData",
+			"took":   time.Since(startTime),
+		}).Errorf("存储推送数据失败: %v", err)
+		return err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "StorePushData",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"service_count": len(data.Services),
+			"env_count":     len(data.Environments),
+		},
+	}).Infof(color.GreenString("推送数据存储成功"))
+	return nil
+}
+
+// GetPushData 获取存储的推送数据
+func (m *MongoClient) GetPushData() (*models.PushData, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	collection := m.client.Database("pushlist").Collection("push_data")
+	filter := bson.M{"_id": "global_push_data"}
+
+	var data models.PushData
+	err := collection.FindOne(ctx, filter).Decode(&data)
+	if err == mongo.ErrNoDocuments {
+		return nil, nil // 无数据视为首次
+	}
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPushData",
+			"took":   time.Since(startTime),
+		}).Errorf("获取推送数据失败: %v", err)
+		return nil, err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetPushData",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("推送数据获取成功"))
+	return &data, nil
+}
+
+// HasChanges 检查当前发现数据是否有变化（返回 true 如果变化）
+func (m *MongoClient) HasChanges(currentServices, currentEnvs []string, stored *models.PushData) bool {
+	if stored == nil {
+		return true // 首次，无存储数据
+	}
+
+	// 去重当前
+	currentServiceSet := make(map[string]struct{})
+	for _, s := range currentServices {
+		currentServiceSet[s] = struct{}{}
+	}
+	currentEnvSet := make(map[string]struct{})
+	for _, e := range currentEnvs {
+		currentEnvSet[e] = struct{}{}
+	}
+
+	// 比较
+	storedServiceSet := make(map[string]struct{})
+	for _, s := range stored.Services {
+		storedServiceSet[s] = struct{}{}
+	}
+	if len(currentServiceSet) != len(storedServiceSet) {
+		return true
+	}
+	for s := range currentServiceSet {
+		if _, ok := storedServiceSet[s]; !ok {
+			return true
+		}
+	}
+
+	storedEnvSet := make(map[string]struct{})
+	for _, e := range stored.Environments {
+		storedEnvSet[e] = struct{}{}
+	}
+	if len(currentEnvSet) != len(storedEnvSet) {
+		return true
+	}
+	for e := range currentEnvSet {
+		if _, ok := storedEnvSet[e]; !ok {
+			return true
+		}
+	}
+
+	return false
+}
+
 // createTTLIndexes 创建 TTL 索引
 func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	ctx := context.Background()
