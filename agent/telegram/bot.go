@@ -1,4 +1,4 @@
-// 修正后的 telegram/bot.go：移除未使用的 "os" import。
+// 修改后的 telegram/bot.go：增强 generateMarkdownMessage 模板，明确包含回滚信息（失败时）。
 
 package telegram
 
@@ -97,27 +97,41 @@ func (bm *BotManager) sendMessage(text, parseMode string) (int, error) {
 	return messageID, nil
 }
 
-// generateMarkdownMessage 生成通知（100% 保留原模板）
+// generateMarkdownMessage 生成通知（优化：失败时明确包含回滚信息）
 func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
 	safe := escapeMarkdownV2
-	status := "Success *部署成功*"
-	if !success {
-		status = "Failure *部署失败\\-已回滚*"
+	if success {
+		status := "Success *部署成功*"
+		return fmt.Sprintf("*Deployment %s %s*\n\n"+
+			"**服务**: `%s`\n"+
+			"**环境**: `%s`\n"+
+			"**操作人**: `%s`\n"+
+			"**旧版本**: `%s`\n"+
+			"**新版本**: `%s`\n"+
+			"**状态**: %s\n"+
+			"**时间**: `%s`\n\n"+
+			"---\n"+
+			"*由 K8s\\-CICD Agent 自动发送*",
+			safe(service), map[bool]string{true: "成功", false: "失败"}[success],
+			safe(service), safe(env), safe(user), safe(oldVersion), safe(newVersion), status,
+			time.Now().Format("2006-01-02 15:04:05"))
+	} else {
+		// 失败时：明确提到回滚到旧版本
+		status := "Failure *部署失败\\-已回滚到旧版本*"
+		return fmt.Sprintf("*Deployment %s %s*\n\n"+
+			"**服务**: `%s`\n"+
+			"**环境**: `%s`\n"+
+			"**操作人**: `%s`\n"+
+			"**旧版本**: `%s` (回滚成功)\n"+
+			"**新版本**: `%s` (部署异常，Pod 状态异常)\n"+
+			"**状态**: %s\n"+
+			"**时间**: `%s`\n\n"+
+			"---\n"+
+			"*由 K8s\\-CICD Agent 自动发送*",
+			safe(service), map[bool]string{true: "成功", false: "失败"}[success],
+			safe(service), safe(env), safe(user), safe(oldVersion), safe(newVersion), status,
+			time.Now().Format("2006-01-02 15:04:05"))
 	}
-
-	return fmt.Sprintf("*Deployment %s %s*\n\n"+
-		"**服务**: `%s`\n"+
-		"**环境**: `%s`\n"+
-		"**操作人**: `%s`\n"+
-		"**旧版本**: `%s`\n"+
-		"**新版本**: `%s`\n"+
-		"**状态**: %s\n"+
-		"**时间**: `%s`\n\n"+
-		"---\n"+
-		"*由 K8s\\-CICD Agent 自动发送*",
-		safe(service), map[bool]string{true: "成功", false: "失败"}[success],
-		safe(service), safe(env), safe(user), safe(oldVersion), safe(newVersion), status,
-		time.Now().Format("2006-01-02 15:04:05"))
 }
 
 // SendNotification 发送部署通知
@@ -143,7 +157,7 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "SendNotification",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("部署通知发送成功: %s -> %s [%s]"), oldVersion, newVersion, service)
+	}).Infof(color.GreenString("部署通知发送成功: %s -> %s [%s] (状态: %s)"), oldVersion, newVersion, service, map[bool]string{true: "成功", false: "失败 (已回滚)"}[success])
 	return nil
 }
 

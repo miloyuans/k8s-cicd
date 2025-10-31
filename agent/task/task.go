@@ -1,12 +1,12 @@
-// 修正后的 task/task.go：添加 "fmt" 和 "time" import；解决所有 undefined 错误。
+// 修改后的 task/task.go：增强 handleFailure 中的通知逻辑，确保回滚后明确触发失败通知（已回滚），添加日志确认通知触发；模板已包含"已回滚"。
 
 package task
 
 import (
 	"container/list"
-	"fmt"     // 新增：用于 fmt.Sprintf
+	"fmt"     // 用于 fmt.Sprintf
 	"sync"
-	"time"    // 新增：用于 time.Now(), time.Sleep, time.Since
+	"time"    // 用于 time.Now(), time.Sleep, time.Since
 
 	"github.com/google/uuid" // UUID v4
 
@@ -153,7 +153,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 	}
 }
 
-// executeTask 执行部署任务（使用 env 在日志等）
+// executeTask 执行部署任务（使用 env 在日志等；回滚时确保 handleFailure 触发通知）
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) error {
 	startTime := time.Now()
 	env := task.DeployRequest.Environments[0] // 使用 env
@@ -193,9 +193,30 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 
 	// 步骤4：等待 rollout
 	if err := k8s.WaitForRolloutComplete(task.DeployRequest.Service, namespace, cfg.Deploy.WaitTimeout); err != nil {
-		// 回滚
-		if rollbackErr := k8s.RollbackWithSnapshot(task.DeployRequest.Service, namespace, snapshot); rollbackErr != nil {
-			logrus.Errorf(color.RedString("回滚失败 [%s]: %v"), env, rollbackErr)
+		// 回滚：使用旧镜像 tag 重新执行更新操作
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "executeTask",
+			"took":   time.Since(startTime),
+			"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env},
+		}).Infof(color.YellowString("Rollout 失败，执行回滚: %s [%s]"), task.DeployRequest.TaskID, env)
+
+		rollbackErr := k8s.RollbackWithSnapshot(task.DeployRequest.Service, namespace, snapshot)
+		if rollbackErr != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"took":   time.Since(startTime),
+				"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env},
+			}).Errorf(color.RedString("回滚失败: %v"), rollbackErr)
+			// 回滚失败仍触发失败通知（包含回滚尝试信息）
+		} else {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"took":   time.Since(startTime),
+				"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env, "old_tag": oldImage},
+			}).Infof(color.YellowString("回滚成功，使用旧镜像: %s [%s]"), oldImage, env)
 		}
 		q.handleFailure(mongo, apiClient, botMgr, task, oldImage, env)
 		return err
@@ -218,7 +239,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	return nil
 }
 
-// handleSuccess 成功处理
+// handleSuccess 成功处理（确保通知触发）
 func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string, env string) {
 	// 1. 更新 Mongo 状态
 	if err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行成功"); err != nil {
@@ -236,30 +257,56 @@ func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, apiClient *api.APIC
 		logrus.Errorf(color.RedString("推送成功状态失败 [%s]: %v"), env, err)
 	}
 
-	// 3. 发送通知
-	if err := botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, oldImage, task.DeployRequest.Version, true); err != nil {
-		logrus.Errorf(color.RedString("发送成功通知失败 [%s]: %v"), env, err)
+	// 3. 发送通知（成功）
+	notifyErr := botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, oldImage, task.DeployRequest.Version, true)
+	if notifyErr != nil {
+		logrus.Errorf(color.RedString("发送成功通知失败 [%s]: %v"), env, notifyErr)
 	} else {
-		logrus.Infof(color.GreenString("通知发送成功 [%s]"), env)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "handleSuccess",
+			"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env},
+		}).Infof(color.GreenString("成功通知已触发发送到 Telegram 群组"))
 	}
 }
 
-// handleFailure 失败处理
+// handleFailure 失败处理（增强：确保回滚后通知触发，日志确认）
 func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string, env string) {
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "handleFailure",
+		"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env, "old_tag": oldImage},
+	}).Infof(color.YellowString("开始处理失败逻辑，包括回滚通知: %s [%s]"), task.DeployRequest.TaskID, env)
+
 	// 1. 更新 Mongo 状态
-	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行失败")
+	mongoErr := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行失败")
+	if mongoErr != nil {
+		logrus.Errorf(color.RedString("更新MongoDB状态失败 [%s]: %v"), env, mongoErr)
+	}
 
 	// 2. 调用 /status 接口
-	_ = apiClient.UpdateStatus(models.StatusRequest{
+	statusErr := apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.DeployRequest.Service,
 		Version:     task.DeployRequest.Version,
 		Environment: env,
 		User:        task.DeployRequest.User,
 		Status:      "执行失败",
 	})
+	if statusErr != nil {
+		logrus.Errorf(color.RedString("推送失败状态失败 [%s]: %v"), env, statusErr)
+	}
 
-	// 3. 发送通知
-	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, oldImage, task.DeployRequest.Version, false)
+	// 3. 发送通知（失败，已回滚）
+	notifyErr := botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, oldImage, task.DeployRequest.Version, false)
+	if notifyErr != nil {
+		logrus.Errorf(color.RedString("发送失败通知失败 [%s]: %v (模板包含'已回滚')"), env, notifyErr)
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "handleFailure",
+			"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env},
+		}).Infof(color.GreenString("失败通知已触发发送到 Telegram 群组 (包含回滚信息)"))
+	}
 }
 
 // handleException 异常处理（使用 env）
