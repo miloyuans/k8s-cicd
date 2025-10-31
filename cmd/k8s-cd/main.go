@@ -62,7 +62,7 @@ func main() {
 	botMgr := telegram.NewBotManager(&cfg.Telegram) // 传入配置
 
 	// 步骤7：初始化任务队列（资源约束: MaxQueueSize）
-	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers)
+	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers, cfg.Task.MaxQueueSize) // 修复：传入两个参数
 	taskQ.maxQueueSize = cfg.Task.MaxQueueSize // 假设添加字段
 
 	// 步骤8：组装 Agent（字段名大写）
