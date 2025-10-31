@@ -80,7 +80,7 @@ func (q *TaskQueue) StartWorkers(cfg *config.Config, mongo *client.MongoClient, 
 	logrus.Infof(color.GreenString("启动 %d 个任务 worker"), q.workers)
 }
 
-// worker 执行任务
+// worker 执行任务（开始时更新 status="running"）
 func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, workerID int) {
 	defer q.wg.Done()
 
@@ -104,6 +104,12 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				task.ID = fmt.Sprintf("%s-%s-%s", task.DeployRequest.Service, task.DeployRequest.Version, task.DeployRequest.Environments[0]) // 保留复合键
 			}
 
+			env := task.DeployRequest.Environments[0]
+			// 开始执行：立即更新 status="running" 避免重复Enqueue
+			if err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "running"); err != nil {
+				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("更新 running 状态失败: %v"), err)
+			}
+
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "worker",
@@ -111,11 +117,11 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 					"task_id":     task.DeployRequest.TaskID,
 					"service":     task.DeployRequest.Service,
 					"version":     task.DeployRequest.Version,
-					"environment": task.DeployRequest.Environments[0],
+					"environment": env,
 					"user":        task.DeployRequest.User,
 					"namespace":   task.DeployRequest.Namespace,
 				},
-			}).Infof(color.GreenString("Worker-%d 开始执行任务: %s"), workerID, task.DeployRequest.TaskID)
+			}).Infof(color.GreenString("Worker-%d 开始执行任务 (status=running): %s"), workerID, task.DeployRequest.TaskID)
 
 			// 获取 per-service-namespace lock 确保串行
 			lock := q.getLock(task.DeployRequest.Service, task.DeployRequest.Namespace)
@@ -243,13 +249,15 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	return nil
 }
 
-// mapStatusToPreset 状态映射到预设值
+// mapStatusToPreset 状态映射到预设值 (添加 no_action 逻辑：如果任务无需执行，如重复)
 func mapStatusToPreset(internalStatus string) string {
 	switch internalStatus {
 	case "执行成功":
 		return "success"
 	case "执行失败", "异常":
 		return "failure"
+	case "running":
+		return "no_action" // 执行中，无需操作
 	default:
 		return "no_action"
 	}

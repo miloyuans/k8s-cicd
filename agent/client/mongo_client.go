@@ -134,6 +134,7 @@ func (m *MongoClient) GetEnvMappings() map[string]string {
 }
 
 // GetTasksByStatus 查询指定环境和状态的任务（添加 Sort by created_at asc）
+// GetTasksByStatus 查询指定环境和状态的任务（添加过滤 "running" 避免重复）
 func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -141,7 +142,7 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 	filter := bson.M{
 		"confirmation_status": status, // "已确认"
-		"status": bson.M{"$nin": []string{"执行成功", "执行失败", "异常"}}, // 避免重复执行
+		"status": bson.M{"$nin": []string{"执行成功", "执行失败", "异常", "running"}}, // 排除终态和执行中
 	}
 
 	// 添加排序：按 created_at 升序
@@ -178,11 +179,11 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 		"status": status,
 		"count":  len(tasks),
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("查询到 %d 个任务 (按 created_at 排序)"), len(tasks))
+	}).Infof(color.GreenString("查询到 %d 个任务 (按 created_at 排序，已排除 running)"), len(tasks))
 	return tasks, nil
 }
 
-// UpdateTaskStatus 更新任务状态
+// UpdateTaskStatus 更新任务状态（支持 "running"）
 func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status string) error {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -196,7 +197,7 @@ func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status strin
 	}
 	update := bson.M{
 		"$set": bson.M{
-			"status":      status,
+			"status":      status, // 支持 "running", "执行成功" 等
 			"updated_at":  time.Now(),
 		},
 	}

@@ -1,4 +1,4 @@
-// 修改后的 telegram/bot.go：增强 generateMarkdownMessage 模板，明确包含回滚信息（失败时）。
+// 修改后的 telegram/bot.go：重新设计模板，避免转义错误（使用简单 MarkdownV1 或纯文本）；添加5s缓冲合并通知（相同状态）。
 
 package telegram
 
@@ -8,22 +8,43 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
-	"k8s-cicd/agent/config" // 新增导入 config
+	"k8s-cicd/agent/config"
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
 
-// BotManager 简化版：仅发送通知
+// NotificationBuffer 通知缓冲 (5s 窗口，相同状态合并)
+type NotificationBuffer struct {
+	mu          sync.Mutex
+	buffers     map[string][]*NotificationItem // key: "success" or "failure", value: list of items
+	mergeTimer  *time.Timer
+	mergeChan   chan struct{}
+}
+
+// NotificationItem 通知项
+type NotificationItem struct {
+	Service    string
+	Env        string
+	User       string
+	OldVersion string
+	NewVersion string
+	Success    bool
+	SendTime   time.Time
+}
+
+// BotManager 简化版：仅发送通知（添加缓冲）
 type BotManager struct {
 	Token   string // Bot Token
 	GroupID string // 群组ID
 	Enabled bool   // 是否启用
+	buffer  *NotificationBuffer
 }
 
-// NewBotManager 创建 BotManager（从配置读取）
+// NewBotManager 创建 BotManager（从配置读取，初始化缓冲）
 func NewBotManager(cfg *config.TelegramConfig) *BotManager {
 	if cfg == nil || !cfg.Enabled || cfg.Token == "" || cfg.GroupID == "" {
 		logrus.Warn(color.YellowString("Telegram 配置无效，通知功能禁用"))
@@ -34,39 +55,97 @@ func NewBotManager(cfg *config.TelegramConfig) *BotManager {
 		Token:   cfg.Token,
 		GroupID: cfg.GroupID,
 		Enabled: true,
+		buffer:  &NotificationBuffer{
+			buffers:   make(map[string][]*NotificationItem),
+			mergeChan: make(chan struct{}, 1),
+		},
 	}
-	logrus.Info(color.GreenString("Telegram BotManager 创建成功（通知专用）"))
+	bm.buffer.mergeTimer = time.AfterFunc(5*time.Second, bm.flushBuffer)
+	logrus.Info(color.GreenString("Telegram BotManager 创建成功（通知专用，5s合并缓冲）"))
 	return bm
 }
 
-// escapeMarkdownV2 转义 MarkdownV2
-func escapeMarkdownV2(text string) string {
-	escapeChars := []rune{'_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'}
-	var result strings.Builder
-	for _, c := range text {
-		if containsRune(escapeChars, c) {
-			result.WriteString("\\")
-		}
-		result.WriteRune(c)
+// AddNotification 添加通知到缓冲
+func (bm *BotManager) AddNotification(service, env, user, oldVersion, newVersion string, success bool) {
+	if !bm.Enabled {
+		return
 	}
-	return result.String()
+	item := &NotificationItem{
+		Service:    service,
+		Env:        env,
+		User:       user,
+		OldVersion: oldVersion,
+		NewVersion: newVersion,
+		Success:    success,
+		SendTime:   time.Now(),
+	}
+	statusKey := map[bool]string{true: "success", false: "failure"}[success]
+
+	bm.buffer.mu.Lock()
+	if _, ok := bm.buffer.buffers[statusKey]; !ok {
+		bm.buffer.buffers[statusKey] = []*NotificationItem{}
+	}
+	bm.buffer.buffers[statusKey] = append(bm.buffer.buffers[statusKey], item)
+	bm.buffer.mu.Unlock()
+
+	// 重置定时器
+	if bm.buffer.mergeTimer != nil {
+		bm.buffer.mergeTimer.Reset(5 * time.Second)
+	}
 }
 
-func containsRune(slice []rune, r rune) bool {
-	for _, s := range slice {
-		if s == r {
-			return true
+// flushBuffer 刷新缓冲，合并发送
+func (bm *BotManager) flushBuffer() {
+	bm.buffer.mu.Lock()
+	defer bm.buffer.mu.Unlock()
+
+	for statusKey, items := range bm.buffer.buffers {
+		if len(items) == 0 {
+			continue
 		}
+		success := statusKey == "success"
+		mergedMsg := bm.generateMergedMessage(items, success)
+		bm.sendMessage(mergedMsg, "Markdown")
+		bm.buffer.buffers[statusKey] = []*NotificationItem{}
 	}
-	return false
+	bm.buffer.mergeChan <- struct{}{}
 }
 
-// sendMessage 发送消息
+// generateMergedMessage 生成合并消息（5s内相同状态）
+func (bm *BotManager) generateMergedMessage(items []*NotificationItem, success bool) string {
+	safe := strings.ReplaceAll // 简单转义，避免 MarkdownV2 复杂
+	header := fmt.Sprintf("*Deployment %s (%d 服务)*\n\n", map[bool]string{true: "成功", false: "失败"}[success], len(items))
+	status := map[bool]string{true: "Success *部署成功*", false: "Failure *部署失败-已回滚*"}[success]
+
+	body := "**详情**:\n"
+	for _, item := range items {
+		body += fmt.Sprintf("• 服务: `%s` | 环境: `%s` | 操作人: `%s` | 旧: `%s` → 新: `%s`\n",
+			safe(item.Service), safe(item.Env), safe(item.User), safe(item.OldVersion), safe(item.NewVersion))
+	}
+
+	return fmt.Sprintf("%s%s**状态**: %s\n**时间**: `%s`\n\n---\n*由 K8s-CICD Agent 自动发送*\n",
+		header, body, status, time.Now().Format("2006-01-02 15:04:05"))
+}
+
+// SendNotification 发送部署通知（现在缓冲添加）
+func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
+	if !bm.Enabled {
+		return nil
+	}
+	bm.AddNotification(service, env, user, oldVersion, newVersion, success)
+	return nil
+}
+
+// sendMessage 发送消息（使用 MarkdownV1 避免转义问题）
 func (bm *BotManager) sendMessage(text, parseMode string) (int, error) {
 	if !bm.Enabled {
 		return 0, fmt.Errorf("Telegram 未启用")
 	}
-	text = escapeMarkdownV2(text)
+	// 简单转义 Markdown
+	text = strings.ReplaceAll(text, "_", "\\_")
+	text = strings.ReplaceAll(text, "*", "\\*")
+	text = strings.ReplaceAll(text, "[", "\\[")
+	text = strings.ReplaceAll(text, "]", "\\]")
 	payload := map[string]interface{}{
 		"chat_id":    bm.GroupID,
 		"text":       text,
@@ -97,71 +176,11 @@ func (bm *BotManager) sendMessage(text, parseMode string) (int, error) {
 	return messageID, nil
 }
 
-// generateMarkdownMessage 生成通知（优化：失败时明确包含回滚信息）
-func (bm *BotManager) generateMarkdownMessage(service, env, user, oldVersion, newVersion string, success bool) string {
-	safe := escapeMarkdownV2
-	if success {
-		status := "Success *部署成功*"
-		return fmt.Sprintf("*Deployment %s %s*\n\n"+
-			"**服务**: `%s`\n"+
-			"**环境**: `%s`\n"+
-			"**操作人**: `%s`\n"+
-			"**旧版本**: `%s`\n"+
-			"**新版本**: `%s`\n"+
-			"**状态**: %s\n"+
-			"**时间**: `%s`\n\n"+
-			"---\n"+
-			"*由 K8s\\-CICD Agent 自动发送*",
-			safe(service), map[bool]string{true: "成功", false: "失败"}[success],
-			safe(service), safe(env), safe(user), safe(oldVersion), safe(newVersion), status,
-			time.Now().Format("2006-01-02 15:04:05"))
-	} else {
-		// 失败时：明确提到回滚到旧版本
-		status := "Failure *部署失败\\-已回滚到旧版本*"
-		return fmt.Sprintf("*Deployment %s %s*\n\n"+
-			"**服务**: `%s`\n"+
-			"**环境**: `%s`\n"+
-			"**操作人**: `%s`\n"+
-			"**旧版本**: `%s` (回滚成功)\n"+
-			"**新版本**: `%s` (部署异常，Pod 状态异常)\n"+
-			"**状态**: %s\n"+
-			"**时间**: `%s`\n\n"+
-			"---\n"+
-			"*由 K8s\\-CICD Agent 自动发送*",
-			safe(service), map[bool]string{true: "成功", false: "失败"}[success],
-			safe(service), safe(env), safe(user), safe(oldVersion), safe(newVersion), status,
-			time.Now().Format("2006-01-02 15:04:05"))
-	}
-}
-
-// SendNotification 发送部署通知
-func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
-	if !bm.Enabled {
-		return nil // 无需错误，静默跳过
-	}
-	startTime := time.Now()
-
-	message := bm.generateMarkdownMessage(service, env, user, oldVersion, newVersion, success)
-
-	_, err := bm.sendMessage(message, "MarkdownV2")
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "SendNotification",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("发送通知失败: %v"), err)
-		return err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "SendNotification",
-		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("部署通知发送成功: %s -> %s [%s] (状态: %s)"), oldVersion, newVersion, service, map[bool]string{true: "成功", false: "失败 (已回滚)"}[success])
-	return nil
-}
-
-// Stop 空实现
+// Stop 停止（刷新缓冲）
 func (bm *BotManager) Stop() {
-	logrus.Info(color.GreenString("Telegram BotManager 停止"))
+	if bm.buffer != nil && bm.buffer.mergeTimer != nil {
+		bm.buffer.mergeTimer.Stop()
+		bm.flushBuffer() // 强制发送剩余
+	}
+	logrus.Info(color.GreenString("Telegram BotManager 停止 (缓冲已刷新)"))
 }
