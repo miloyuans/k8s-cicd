@@ -1,4 +1,4 @@
-// 修改后的 telegram/bot.go：重新设计模板，避免转义错误（使用简单 MarkdownV1 或纯文本）；添加5s缓冲合并通知（相同状态）。
+// 修改后的 telegram/bot.go：修复 safe 函数定义（单参数转义）；使用简单 Markdown 转义函数。
 
 package telegram
 
@@ -65,6 +65,16 @@ func NewBotManager(cfg *config.TelegramConfig) *BotManager {
 	return bm
 }
 
+// escapeForMarkdown 简单 Markdown 转义函数 (单参数)
+func escapeForMarkdown(text string) string {
+	// 基本转义 Markdown 特殊字符
+	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
+	for _, char := range escapeChars {
+		text = strings.ReplaceAll(text, char, "\\"+char)
+	}
+	return text
+}
+
 // AddNotification 添加通知到缓冲
 func (bm *BotManager) AddNotification(service, env, user, oldVersion, newVersion string, success bool) {
 	if !bm.Enabled {
@@ -105,7 +115,7 @@ func (bm *BotManager) flushBuffer() {
 		}
 		success := statusKey == "success"
 		mergedMsg := bm.generateMergedMessage(items, success)
-		bm.sendMessage(mergedMsg, "Markdown")
+		bm.sendMessage(mergedMsg, "MarkdownV2")
 		bm.buffer.buffers[statusKey] = []*NotificationItem{}
 	}
 	bm.buffer.mergeChan <- struct{}{}
@@ -113,7 +123,8 @@ func (bm *BotManager) flushBuffer() {
 
 // generateMergedMessage 生成合并消息（5s内相同状态）
 func (bm *BotManager) generateMergedMessage(items []*NotificationItem, success bool) string {
-	safe := strings.ReplaceAll // 简单转义，避免 MarkdownV2 复杂
+	// 使用 escapeForMarkdown 转义
+	safe := escapeForMarkdown
 	header := fmt.Sprintf("*Deployment %s (%d 服务)*\n\n", map[bool]string{true: "成功", false: "失败"}[success], len(items))
 	status := map[bool]string{true: "Success *部署成功*", false: "Failure *部署失败-已回滚*"}[success]
 
@@ -123,7 +134,7 @@ func (bm *BotManager) generateMergedMessage(items []*NotificationItem, success b
 			safe(item.Service), safe(item.Env), safe(item.User), safe(item.OldVersion), safe(item.NewVersion))
 	}
 
-	return fmt.Sprintf("%s%s**状态**: %s\n**时间**: `%s`\n\n---\n*由 K8s-CICD Agent 自动发送*\n",
+	return fmt.Sprintf("%s%s**状态**: %s\n**时间**: `%s`\n\n---\n*由 K8s\\\\-CICD Agent 自动发送*",
 		header, body, status, time.Now().Format("2006-01-02 15:04:05"))
 }
 
@@ -136,16 +147,12 @@ func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersio
 	return nil
 }
 
-// sendMessage 发送消息（使用 MarkdownV1 避免转义问题）
+// sendMessage 发送消息（使用 MarkdownV2）
 func (bm *BotManager) sendMessage(text, parseMode string) (int, error) {
 	if !bm.Enabled {
 		return 0, fmt.Errorf("Telegram 未启用")
 	}
-	// 简单转义 Markdown
-	text = strings.ReplaceAll(text, "_", "\\_")
-	text = strings.ReplaceAll(text, "*", "\\*")
-	text = strings.ReplaceAll(text, "[", "\\[")
-	text = strings.ReplaceAll(text, "]", "\\]")
+	// 使用预转义的 text
 	payload := map[string]interface{}{
 		"chat_id":    bm.GroupID,
 		"text":       text,
