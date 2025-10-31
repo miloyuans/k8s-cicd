@@ -19,7 +19,6 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
-	"k8s.io/client-go/kubernetes"
 )
 
 // Task 任务结构
@@ -217,7 +216,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		RecordedAt: time.Now(),
 		TaskID:     task.DeployRequest.TaskID,
 	}
-	if err := mongo.StoreImageSnapshot(task.DeployRequest.TaskID, snapshot); err != nil {
+	if err := mongo.StoreImageSnapshot(snapshot); err != nil {
 		logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Warnf(color.YellowString("存储快照失败: %v"), err)
 	}
 
