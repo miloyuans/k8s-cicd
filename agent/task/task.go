@@ -216,7 +216,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		RecordedAt: time.Now(),
 		TaskID:     task.DeployRequest.TaskID,
 	}
-	if err := mongo.StoreImageSnapshot(task.DeployRequest.TaskID, snapshot); err != nil {
+	if err := mongo.StoreImageSnapshot(snapshot, task.DeployRequest.TaskID); err != nil {
 		logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Warnf(color.YellowString("存储快照失败: %v"), err)
 	}
 
