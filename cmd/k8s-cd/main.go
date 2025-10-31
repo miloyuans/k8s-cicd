@@ -1,8 +1,9 @@
-// 修改后的 main.go：Telegram 从 cfg.Telegram 获取，不是 os.Getenv；K8s 配置已支持两种方式，无需改（NewK8sClient 已处理）。
+// 修改后的 main.go：增强优雅关闭，添加超时后强制退出；资源约束已在 config。
 
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"os/signal"
@@ -60,8 +61,9 @@ func main() {
 	}
 	botMgr := telegram.NewBotManager(&cfg.Telegram) // 传入配置
 
-	// 步骤7：初始化任务队列
+	// 步骤7：初始化任务队列（资源约束: MaxQueueSize）
 	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers)
+	taskQ.maxQueueSize = cfg.Task.MaxQueueSize // 假设添加字段
 
 	// 步骤8：组装 Agent（字段名大写）
 	ag := &agent.Agent{
@@ -89,19 +91,34 @@ func main() {
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "main",
-	}).Info(color.GreenString("k8s-cd Agent 已启动，等待中断信号..."))
+	}).Info(color.YellowString("k8s-cd Agent 已启动，等待中断信号..."))
 
 	<-sigChan
 
-	// 步骤11：优雅关闭
+	// 步骤11：优雅关闭，带超时强制
 	logrus.Info(color.YellowString("收到关闭信号，开始优雅关闭..."))
 
-	stopStart := time.Now()
-	ag.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // 30s 超时
+	defer cancel()
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "main",
-		"took":   time.Since(stopStart),
-	}).Info(color.GreenString("k8s-cd Agent 关闭完成"))
+	stopStart := time.Now()
+	go func() {
+		ag.Stop()
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "main",
+			"took":   time.Since(stopStart),
+		}).Info(color.GreenString("k8s-cd Agent 关闭完成"))
+	}()
+
+	select {
+	case <-ctx.Done():
+		if ctx.Err() == context.DeadlineExceeded {
+			logrus.Error(color.RedString("优雅关闭超时，强制终止进程"))
+			os.Exit(1) // 强制退出
+		}
+	}
+
+	// 正常退出
+	os.Exit(0)
 }

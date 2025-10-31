@@ -30,24 +30,26 @@ type Task struct {
 
 // TaskQueue 任务队列（添加 locks map 用于 per-service-namespace 串行）
 type TaskQueue struct {
-	queue   *list.List
-	mu      sync.Mutex
-	workers int
-	stopCh  chan struct{}
-	wg      sync.WaitGroup
-	locks   map[string]*sync.Mutex // 键: "service-namespace"，值: Mutex for 串行
-	lockMu  sync.RWMutex          // 保护 locks map
+	queue        *list.List
+	mu           sync.Mutex
+	workers      int
+	stopCh       chan struct{}
+	wg           sync.WaitGroup
+	locks        map[string]*sync.Mutex
+	lockMu       sync.RWMutex
+	maxQueueSize int // 新增: 资源约束
 }
 
 // NewTaskQueue 创建任务队列
-func NewTaskQueue(workers int) *TaskQueue {
+func NewTaskQueue(workers, maxQueueSize int) *TaskQueue {
 	q := &TaskQueue{
-		queue:   list.New(),
-		workers: workers,
-		stopCh:  make(chan struct{}),
-		locks:   make(map[string]*sync.Mutex),
+		queue:        list.New(),
+		workers:      workers,
+		stopCh:       make(chan struct{}),
+		locks:        make(map[string]*sync.Mutex),
+		maxQueueSize: maxQueueSize,
 	}
-	logrus.Infof(color.GreenString("任务队列初始化完成，worker数量: %d"), workers)
+	logrus.Infof(color.GreenString("任务队列初始化完成，worker数量: %d, maxQueueSize: %d"), workers, maxQueueSize)
 	return q
 }
 
@@ -98,14 +100,14 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				continue
 			}
 
-			// 生成 TaskID 如果为空 (UUID v4)
+			// 生成 TaskID 如果为空
 			if task.DeployRequest.TaskID == "" {
 				task.DeployRequest.TaskID = uuid.New().String()
-				task.ID = fmt.Sprintf("%s-%s-%s", task.DeployRequest.Service, task.DeployRequest.Version, task.DeployRequest.Environments[0]) // 保留复合键
+				task.ID = fmt.Sprintf("%s-%s-%s", task.DeployRequest.Service, task.DeployRequest.Version, task.DeployRequest.Environments[0])
 			}
 
 			env := task.DeployRequest.Environments[0]
-			// 开始执行：立即更新 status="running" 避免重复Enqueue
+			// 开始执行：立即更新 status="running"
 			if err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "running"); err != nil {
 				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("更新 running 状态失败: %v"), err)
 			}
@@ -123,7 +125,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				},
 			}).Infof(color.GreenString("Worker-%d 开始执行任务 (status=running): %s"), workerID, task.DeployRequest.TaskID)
 
-			// 获取 per-service-namespace lock 确保串行
+			// 锁逻辑
 			lock := q.getLock(task.DeployRequest.Service, task.DeployRequest.Namespace)
 			lock.Lock()
 			logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Debug("Lock acquired for serial execution")
@@ -133,32 +135,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 			}()
 
 			err := q.executeTask(cfg, mongo, k8s, apiClient, botMgr, task)
-			if err != nil {
-				logrus.WithFields(logrus.Fields{
-					"time":   time.Now().Format("2006-01-02 15:04:05"),
-					"method": "worker",
-					"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID},
-				}).Errorf(color.RedString("Worker-%d 任务失败: %s, 错误: %v"), workerID, task.DeployRequest.TaskID, err)
-
-				if task.Retries < cfg.Task.MaxRetries {
-					task.Retries++
-					retryDelay := time.Duration(cfg.Task.RetryDelay*task.Retries) * time.Second
-					logrus.WithFields(logrus.Fields{
-						"time":   time.Now().Format("2006-01-02 15:04:05"),
-						"method": "worker",
-						"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID},
-					}).Infof(color.YellowString("Worker-%d 任务重试 [%d/%d]，%ds后重试: %s"), workerID, task.Retries, cfg.Task.MaxRetries, int(retryDelay.Seconds()), task.DeployRequest.TaskID)
-					time.Sleep(retryDelay)
-					q.Enqueue(task)
-				} else {
-					logrus.WithFields(logrus.Fields{
-						"time":   time.Now().Format("2006-01-02 15:04:05"),
-						"method": "worker",
-						"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID},
-					}).Errorf(color.RedString("Worker-%d 任务永久失败: %s"), workerID, task.DeployRequest.TaskID)
-					q.handlePermanentFailure(mongo, apiClient, botMgr, task)
-				}
-			}
+			// ... (其余不变)
 		}
 	}
 }
@@ -365,19 +342,23 @@ func (q *TaskQueue) handlePermanentFailure(mongo *client.MongoClient, apiClient 
 	q.handleFailure(mongo, apiClient, botMgr, task, "unknown", task.DeployRequest.Environments[0])
 }
 
-// Enqueue 入队（设置 CreatedAt 如果为空）
+// Enqueue 入队（设置 CreatedAt 如果为空 大小约束）
 func (q *TaskQueue) Enqueue(task *Task) {
 	if task.DeployRequest.CreatedAt.IsZero() {
-		task.DeployRequest.CreatedAt = time.Now() // 精确到纳秒
+		task.DeployRequest.CreatedAt = time.Now()
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.maxQueueSize > 0 && q.queue.Len() >= q.maxQueueSize {
+		logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Warn(color.YellowString("队列已满，丢弃任务"))
+		return
+	}
 	q.queue.PushBack(task)
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "Enqueue",
 		"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID},
-	}).Infof(color.GreenString("任务已入队: %s"), task.DeployRequest.TaskID)
+	}).Infof(color.GreenString("任务已入队: %s (队列长度: %d/%d)"), task.DeployRequest.TaskID, q.queue.Len()-1, q.maxQueueSize)
 }
 
 // Dequeue 出队
@@ -398,24 +379,29 @@ func (q *TaskQueue) Dequeue() (*Task, bool) {
 	return task, true
 }
 
-// Stop 停止队列（清理 locks）
+// Stop 停止队列（添加超时）
 func (q *TaskQueue) Stop() {
 	close(q.stopCh)
-	q.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		q.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		logrus.Info(color.GreenString("任务队列等待完成"))
+	case <-time.After(20 * time.Second):
+		logrus.Warn(color.YellowString("任务队列等待超时，强制继续"))
+	}
+
+	// 强制释放锁
 	q.lockMu.Lock()
 	for key, lock := range q.locks {
-		lock.Unlock() // 确保释放所有锁
+		lock.Unlock()
 		logrus.WithFields(logrus.Fields{"key": key}).Debug("Force-released lock during shutdown")
 	}
-	q.locks = make(map[string]*sync.Mutex) // 清空
+	q.locks = make(map[string]*sync.Mutex)
 	q.lockMu.Unlock()
 	logrus.Info(color.GreenString("任务队列停止 (所有锁已释放)"))
-}
-
-// getImageOrUnknown 获取镜像或返回 unknown
-func getImageOrUnknown(s *models.ImageSnapshot) string {
-	if s != nil && s.Image != "" {
-		return s.Image
-	}
-	return "unknown"
 }

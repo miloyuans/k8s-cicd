@@ -107,9 +107,29 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 		}
 	}
 
-	// 2. 为版本集合创建唯一索引 (不变)
+	// 2. 为 image_snapshots 创建 TTL 索引 (RecordedAt)
+	imageSnapshotsColl := client.Database("cicd").Collection("image_snapshots")
+	_, err := imageSnapshotsColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "recorded_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
+	})
+	if err != nil {
+		return fmt.Errorf("创建 image_snapshots TTL 索引失败: %v", err)
+	}
+
+	// 3. 为 pushlist.push_data 创建 TTL 索引 (UpdatedAt, 单文档但仍添加)
+	pushDataColl := client.Database("pushlist").Collection("push_data")
+	_, err = pushDataColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "updated_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
+	})
+	if err != nil {
+		return fmt.Errorf("创建 push_data TTL 索引失败: %v", err)
+	}
+
+	// 4. 为版本集合创建唯一索引 (不变)
 	versionsColl := client.Database("cicd").Collection("versions")
-	_, err := versionsColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+	_, err = versionsColl.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "service", Value: 1}, {Key: "version", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	})
@@ -117,6 +137,7 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 		return fmt.Errorf("创建版本唯一索引失败: %v", err)
 	}
 
+	logrus.Info("所有 TTL 索引创建完成 (任务/快照/推送数据)")
 	return nil
 }
 
@@ -133,8 +154,7 @@ func (m *MongoClient) GetEnvMappings() map[string]string {
 	return m.cfg.EnvMapping.Mappings
 }
 
-// GetTasksByStatus 查询指定环境和状态的任务（添加 Sort by created_at asc）
-// GetTasksByStatus 查询指定环境和状态的任务（添加过滤 "running" 避免重复）
+// GetTasksByStatus 查询指定环境和状态的任务（过滤 running 避免重复）
 func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
