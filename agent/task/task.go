@@ -1,4 +1,4 @@
-// 修改后的 task/task.go：增强 handleFailure 中的通知逻辑，确保回滚后明确触发失败通知（已回滚），添加日志确认通知触发；模板已包含"已回滚"。
+// 修改后的 task/task.go：确保 lock 释放（defer 已处理）；添加状态映射调用（在 handle* 中）。
 
 package task
 
@@ -120,7 +120,11 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 			// 获取 per-service-namespace lock 确保串行
 			lock := q.getLock(task.DeployRequest.Service, task.DeployRequest.Namespace)
 			lock.Lock()
-			defer lock.Unlock()
+			logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Debug("Lock acquired for serial execution")
+			defer func() {
+				lock.Unlock()
+				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Debug("Lock released after execution")
+			}()
 
 			err := q.executeTask(cfg, mongo, k8s, apiClient, botMgr, task)
 			if err != nil {
@@ -239,22 +243,37 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	return nil
 }
 
-// handleSuccess 成功处理（确保通知触发）
+// mapStatusToPreset 状态映射到预设值
+func mapStatusToPreset(internalStatus string) string {
+	switch internalStatus {
+	case "执行成功":
+		return "success"
+	case "执行失败", "异常":
+		return "failure"
+	default:
+		return "no_action"
+	}
+}
+
+// handleSuccess 成功处理（确保通知触发；映射状态）
 func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string, env string) {
-	// 1. 更新 Mongo 状态
-	if err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行成功"); err != nil {
+	internalStatus := "执行成功"
+	presetStatus := mapStatusToPreset(internalStatus)
+
+	// 1. 更新 Mongo 状态 (内部状态)
+	if err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, internalStatus); err != nil {
 		logrus.Errorf(color.RedString("更新MongoDB状态失败 [%s]: %v"), env, err)
 	}
 
-	// 2. 调用 /status 接口
+	// 2. 调用 /status 接口 (预设状态)
 	if err := apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.DeployRequest.Service,
 		Version:     task.DeployRequest.Version,
 		Environment: env,
 		User:        task.DeployRequest.User,
-		Status:      "执行成功",
+		Status:      presetStatus,
 	}); err != nil {
-		logrus.Errorf(color.RedString("推送成功状态失败 [%s]: %v"), env, err)
+		logrus.Errorf(color.RedString("推送状态失败 [%s]: %v"), env, err)
 	}
 
 	// 3. 发送通知（成功）
@@ -270,27 +289,30 @@ func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, apiClient *api.APIC
 	}
 }
 
-// handleFailure 失败处理（增强：确保回滚后通知触发，日志确认）
+// handleFailure 失败处理（增强：确保回滚后通知触发，日志确认；映射状态）
 func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string, env string) {
+	internalStatus := "执行失败"
+	presetStatus := mapStatusToPreset(internalStatus)
+
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "handleFailure",
 		"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env, "old_tag": oldImage},
 	}).Infof(color.YellowString("开始处理失败逻辑，包括回滚通知: %s [%s]"), task.DeployRequest.TaskID, env)
 
-	// 1. 更新 Mongo 状态
-	mongoErr := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行失败")
+	// 1. 更新 Mongo 状态 (内部状态)
+	mongoErr := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, internalStatus)
 	if mongoErr != nil {
 		logrus.Errorf(color.RedString("更新MongoDB状态失败 [%s]: %v"), env, mongoErr)
 	}
 
-	// 2. 调用 /status 接口
+	// 2. 调用 /status 接口 (预设状态)
 	statusErr := apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.DeployRequest.Service,
 		Version:     task.DeployRequest.Version,
 		Environment: env,
 		User:        task.DeployRequest.User,
-		Status:      "执行失败",
+		Status:      presetStatus,
 	})
 	if statusErr != nil {
 		logrus.Errorf(color.RedString("推送失败状态失败 [%s]: %v"), env, statusErr)
@@ -309,18 +331,21 @@ func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIC
 	}
 }
 
-// handleException 异常处理（使用 env）
+// handleException 异常处理（使用 env；映射状态）
 func (q *TaskQueue) handleException(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string, env string) {
-	// 1. 更新 Mongo 状态
-	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "异常")
+	internalStatus := "异常"
+	presetStatus := mapStatusToPreset(internalStatus)
 
-	// 2. 调用 /status 接口
+	// 1. 更新 Mongo 状态 (内部状态)
+	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, internalStatus)
+
+	// 2. 调用 /status 接口 (预设状态)
 	_ = apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.DeployRequest.Service,
 		Version:     task.DeployRequest.Version,
 		Environment: env,
 		User:        task.DeployRequest.User,
-		Status:      "异常",
+		Status:      presetStatus,
 	})
 
 	// 3. 发送通知（失败样式）
@@ -370,11 +395,13 @@ func (q *TaskQueue) Stop() {
 	close(q.stopCh)
 	q.wg.Wait()
 	q.lockMu.Lock()
-	for _, lock := range q.locks {
-		lock.Unlock() // 确保释放
+	for key, lock := range q.locks {
+		lock.Unlock() // 确保释放所有锁
+		logrus.WithFields(logrus.Fields{"key": key}).Debug("Force-released lock during shutdown")
 	}
+	q.locks = make(map[string]*sync.Mutex) // 清空
 	q.lockMu.Unlock()
-	logrus.Info(color.GreenString("任务队列停止"))
+	logrus.Info(color.GreenString("任务队列停止 (所有锁已释放)"))
 }
 
 // getImageOrUnknown 获取镜像或返回 unknown

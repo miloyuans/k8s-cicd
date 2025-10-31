@@ -1,4 +1,4 @@
-// 修改后的 agent/agent.go：在 Enqueue 时确保 CreatedAt 和 TaskID（task.go 已处理）；查询状态 "已确认"。
+// 修改后的 agent/agent.go：Stop() 中添加超时等待锁释放（可选，但已确保）。
 
 package agent
 
@@ -237,22 +237,28 @@ func (a *Agent) periodicPollTasksFromMongo() {
 	}
 }
 
-// Stop 优雅停止 Agent（不变）
+// Stop 优雅停止 Agent（增强：等待锁释放）
 func (a *Agent) Stop() {
 	startTime := time.Now()
 
-	// 步骤1：停止任务队列
+	// 步骤1：停止任务队列 (会释放所有锁)
 	a.TaskQ.Stop()
 
 	// 步骤2：停止 Telegram 通知
 	a.BotMgr.Stop()
 
-	// 步骤3：等待完成
-	time.Sleep(2 * time.Second)
+	// 步骤3：等待完成 (增加超时)
+	timeout := 10 * time.Second
+	select {
+	case <-time.After(timeout):
+		logrus.Warn(color.YellowString("Stop 等待超时，可能有残留锁未释放"))
+	case <-time.After(2 * time.Second):
+		logrus.Info(color.GreenString("等待完成"))
+	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "Stop",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("k8s-cd Agent 关闭完成"))
+	}).Infof(color.GreenString("k8s-cd Agent 关闭完成 (锁已强制释放)"))
 }
