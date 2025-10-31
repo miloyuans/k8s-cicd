@@ -1,4 +1,4 @@
-// 修正后的 client/mongo_client.go：在新增方法中添加 "github.com/fatih/color" import，并使用 color 在日志中。
+// 修改后的 client/mongo_client.go：调整 GetTasksByStatus 中的状态过滤为 "已确认"，并在 UpdateTaskStatus 中支持中文状态。
 
 package client
 
@@ -117,15 +117,15 @@ func (m *MongoClient) GetEnvMappings() map[string]string {
 	return m.cfg.EnvMapping.Mappings
 }
 
-// GetTasksByStatus 查询指定环境和状态的任务
+// GetTasksByStatus 查询指定环境和状态的任务（调整：状态为 "已确认"）
 func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
 	filter := bson.M{
-		"confirmation_status": status,
-		"status": bson.M{"$nin": []string{"success", "failure"}}, // 避免重复执行
+		"confirmation_status": status, // 现在 status="已确认"
+		"status": bson.M{"$nin": []string{"执行成功", "执行失败", "异常"}}, // 避免重复执行，调整为中文状态
 	}
 
 	cursor, err := collection.Find(ctx, filter)
@@ -162,7 +162,7 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 	return tasks, nil
 }
 
-// UpdateTaskStatus 更新任务状态
+// UpdateTaskStatus 更新任务状态（调整：支持中文状态）
 func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status string) error {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -176,7 +176,7 @@ func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status strin
 	}
 	update := bson.M{
 		"$set": bson.M{
-			"status":      status,
+			"status":      status, // 现在 status 可以是 "执行成功"、"执行失败"、"异常"
 			"updated_at":  time.Now(),
 		},
 	}

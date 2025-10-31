@@ -1,4 +1,4 @@
-// 修改后的 agent/agent.go：修改 Start() 和 periodicPushDiscovery，实现优化逻辑。
+// 修改后的 agent/agent.go：调整 periodicPollTasksFromMongo 中的状态查询为 "已确认"，并确保 namespace 匹配。
 
 package agent
 
@@ -28,7 +28,7 @@ type Agent struct {
 	ApiClient *api.APIClient
 }
 
-// Start 启动 Agent（修改：启动时全量推送一次）
+// Start 启动 Agent（不变）
 func (a *Agent) Start() {
 	startTime := time.Now()
 
@@ -53,7 +53,7 @@ func (a *Agent) Start() {
 	go a.periodicPushDiscovery()
 }
 
-// initialFullPush 启动时全量推送（新增）
+// initialFullPush 启动时全量推送（不变）
 func (a *Agent) initialFullPush() {
 	startTime := time.Now()
 	logrus.WithFields(logrus.Fields{
@@ -107,7 +107,7 @@ func (a *Agent) initialFullPush() {
 	}).Infof(color.GreenString("启动时全量推送成功"))
 }
 
-// periodicPushDiscovery 周期性推送服务发现数据（优化：对比 Mongo pushlist）
+// periodicPushDiscovery 周期性推送服务发现数据（不变）
 func (a *Agent) periodicPushDiscovery() {
 	ticker := time.NewTicker(a.Cfg.API.PushInterval)
 	defer ticker.Stop()
@@ -186,7 +186,7 @@ func (a *Agent) periodicPushDiscovery() {
 	}
 }
 
-// periodicPollTasksFromMongo 周期性从 Mongo 轮询 confirmed 任务（不变）
+// periodicPollTasksFromMongo 周期性从 Mongo 轮询 "已确认" 任务（调整状态为 "已确认"，确保 namespace 匹配）
 func (a *Agent) periodicPollTasksFromMongo() {
 	ticker := time.NewTicker(a.Cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -198,8 +198,8 @@ func (a *Agent) periodicPollTasksFromMongo() {
 
 			// 1. 遍历所有环境
 			for env, namespace := range a.Cfg.EnvMapping.Mappings {
-				// 2. 查询状态为 confirmed 的任务
-				deployReqs, err := a.Mongo.GetTasksByStatus(env, "confirmed")
+				// 2. 查询状态为 "已确认" 的任务
+				deployReqs, err := a.Mongo.GetTasksByStatus(env, "已确认")
 				if err != nil {
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -210,9 +210,9 @@ func (a *Agent) periodicPollTasksFromMongo() {
 					continue
 				}
 
-				// 3. 提交任务到队列
+				// 3. 提交任务到队列（补全 namespace 以匹配环境映射）
 				for _, dr := range deployReqs {
-					// 补全 namespace
+					// 补全 namespace（根据环境映射匹配）
 					dr.Namespace = namespace
 					// 创建 task.Task
 					t := &task.Task{

@@ -1,3 +1,5 @@
+// 修改后的 task/task.go：调整 handleSuccess/handleFailure 中的状态为中文，并添加异常处理。
+
 package task
 
 import (
@@ -114,11 +116,24 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 	}
 }
 
-// executeTask 执行部署任务
+// executeTask 执行部署任务（添加异常处理）
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) error {
 	startTime := time.Now()
-	//env := task.DeployRequest.Environments[0]
-	namespace := task.DeployRequest.Namespace
+	env := task.DeployRequest.Environments[0]
+	namespace := task.DeployRequest.Namespace // 已从环境映射补全
+
+	defer func() {
+		if r := recover(); r != nil {
+			// 捕获 panic 作为异常
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "executeTask",
+				"took":   time.Since(startTime),
+				"data":   logrus.Fields{"task_id": task.ID, "panic": r},
+			}).Errorf(color.RedString("任务执行异常: %s"), task.ID)
+			q.handleException(mongo, apiClient, botMgr, task, "unknown")
+		}
+	}()
 
 	// 步骤1：捕获快照
 	snapshot, err := k8s.CaptureImageSnapshot(task.DeployRequest.Service, namespace)
@@ -130,7 +145,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 
 	// 步骤2：存储快照
 	if err := mongo.StoreImageSnapshot(snapshot, task.ID); err != nil {
-		logrus.Warnf("存储快照失败: %v", err)
+		logrus.Warnf(color.YellowString("存储快照失败: %v"), err)
 	}
 
 	// 步骤3：更新镜像
@@ -161,26 +176,26 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 			"old_tag":  kubernetes.ExtractTag(oldImage),
 			"new_tag":  task.DeployRequest.Version,
 		},
-	}).Infof(color.GreenString("任务执行完成: %s, 状态: success"), task.ID)
+	}).Infof(color.GreenString("任务执行完成: %s, 状态: 执行成功"), task.ID)
 	return nil
 }
 
-// handleSuccess 成功处理
+// handleSuccess 成功处理（调整状态为 "执行成功"）
 func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string) {
 	env := task.DeployRequest.Environments[0]
 
 	// 1. 更新 Mongo 状态
-	if err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "success"); err != nil {
+	if err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行成功"); err != nil {
 		logrus.Errorf(color.RedString("更新MongoDB状态失败: %v"), err)
 	}
 
-	// 2. 调用 /status 接口
+	// 2. 调用 /status 接口（调整为中文状态）
 	if err := apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.DeployRequest.Service,
 		Version:     task.DeployRequest.Version,
 		Environment: env,
 		User:        task.DeployRequest.User,
-		Status:      "success",
+		Status:      "执行成功",
 	}); err != nil {
 		logrus.Errorf(color.RedString("推送成功状态失败: %v"), err)
 	}
@@ -193,12 +208,12 @@ func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, apiClient *api.APIC
 	}
 }
 
-// handleFailure 失败处理
+// handleFailure 失败处理（调整状态为 "执行失败"）
 func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string) {
 	env := task.DeployRequest.Environments[0]
 
 	// 1. 更新 Mongo 状态
-	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "failure")
+	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行失败")
 
 	// 2. 调用 /status 接口
 	_ = apiClient.UpdateStatus(models.StatusRequest{
@@ -206,14 +221,34 @@ func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIC
 		Version:     task.DeployRequest.Version,
 		Environment: env,
 		User:        task.DeployRequest.User,
-		Status:      "failure",
+		Status:      "执行失败",
 	})
 
 	// 3. 发送通知
 	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, oldImage, task.DeployRequest.Version, false)
 }
 
-// handlePermanentFailure 永久失败处理
+// handleException 异常处理（新增：状态为 "异常"）
+func (q *TaskQueue) handleException(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string) {
+	env := task.DeployRequest.Environments[0]
+
+	// 1. 更新 Mongo 状态
+	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "异常")
+
+	// 2. 调用 /status 接口
+	_ = apiClient.UpdateStatus(models.StatusRequest{
+		Service:     task.DeployRequest.Service,
+		Version:     task.DeployRequest.Version,
+		Environment: env,
+		User:        task.DeployRequest.User,
+		Status:      "异常",
+	})
+
+	// 3. 发送通知（失败样式）
+	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, oldImage, task.DeployRequest.Version, false)
+}
+
+// handlePermanentFailure 永久失败处理（调用 handleFailure，使用 "执行失败"）
 func (q *TaskQueue) handlePermanentFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) {
 	q.handleFailure(mongo, apiClient, botMgr, task, "unknown")
 }

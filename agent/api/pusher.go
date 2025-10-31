@@ -1,5 +1,5 @@
-// pusher.go
-//pusher.go (api.go)
+// 修改后的 api/pusher.go：调整 UpdateStatus 中的状态为中文（假设后端支持）。
+
 package api
 
 import (
@@ -51,7 +51,7 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "PushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("推送失败: JSON序列化错误: %v", err))
+		}).Errorf(color.RedString("推送失败: JSON序列化错误: %v"), err)
 		return fmt.Errorf("JSON序列化失败: %v", err)
 	}
 
@@ -62,7 +62,7 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "PushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("推送失败: HTTP请求错误: %v", err))
+		}).Errorf(color.RedString("推送失败: HTTP请求错误: %v"), err)
 		return err
 	}
 	defer resp.Body.Close()
@@ -74,7 +74,7 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "PushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("推送失败: 读取响应错误: %v", err))
+		}).Errorf(color.RedString("推送失败: 读取响应错误: %v"), err)
 		return err
 	}
 
@@ -88,7 +88,7 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 				"status": resp.StatusCode,
 				"body":   string(body),
 			},
-		}).Errorf(color.RedString("推送失败: HTTP错误: %d", resp.StatusCode))
+		}).Errorf(color.RedString("推送失败: HTTP错误: %d"), resp.StatusCode)
 		return fmt.Errorf("HTTP错误: %d - %s", resp.StatusCode, string(body))
 	}
 
@@ -111,11 +111,11 @@ func (c *APIClient) PushData(req models.PushRequest) error {
 			"environments":  uniqueEnvs,
 			"env_count":     len(uniqueEnvs),
 		},
-	}).Infof(color.GreenString("推送 /push 接口成功，完成数据交互，服务数: %d, 环境数: %d", len(uniqueServices), len(uniqueEnvs)))
+	}).Infof(color.GreenString("推送 /push 接口成功，完成数据交互，服务数: %d, 环境数: %d"), len(uniqueServices), len(uniqueEnvs))
 	return nil
 }
 
-// UpdateStatus POST /status - 更新部署状态
+// UpdateStatus POST /status - 更新部署状态（调整：状态为中文）
 func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 	startTime := time.Now()
 	// 步骤1：序列化请求数据
@@ -125,7 +125,7 @@ func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateStatus",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("状态更新失败: JSON序列化错误: %v", err))
+		}).Errorf(color.RedString("状态更新失败: JSON序列化错误: %v"), err)
 		return fmt.Errorf("JSON序列化失败: %v", err)
 	}
 
@@ -136,7 +136,7 @@ func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateStatus",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("状态更新失败: HTTP请求错误: %v", err))
+		}).Errorf(color.RedString("状态更新失败: HTTP请求错误: %v"), err)
 		return err
 	}
 	defer resp.Body.Close()
@@ -148,7 +148,7 @@ func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateStatus",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("状态更新失败: 读取响应错误: %v", err))
+		}).Errorf(color.RedString("状态更新失败: 读取响应错误: %v"), err)
 		return err
 	}
 
@@ -163,7 +163,7 @@ func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 				"body":   string(body),
 				"request": req,
 			},
-		}).Errorf(color.RedString("状态更新失败: HTTP错误: %d", resp.StatusCode))
+		}).Errorf(color.RedString("状态更新失败: HTTP错误: %d"), resp.StatusCode)
 		return fmt.Errorf("HTTP错误: %d - %s", resp.StatusCode, string(body))
 	}
 
@@ -176,7 +176,7 @@ func (c *APIClient) UpdateStatus(req models.StatusRequest) error {
 			"service":     req.Service,
 			"environment": req.Environment,
 			"version":     req.Version,
-			"status":      req.Status,
+			"status":      req.Status, // 现在是中文如 "执行成功"
 			"user":        req.User,
 		},
 	}).Infof(color.GreenString("状态更新 /status 接口成功"))
