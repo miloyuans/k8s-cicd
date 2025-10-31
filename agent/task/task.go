@@ -1,12 +1,14 @@
-// 修改后的 task/task.go：解决 env 未用（在 handleException 使用）；添加 UUID 生成；添加 per-group lock 实现串行执行。
+// 修正后的 task/task.go：添加 "fmt" 和 "time" import；解决所有 undefined 错误。
 
 package task
 
 import (
 	"container/list"
+	"fmt"     // 新增：用于 fmt.Sprintf
 	"sync"
+	"time"    // 新增：用于 time.Now(), time.Sleep, time.Since
 
-	"github.com/google/uuid" // 新增：UUID v4
+	"github.com/google/uuid" // UUID v4
 
 	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/client"
