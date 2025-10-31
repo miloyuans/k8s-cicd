@@ -1,19 +1,14 @@
-// 修改后的 task/task.go：
-// 1. 修复 declared and not used: err - 在 worker 中处理 err（记录错误，重试或失败处理）。
-// 2. 添加 getImageOrUnknown 函数定义（辅助函数，用于日志/通知中安全获取镜像 tag，避免空值）。
-// 3. 确保 handleFailure/handleException 等函数完整（基于片段补全逻辑）。
-// 4. 优化：添加状态映射函数 mapStatusToPreset（从内部状态如 "running" 映射到预设中文状态）。
-// 5. 保留现有功能：锁机制、缓冲通知、回滚逻辑、串行执行等。
-
 package task
 
 import (
+	"context"
 	"container/list"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/client"
@@ -24,6 +19,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
+	"k8s.io/client-go/kubernetes"
 )
 
 // Task 任务结构
@@ -170,21 +166,58 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env},
 	}).Infof(color.GreenString("开始执行部署: %s -> %s [%s]"), task.DeployRequest.Service, task.DeployRequest.Version, env)
 
-	// 1. 存储镜像快照（用于回滚）
-	oldImage, err := k8s.GetCurrentImage(task.DeployRequest.Service, namespace)
-	if err != nil {
-		return fmt.Errorf("获取当前镜像失败: %v", err)
+	ctx := context.Background()
+
+	// 1. 获取当前镜像和容器名（内联逻辑，模拟 GetCurrentImage）
+	var oldImage, containerName string
+	var err error
+
+	// 尝试 Deployment
+	deploy, err := k8s.Clientset.AppsV1().Deployments(namespace).Get(ctx, task.DeployRequest.Service, metav1.GetOptions{})
+	if err == nil {
+		if len(deploy.Spec.Template.Spec.Containers) > 0 {
+			containerName = deploy.Spec.Template.Spec.Containers[0].Name
+			oldImage = deploy.Spec.Template.Spec.Containers[0].Image
+		}
+	} else {
+		// 尝试 StatefulSet
+		sts, err := k8s.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, task.DeployRequest.Service, metav1.GetOptions{})
+		if err == nil {
+			if len(sts.Spec.Template.Spec.Containers) > 0 {
+				containerName = sts.Spec.Template.Spec.Containers[0].Name
+				oldImage = sts.Spec.Template.Spec.Containers[0].Image
+			}
+		} else {
+			// 尝试 DaemonSet
+			ds, err := k8s.Clientset.AppsV1().DaemonSets(namespace).Get(ctx, task.DeployRequest.Service, metav1.GetOptions{})
+			if err == nil {
+				if len(ds.Spec.Template.Spec.Containers) > 0 {
+					containerName = ds.Spec.Template.Spec.Containers[0].Name
+					oldImage = ds.Spec.Template.Spec.Containers[0].Image
+				}
+			} else {
+				return fmt.Errorf("未找到工作负载: %s in %s", task.DeployRequest.Service, namespace)
+			}
+		}
 	}
-	oldTag := k8s.ExtractTag(oldImage)
+
+	if oldImage == "" {
+		return fmt.Errorf("容器为空: %s in %s", task.DeployRequest.Service, namespace)
+	}
+
+	oldTag := kubernetes.ExtractTag(oldImage)
+
+	// 1. 存储镜像快照（用于回滚）
 	snapshot := &models.ImageSnapshot{
 		Namespace:  namespace,
 		Service:    task.DeployRequest.Service,
+		Container:  containerName,
 		Image:      oldImage,
 		Tag:        oldTag,
 		RecordedAt: time.Now(),
 		TaskID:     task.DeployRequest.TaskID,
 	}
-	if err := mongo.StoreImageSnapshot(snapshot); err != nil {
+	if err := mongo.StoreImageSnapshot(task.DeployRequest.TaskID, snapshot); err != nil {
 		logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Warnf(color.YellowString("存储快照失败: %v"), err)
 	}
 
@@ -270,14 +303,14 @@ func mapStatusToPreset(internalStatus string) string {
 }
 
 // handleFailure 失败处理（使用 env；映射状态；基于片段补全）
-func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string, env string) {
+func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldTag string, env string) {
 	internalStatus := "执行失败"
 	presetStatus := mapStatusToPreset(internalStatus)
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "handleFailure",
-		"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env, "old_tag": getImageOrUnknown(oldImage)},
+		"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env, "old_tag": getImageOrUnknown(oldTag)},
 	}).Infof(color.YellowString("开始处理失败逻辑，包括回滚通知: %s [%s]"), task.DeployRequest.TaskID, env)
 
 	// 1. 更新 Mongo 状态 (内部状态)
@@ -299,7 +332,7 @@ func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIC
 	}
 
 	// 3. 发送通知（失败，已回滚）
-	notifyErr := botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldImage), task.DeployRequest.Version, false)
+	notifyErr := botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false)
 	if notifyErr != nil {
 		logrus.Errorf(color.RedString("发送失败通知失败 [%s]: %v (模板包含'已回滚')"), env, notifyErr)
 	} else {
@@ -312,7 +345,7 @@ func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIC
 }
 
 // handleException 异常处理（使用 env；映射状态）
-func (q *TaskQueue) handleException(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldImage string, env string) {
+func (q *TaskQueue) handleException(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldTag string, env string) {
 	internalStatus := "异常"
 	presetStatus := mapStatusToPreset(internalStatus)
 
@@ -329,7 +362,7 @@ func (q *TaskQueue) handleException(mongo *client.MongoClient, apiClient *api.AP
 	})
 
 	// 3. 发送通知（失败样式）
-	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldImage), task.DeployRequest.Version, false)
+	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false)
 }
 
 // handlePermanentFailure 永久失败处理
