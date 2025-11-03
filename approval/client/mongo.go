@@ -1,4 +1,4 @@
-// 文件: mongo.go (完整文件，修复语法错误：移除截断部分，提供完整的 GetPendingTasks 函数；添加 import "sort"；其他功能保留不变)
+// 文件: mongo.go (完整文件，新增 MarkPopupSent 和 UpdateTaskStatus 函数以解决 bot.go 编译错误；其他功能保留不变)
 package client
 
 import (
@@ -405,6 +405,112 @@ func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) 
 		"took":   time.Since(startTime),
 	}).Warnf("任务未找到 task_id=%s", taskID)
 	return nil, fmt.Errorf("task not found")
+}
+
+// 新增: MarkPopupSent 标记弹窗已发送（更新 popup_sent=true, popup_message_id, popup_sent_at）
+func (m *MongoClient) MarkPopupSent(taskID string, messageID int) error {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	updated := false
+	for env := range m.cfg.EnvMapping.Mappings {
+		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		filter := bson.M{"task_id": taskID}
+		update := bson.M{
+			"$set": bson.M{
+				"popup_sent":      true,
+				"popup_message_id": messageID,
+				"popup_sent_at":   time.Now(),
+			},
+		}
+		result, err := collection.UpdateOne(ctx, filter, update)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":    time.Now().Format("2006-01-02 15:04:05"),
+				"method":  "MarkPopupSent",
+				"task_id": taskID,
+				"env":     env,
+				"message_id": messageID,
+			}).Errorf("标记弹窗已发送失败: %v", err)
+			continue
+		}
+		if result.ModifiedCount > 0 {
+			updated = true
+			logrus.WithFields(logrus.Fields{
+				"time":    time.Now().Format("2006-01-02 15:04:05"),
+				"method":  "MarkPopupSent",
+				"task_id": taskID,
+				"env":     env,
+				"message_id": messageID,
+				"took":    time.Since(startTime),
+			}).Infof("弹窗标记成功: popup_sent=true, id=%d", messageID)
+			break // 找到后停止遍历
+		}
+	}
+
+	if !updated {
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "MarkPopupSent",
+			"took":    time.Since(startTime),
+		}).Warnf("未找到任务以标记弹窗 task_id=%s", taskID)
+		return fmt.Errorf("task not found")
+	}
+	return nil
+}
+
+// 新增: UpdateTaskStatus 更新任务状态（confirmation_status + 更新时间）
+func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	updated := false
+	for env := range m.cfg.EnvMapping.Mappings {
+		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		filter := bson.M{"task_id": taskID}
+		update := bson.M{
+			"$set": bson.M{
+				"confirmation_status": status,
+				"updated_at":         time.Now(),
+				"updated_by":         user,
+			},
+		}
+		result, err := collection.UpdateOne(ctx, filter, update)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":    time.Now().Format("2006-01-02 15:04:05"),
+				"method":  "UpdateTaskStatus",
+				"task_id": taskID,
+				"env":     env,
+				"status":  status,
+				"user":    user,
+			}).Errorf("更新任务状态失败: %v", err)
+			continue
+		}
+		if result.ModifiedCount > 0 {
+			updated = true
+			logrus.WithFields(logrus.Fields{
+				"time":    time.Now().Format("2006-01-02 15:04:05"),
+				"method":  "UpdateTaskStatus",
+				"task_id": taskID,
+				"env":     env,
+				"status":  status,
+				"user":    user,
+				"took":    time.Since(startTime),
+			}).Infof("任务状态更新成功: %s by %s", status, user)
+			break // 找到后停止遍历
+		}
+	}
+
+	if !updated {
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "UpdateTaskStatus",
+			"took":    time.Since(startTime),
+		}).Warnf("未找到任务以更新状态 task_id=%s", taskID)
+		return fmt.Errorf("task not found")
+	}
+	return nil
 }
 
 // 修复: DeleteTask 完整实现
