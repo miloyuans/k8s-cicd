@@ -1,5 +1,7 @@
-// 文件: mongo.go (恢复 GetPushedServicesAndEnvs 函数，从 pushlist.push_data 查询服务/环境列表；
-// 其他功能保留不变)
+// 文件: mongo.go (完整文件，新增 InitPushData 函数：在 NewMongoClient 中调用，检查 global_push_data 文档，
+// 如果存在，则生成组合记录 (每个 service + 每个 env 作为一条 {service, environment} 文档)，插入/替换 push_data 集合；
+// 修改 GetPushedServicesAndEnvs 为遍历 push_data 集合的组合记录，提取唯一 service 和 environment；
+// 其他功能保留)
 package client
 
 import (
@@ -25,7 +27,8 @@ type MongoClient struct {
 	cfg    *config.MongoConfig
 }
 
-// 修复: NewMongoClient 完整，确保 client 定义和传递
+// 修改: NewMongoClient 添加复合唯一索引 (service+version+environment+created_at) 防重
+// 新增: 在连接成功后调用 InitPushData 初始化组合数据
 func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	startTime := time.Now()
 
@@ -68,61 +71,340 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 		return nil, err
 	}
 
+	// 新增: 初始化 push_data 组合数据
+	if err := initPushData(client); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewMongoClient",
+			"took":   time.Since(startTime),
+		}).Errorf("初始化 push_data 失败: %v", err)
+		return nil, err
+	}
+
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "NewMongoClient",
 		"took":   time.Since(startTime),
-	}).Info("k8s-approval MongoDB 连接成功")
+	}).Info("k8s-approval MongoDB 连接成功 (push_data 已初始化)")
 	return &MongoClient{client: client, cfg: cfg}, nil
 }
 
-// 新增: createIndexes 创建 TTL + 复合唯一索引 + created_at 排序索引
-// 修复: createIndexes 完整，确保 client param 定义 (line 33/47: client.Database)
-// 修复: createIndexes 移除单独 created_at_asc 索引 (TTL 已支持 {created_at: 1} 排序)
-func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error { // client param
+// 新增: initPushData 从 global_push_data 生成组合记录，插入 push_data 集合 (每个 service + env 组合一条记录)
+func initPushData(client *mongo.Client) error {
+	ctx := context.Background()
+	globalColl := client.Database("pushlist").Collection("global_push_data") // 假设全局文档集合
+	pushColl := client.Database("pushlist").Collection("push_data")
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "initPushData",
+	}).Info("=== 开始初始化 push_data 组合数据 ===")
+
+	// 检查 global_push_data 文档
+	globalDoc := bson.M{}
+	err := globalColl.FindOne(ctx, bson.M{"_id": "global_push_data"}).Decode(&globalDoc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "initPushData",
+			}).Warn("未找到 global_push_data 文档，跳过初始化")
+			return nil
+		}
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "initPushData",
+			"error":  err.Error(),
+		}).Errorf("查询 global_push_data 失败: %v", err)
+		return err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "initPushData",
+		"global_doc": fmt.Sprintf("%+v", globalDoc),
+	}).Debug("找到 global_push_data 文档")
+
+	// 提取 services 和 environments (处理 primitive.A 类型)
+	var services []string
+	if servicesVal, ok := globalDoc["services"]; ok {
+		if servicesSlice, okType := servicesVal.([]interface{}); okType {
+			for _, s := range servicesSlice {
+				if str, okStr := s.(string); okStr && str != "" {
+					services = append(services, str)
+				}
+			}
+		} else if servicesPrimitive, okPrimitive := servicesVal.(bson.A); okPrimitive {
+			for _, s := range servicesPrimitive {
+				if str, okStr := s.(string); okStr && str != "" {
+					services = append(services, str)
+				}
+			}
+		}
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "initPushData",
+			"services_len": len(services),
+		}).Debugf("提取 services 成功: %d 个", len(services))
+	}
+
+	var environments []string
+	if envsVal, ok := globalDoc["environments"]; ok {
+		if envsSlice, okType := envsVal.([]interface{}); okType {
+			for _, e := range envsSlice {
+				if str, okStr := e.(string); okStr && str != "" {
+					environments = append(environments, str)
+				}
+			}
+		} else if envsPrimitive, okPrimitive := envsVal.(bson.A); okPrimitive {
+			for _, e := range envsPrimitive {
+				if str, okStr := e.(string); okStr && str != "" {
+					environments = append(environments, str)
+				}
+			}
+		}
+		logrus.WithFields(logrus.Fields{
+			"time":        time.Now().Format("2006-01-02 15:04:05"),
+			"method":      "initPushData",
+			"environments": environments,
+			"envs_len":    len(environments),
+		}).Debugf("提取 environments 成功: %v (%d 个)", environments, len(environments))
+	}
+
+	if len(services) == 0 || len(environments) == 0 {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "initPushData",
+			"services_len": len(services),
+			"envs_len":     len(environments),
+		}).Warn("services 或 environments 为空，跳过生成组合")
+		return nil
+	}
+
+	// 清空现有 push_data
+	_, err = pushColl.DeleteMany(ctx, bson.M{})
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "initPushData",
+			"error":  err.Error(),
+		}).Errorf("清空 push_data 失败: %v", err)
+		return err
+	}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "initPushData",
+	}).Debug("push_data 集合已清空")
+
+	// 生成组合并插入
+	insertedCount := 0
+	for _, service := range services {
+		for _, env := range environments {
+			comboDoc := bson.M{
+				"service":     service,
+				"environment": env,
+				"created_at":  time.Now(),
+			}
+			_, err = pushColl.InsertOne(ctx, comboDoc)
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "initPushData",
+					"service": service,
+					"env":     env,
+					"error":   err.Error(),
+				}).Errorf("插入组合记录失败: %v", err)
+				continue
+			}
+			insertedCount++
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "initPushData",
+				"service": service,
+				"env":     env,
+			}).Debugf("插入组合记录成功: %s + %s", service, env)
+		}
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":        time.Now().Format("2006-01-02 15:04:05"),
+		"method":      "initPushData",
+		"inserted":    insertedCount,
+		"total_combos": len(services) * len(environments),
+	}).Infof("初始化完成，生成 %d / %d 个组合记录", insertedCount, len(services)*len(environments))
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "initPushData",
+	}).Info("=== 初始化 push_data 结束 ===")
+	return nil
+}
+
+// 修改: GetPushedServicesAndEnvs 遍历 push_data 组合记录，提取唯一服务和环境列表（支持排序）
+// 增强: 添加详细日志，包括每个组合文档、提取字段
+func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
+	startTime := time.Now()
 	ctx := context.Background()
 
-	// 1. 为每个环境的任务集合创建索引
-	for env := range cfg.EnvMapping.Mappings {
-		collection := client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env)) // client 定义
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetPushedServicesAndEnvs",
+	}).Info("=== 开始扫描 pushlist.push_data 组合记录 ===")
 
-		// TTL 索引 (keys: created_at:1 + expireAfterSeconds，支持排序)
-		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
-			Keys:    bson.D{{Key: "created_at", Value: 1}},
-			Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
-		})
-		if err != nil {
-			return fmt.Errorf("创建任务 TTL 索引失败 [%s]: %v", env, err)
-		}
+	// 获取 push_data 集合
+	collection := m.client.Database("pushlist").Collection("push_data")
 
-		// 复合唯一索引 (防重: service+version+environment+created_at，支持排序)
-		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
-			Keys: bson.D{
-				{Key: "service", Value: 1},
-				{Key: "version", Value: 1},
-				{Key: "environment", Value: 1},
-				{Key: "created_at", Value: 1},
-			},
-			Options: options.Index().SetUnique(true),
-		})
-		if err != nil {
-			return fmt.Errorf("创建复合唯一索引失败 [%s]: %v", env, err)
-		}
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetPushedServicesAndEnvs",
+		"database": "pushlist",
+		"collection": "push_data",
+	}).Debug("集合获取成功，准备执行 Find 查询 (filter: {})")
 
-		// 移除: 单独 created_at_asc 索引 (TTL/复合已覆盖排序需求，避免冲突)
-	}
-
-	// 2. popup_messages TTL (不变)
-	popupColl := client.Database("cicd").Collection("popup_messages") // client 定义
-	_, err := popupColl.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "sent_at", Value: 1}},
-		Options: options.Index().SetExpireAfterSeconds(7 * 24 * 60 * 60),
-	})
+	// 查询所有组合文档
+	cursor, err := collection.Find(ctx, bson.M{})
 	if err != nil {
-		return fmt.Errorf("创建弹窗消息 TTL 索引失败: %v", err)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPushedServicesAndEnvs",
+			"error":  err.Error(),
+		}).Errorf("查询 push_data 失败: %v", err)
+		return nil, nil, err
+	}
+	defer cursor.Close(ctx)
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetPushedServicesAndEnvs",
+	}).Debug("Find 查询成功，准备遍历 cursor")
+
+	// 使用 map 去重
+	serviceSet := make(map[string]struct{})
+	envSet := make(map[string]struct{})
+
+	var doc bson.M
+	docCount := 0
+	for cursor.Next(ctx) {
+		docCount++
+		if err := cursor.Decode(&doc); err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "GetPushedServicesAndEnvs",
+				"doc_index": docCount,
+				"error":     err.Error(),
+			}).Errorf("解码文档失败: %v", err)
+			continue
+		}
+
+		logrus.WithFields(logrus.Fields{
+			"time":     time.Now().Format("2006-01-02 15:04:05"),
+			"method":   "GetPushedServicesAndEnvs",
+			"doc_index": docCount,
+			"full_doc": fmt.Sprintf("%+v", doc), // 打印完整文档内容
+		}).Debugf("成功解码组合文档 %d: %+v", docCount, doc)
+
+		// 提取 service
+		if serviceVal, ok := doc["service"]; ok {
+			if service, okType := serviceVal.(string); okType && service != "" {
+				serviceSet[service] = struct{}{}
+				logrus.WithFields(logrus.Fields{
+					"time":     time.Now().Format("2006-01-02 15:04:05"),
+					"method":   "GetPushedServicesAndEnvs",
+					"doc_index": docCount,
+					"service":   service,
+				}).Debugf("提取服务成功: %s (总计: %d)", service, len(serviceSet))
+			} else {
+				logrus.WithFields(logrus.Fields{
+					"time":     time.Now().Format("2006-01-02 15:04:05"),
+					"method":   "GetPushedServicesAndEnvs",
+					"doc_index": docCount,
+					"service_raw": fmt.Sprintf("%v", serviceVal),
+				}).Warnf("service 字段无效或为空 (类型: %T, 值: %v)", serviceVal, serviceVal)
+			}
+		} else {
+			logrus.WithFields(logrus.Fields{
+				"time":     time.Now().Format("2006-01-02 15:04:05"),
+				"method":   "GetPushedServicesAndEnvs",
+				"doc_index": docCount,
+			}).Warnf("组合文档 %d 缺少 'service' 字段", docCount)
+		}
+
+		// 提取 environment
+		if envVal, ok := doc["environment"]; ok {
+			if env, okType := envVal.(string); okType && env != "" {
+				envSet[env] = struct{}{}
+				logrus.WithFields(logrus.Fields{
+					"time":     time.Now().Format("2006-01-02 15:04:05"),
+					"method":   "GetPushedServicesAndEnvs",
+					"doc_index": docCount,
+					"environment": env,
+				}).Debugf("提取环境成功: %s (总计: %d)", env, len(envSet))
+			} else {
+				logrus.WithFields(logrus.Fields{
+					"time":     time.Now().Format("2006-01-02 15:04:05"),
+					"method":   "GetPushedServicesAndEnvs",
+					"doc_index": docCount,
+					"env_raw": fmt.Sprintf("%v", envVal),
+				}).Warnf("environment 字段无效或为空 (类型: %T, 值: %v)", envVal, envVal)
+			}
+		} else {
+			logrus.WithFields(logrus.Fields{
+				"time":     time.Now().Format("2006-01-02 15:04:05"),
+				"method":   "GetPushedServicesAndEnvs",
+				"doc_index": docCount,
+			}).Warnf("组合文档 %d 缺少 'environment' 字段", docCount)
+		}
 	}
 
-	return nil
+	logrus.WithFields(logrus.Fields{
+		"time":     time.Now().Format("2006-01-02 15:04:05"),
+		"method":   "GetPushedServicesAndEnvs",
+		"total_docs": docCount,
+	}).Infof("遍历完成，总组合文档数: %d", docCount)
+
+	if err := cursor.Err(); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPushedServicesAndEnvs",
+			"error":  err.Error(),
+		}).Errorf("游标错误: %v", err)
+		return nil, nil, err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetPushedServicesAndEnvs",
+		"service_set": fmt.Sprintf("%v", serviceSet),
+		"env_set":     fmt.Sprintf("%v", envSet),
+	}).Debugf("去重 set 内容: services=%v (len:%d), envs=%v (len:%d)", serviceSet, len(serviceSet), envSet, len(envSet))
+
+	// 转换为排序后的切片
+	serviceList := make([]string, 0, len(serviceSet))
+	for service := range serviceSet {
+		serviceList = append(serviceList, service)
+	}
+	sort.Strings(serviceList)
+
+	envList := make([]string, 0, len(envSet))
+	for env := range envSet {
+		envList = append(envList, env)
+	}
+	sort.Strings(envList)
+
+	logrus.WithFields(logrus.Fields{
+		"time":     time.Now().Format("2006-01-02 15:04:05"),
+		"method":   "GetPushedServicesAndEnvs",
+		"services": serviceList,
+		"envs":     envList,
+		"took":     time.Since(startTime),
+	}).Infof("扫描完成: 服务 %v (len:%d), 环境 %v (len:%d) (排序支持)", serviceList, len(serviceList), envList, len(envList))
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetPushedServicesAndEnvs",
+	}).Info("=== 扫描 pushlist.push_data 结束 ===")
+
+	return serviceList, envList, nil
 }
 
 // createTTLIndexes 创建 TTL 索引
@@ -215,253 +497,6 @@ func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error
 	}).Infof("查询到 %d 个待确认任务 (popup_sent=false, sorted by created_at asc)", len(tasks))
 
 	return tasks, nil
-}
-
-// 修改: GetPushedServicesAndEnvs 扫描 push_data 集合，提取唯一服务和环境列表（支持排序）
-// 调整: 支持全局文档结构 (_id: "global_push_data", services: []string, environments: []string)
-// 增强: 添加详细日志，包括文档 ID 检查、数组提取、每个元素添加、最终列表
-func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushedServicesAndEnvs",
-	}).Info("=== 开始扫描 pushlist.push_data 集合 (支持全局文档结构) ===")
-
-	// 获取 push_data 集合
-	collection := m.client.Database("pushlist").Collection("push_data")
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushedServicesAndEnvs",
-		"database": "pushlist",
-		"collection": "push_data",
-	}).Debug("集合获取成功，准备执行 Find 查询 (filter: {})")
-
-	// 查询所有文档
-	cursor, err := collection.Find(ctx, bson.M{})
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPushedServicesAndEnvs",
-			"error":  err.Error(),
-		}).Errorf("查询 push_data 失败: %v", err)
-		return nil, nil, err
-	}
-	defer cursor.Close(ctx)
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushedServicesAndEnvs",
-	}).Debug("Find 查询成功，准备遍历 cursor")
-
-	// 使用 map 去重
-	serviceSet := make(map[string]struct{})
-	envSet := make(map[string]struct{})
-
-	var doc bson.M
-	docCount := 0
-	globalDocFound := false
-	for cursor.Next(ctx) {
-		docCount++
-		if err := cursor.Decode(&doc); err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "GetPushedServicesAndEnvs",
-				"doc_index": docCount,
-				"error":     err.Error(),
-			}).Errorf("解码文档失败: %v", err)
-			continue
-		}
-
-		logrus.WithFields(logrus.Fields{
-			"time":     time.Now().Format("2006-01-02 15:04:05"),
-			"method":   "GetPushedServicesAndEnvs",
-			"doc_index": docCount,
-			"full_doc": fmt.Sprintf("%+v", doc), // 打印完整文档内容
-		}).Debugf("成功解码文档 %d: %+v", docCount, doc)
-
-		// 检查是否为全局文档
-		if id, ok := doc["_id"].(string); ok && id == "global_push_data" {
-			globalDocFound = true
-			logrus.WithFields(logrus.Fields{
-				"time":     time.Now().Format("2006-01-02 15:04:05"),
-				"method":   "GetPushedServicesAndEnvs",
-				"doc_index": docCount,
-				"_id":       id,
-			}).Infof("找到全局文档 global_push_data，准备提取 arrays")
-
-			// 提取 services 数组
-			if servicesVal, ok := doc["services"]; ok {
-				if servicesSlice, okType := servicesVal.([]interface{}); okType {
-					logrus.WithFields(logrus.Fields{
-						"time":     time.Now().Format("2006-01-02 15:04:05"),
-						"method":   "GetPushedServicesAndEnvs",
-						"doc_index": docCount,
-						"services_len": len(servicesSlice),
-						"services_sample": fmt.Sprintf("%v", servicesSlice[:min(5, len(servicesSlice))]), // 采样打印
-					}).Debugf("services 数组提取成功，长度: %d", len(servicesSlice))
-
-					for j, s := range servicesSlice {
-						if str, okStr := s.(string); okStr && str != "" {
-							serviceSet[str] = struct{}{}
-							logrus.WithFields(logrus.Fields{
-								"time":     time.Now().Format("2006-01-02 15:04:05"),
-								"method":   "GetPushedServicesAndEnvs",
-								"doc_index": docCount,
-								"service_index": j,
-								"service":   str,
-							}).Debugf("添加服务: %s (总计: %d)", str, len(serviceSet))
-						} else {
-							logrus.WithFields(logrus.Fields{
-								"time":     time.Now().Format("2006-01-02 15:04:05"),
-								"method":   "GetPushedServicesAndEnvs",
-								"doc_index": docCount,
-								"service_index": j,
-								"raw":      fmt.Sprintf("%v", s),
-							}).Warnf("services[%d] 无效 (类型: %T, 值: %v)", j, s, s)
-						}
-					}
-				} else {
-					logrus.WithFields(logrus.Fields{
-						"time":     time.Now().Format("2006-01-02 15:04:05"),
-						"method":   "GetPushedServicesAndEnvs",
-						"doc_index": docCount,
-						"services_type": fmt.Sprintf("%T", servicesVal),
-						"services_raw":  fmt.Sprintf("%v", servicesVal),
-					}).Warnf("services 字段类型无效: %T (%v)", servicesVal, servicesVal)
-				}
-			} else {
-				logrus.WithFields(logrus.Fields{
-					"time":     time.Now().Format("2006-01-02 15:04:05"),
-					"method":   "GetPushedServicesAndEnvs",
-					"doc_index": docCount,
-				}).Warnf("全局文档缺少 'services' 字段")
-			}
-
-			// 提取 environments 数组
-			if envsVal, ok := doc["environments"]; ok {
-				if envsSlice, okType := envsVal.([]interface{}); okType {
-					logrus.WithFields(logrus.Fields{
-						"time":       time.Now().Format("2006-01-02 15:04:05"),
-						"method":     "GetPushedServicesAndEnvs",
-						"doc_index":  docCount,
-						"environments_len": len(envsSlice),
-						"environments": fmt.Sprintf("%v", envsSlice),
-					}).Debugf("environments 数组提取成功，长度: %d", len(envsSlice))
-
-					for j, e := range envsSlice {
-						if str, okStr := e.(string); okStr && str != "" {
-							envSet[str] = struct{}{}
-							logrus.WithFields(logrus.Fields{
-								"time":     time.Now().Format("2006-01-02 15:04:05"),
-								"method":   "GetPushedServicesAndEnvs",
-								"doc_index": docCount,
-								"env_index": j,
-								"environment": str,
-							}).Debugf("添加环境: %s (总计: %d)", str, len(envSet))
-						} else {
-							logrus.WithFields(logrus.Fields{
-								"time":     time.Now().Format("2006-01-02 15:04:05"),
-								"method":   "GetPushedServicesAndEnvs",
-								"doc_index": docCount,
-								"env_index": j,
-								"raw":      fmt.Sprintf("%v", e),
-							}).Warnf("environments[%d] 无效 (类型: %T, 值: %v)", j, e, e)
-						}
-					}
-				} else {
-					logrus.WithFields(logrus.Fields{
-						"time":       time.Now().Format("2006-01-02 15:04:05"),
-						"method":     "GetPushedServicesAndEnvs",
-						"doc_index":  docCount,
-						"environments_type": fmt.Sprintf("%T", envsVal),
-						"environments_raw":  fmt.Sprintf("%v", envsVal),
-					}).Warnf("environments 字段类型无效: %T (%v)", envsVal, envsVal)
-				}
-			} else {
-				logrus.WithFields(logrus.Fields{
-					"time":     time.Now().Format("2006-01-02 15:04:05"),
-					"method":   "GetPushedServicesAndEnvs",
-					"doc_index": docCount,
-				}).Warnf("全局文档缺少 'environments' 字段")
-			}
-		} else {
-			logrus.WithFields(logrus.Fields{
-				"time":     time.Now().Format("2006-01-02 15:04:05"),
-				"method":   "GetPushedServicesAndEnvs",
-				"doc_index": docCount,
-				"_id":       fmt.Sprintf("%v", doc["_id"]),
-			}).Debugf("跳过非全局文档 (ID: %v)", doc["_id"])
-		}
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":         time.Now().Format("2006-01-02 15:04:05"),
-		"method":       "GetPushedServicesAndEnvs",
-		"total_docs":   docCount,
-		"global_doc_found": globalDocFound,
-	}).Infof("遍历完成，总文档数: %d (全局文档: %t)", docCount, globalDocFound)
-
-	if !globalDocFound {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPushedServicesAndEnvs",
-		}).Warn("未找到 global_push_data 文档，services 和 environments 将为空")
-	}
-
-	if err := cursor.Err(); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPushedServicesAndEnvs",
-			"error":  err.Error(),
-		}).Errorf("游标错误: %v", err)
-		return nil, nil, err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushedServicesAndEnvs",
-		"service_set": fmt.Sprintf("%v", serviceSet),
-		"env_set":     fmt.Sprintf("%v", envSet),
-	}).Debugf("去重 set 内容: services=%v (len:%d), envs=%v (len:%d)", serviceSet, len(serviceSet), envSet, len(envSet))
-
-	// 转换为排序后的切片
-	serviceList := make([]string, 0, len(serviceSet))
-	for service := range serviceSet {
-		serviceList = append(serviceList, service)
-	}
-	sort.Strings(serviceList)
-
-	envList := make([]string, 0, len(envSet))
-	for env := range envSet {
-		envList = append(envList, env)
-	}
-	sort.Strings(envList)
-
-	logrus.WithFields(logrus.Fields{
-		"time":     time.Now().Format("2006-01-02 15:04:05"),
-		"method":   "GetPushedServicesAndEnvs",
-		"services": serviceList,
-		"envs":     envList,
-		"took":     time.Since(startTime),
-	}).Infof("扫描完成: 服务 %v (len:%d), 环境 %v (len:%d) (排序支持)", serviceList, len(serviceList), envList, len(envList))
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushedServicesAndEnvs",
-	}).Info("=== 扫描 pushlist.push_data 结束 ===")
-
-	return serviceList, envList, nil
-}
-
-// 新增辅助函数: min (用于采样日志打印)
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // 修改: StoreTaskIfNotExistsEnv 生成 UUID TaskID + 设置 CreatedAt (并发安全)
