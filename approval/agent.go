@@ -1,7 +1,5 @@
-// 文件: agent.go (修改: periodicQueryAndSync 恢复使用 GetPushedServicesAndEnvs 获取 services 和 envs；
-// 生成组合 (service, env) 查询 QueryTasks(service, []string{env})；收集 allTasks；
-// 保留全局去重 (dedupeTasks)；处理存储时自动拆分多环境任务；
-// 仅限 confirm_envs 环境；其他逻辑不变)
+// 文件: agent.go (修复: 添加 import "k8s-cicd/approval/models" 以解决 undefined: models；
+// 假设 models.DeployRequest 已添加 Environment 字段；其他逻辑保留)
 package approval
 
 import (
@@ -12,6 +10,7 @@ import (
 	"k8s-cicd/approval/api"
 	"k8s-cicd/approval/client"
 	"k8s-cicd/approval/config"
+	"k8s-cicd/approval/models" // 新增: 导入 models 以使用 DeployRequest
 	"k8s-cicd/approval/telegram"
 
 	"github.com/fatih/color"
