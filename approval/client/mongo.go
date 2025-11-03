@@ -25,6 +25,103 @@ type MongoClient struct {
 	cfg    *config.MongoConfig
 }
 
+// NewMongoClient 创建 MongoDB 客户端（完整实现：连接、重试、索引创建、push数据初始化）
+func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewMongoClient",
+		"uri":    cfg.URI, // 注意: 生产中可掩码
+	}).Info("=== 开始初始化 MongoDB 客户端 ===")
+
+	// 步骤1：连接 MongoDB（带重试）
+	var mongoClient *mongo.Client
+	var err error
+	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
+		clientOptions := options.Client().
+			ApplyURI(cfg.URI).
+			SetMaxPoolSize(10).
+			SetServerSelectionTimeout(5 * time.Second)
+
+		mongoClient, err = mongo.Connect(ctx, clientOptions)
+		if err == nil {
+			// 健康检查
+			if err := mongoClient.Ping(ctx, nil); err == nil {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "NewMongoClient",
+					"took":   time.Since(startTime),
+				}).Info("MongoDB 连接成功")
+				break
+			} else {
+				err = fmt.Errorf("ping 失败: %v", err)
+			}
+		}
+
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "NewMongoClient",
+			"attempt": attempt + 1,
+			"max_retries": cfg.MaxRetries,
+			"error":   err.Error(),
+		}).Warnf("MongoDB 连接失败，重试中...")
+
+		if attempt < cfg.MaxRetries {
+			time.Sleep(time.Duration(attempt+1) * time.Second) // 指数退避
+		} else {
+			return nil, fmt.Errorf("MongoDB 连接失败（已重试 %d 次）: %v", cfg.MaxRetries+1, err)
+		}
+	}
+
+	// 步骤2：创建索引（TTL + 唯一 + 排序）
+	if err := createIndexes(mongoClient, cfg); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewMongoClient",
+			"took":   time.Since(startTime),
+			"error":  err.Error(),
+		}).Errorf("创建索引失败")
+		return nil, err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewMongoClient",
+		"took":   time.Since(startTime),
+	}).Info("索引创建完成")
+
+	// 步骤3：初始化 push_data 组合记录
+	if err := initPushData(mongoClient); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewMongoClient",
+			"took":   time.Since(startTime),
+			"error":  err.Error(),
+		}).Errorf("初始化 push_data 失败")
+		return nil, err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewMongoClient",
+		"took":   time.Since(startTime),
+	}).Info("push_data 初始化完成")
+
+	m := &MongoClient{
+		client: mongoClient,
+		cfg:    cfg,
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewMongoClient",
+		"took":   time.Since(startTime),
+	}).Info("MongoDB 客户端初始化成功")
+	return m, nil
+}
+
 // 新增: createIndexes 创建 TTL + 复合唯一索引 + created_at 排序索引
 // 修复: createIndexes 完整，确保 client param 定义
 func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error { // client param
