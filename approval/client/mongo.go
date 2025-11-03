@@ -321,6 +321,7 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 }
 
 // 修改: GetPushedServicesAndEnvs 扫描 push_data 集合，提取唯一服务和环境列表（支持排序）
+// 注意: 在文件顶部添加 import "sort" 以解决 undefined: sort 错误
 func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 	startTime := time.Now()
 	ctx := context.Background()
