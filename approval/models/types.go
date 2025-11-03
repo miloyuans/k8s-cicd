@@ -1,3 +1,4 @@
+// 文件: models/types.go (完整文件，确保 Environment 字段存在，用于去重和存储；其他字段保留)
 package models
 
 import (
@@ -8,6 +9,7 @@ import (
 type DeployRequest struct {
 	Service            string    `json:"service" bson:"service"`                       // 服务名
 	Environments       []string  `json:"environments" bson:"environments"`             // 环境列表（多环境拆分时单值）
+	Environment        string    `json:"environment" bson:"environment"`               // 当前环境 (用于去重和存储)
 	Namespace          string    `json:"namespace" bson:"namespace"`                   // 命名空间
 	Version            string    `json:"version" bson:"version"`                       // 镜像版本
 	User               string    `json:"user" bson:"user"`                             // 操作人

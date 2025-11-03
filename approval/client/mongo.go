@@ -25,7 +25,6 @@ type MongoClient struct {
 	cfg    *config.MongoConfig
 }
 
-// 修改: NewMongoClient 添加复合唯一索引 (service+version+environment+created_at) 防重
 // 修复: NewMongoClient 完整，确保 client 定义和传递
 func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	startTime := time.Now()

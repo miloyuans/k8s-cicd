@@ -1,5 +1,5 @@
-// 文件: agent.go (修复: 添加 import "k8s-cicd/approval/models" 以解决 undefined: models；
-// 假设 models.DeployRequest 已添加 Environment 字段；其他逻辑保留)
+// 文件: agent.go (完整文件，确保 import "k8s-cicd/approval/models" 存在；使用 Environment 字段；
+// 其他逻辑保留，修复所有 undefined 错误)
 package approval
 
 import (
@@ -10,7 +10,7 @@ import (
 	"k8s-cicd/approval/api"
 	"k8s-cicd/approval/client"
 	"k8s-cicd/approval/config"
-	"k8s-cicd/approval/models" // 新增: 导入 models 以使用 DeployRequest
+	"k8s-cicd/approval/models" // 确保导入 models 以使用 DeployRequest 和 Environment
 	"k8s-cicd/approval/telegram"
 
 	"github.com/fatih/color"
