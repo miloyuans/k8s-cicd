@@ -1,7 +1,5 @@
-// 文件: mongo.go (完整文件，新增 InitPushData 函数：在 NewMongoClient 中调用，检查 global_push_data 文档，
-// 如果存在，则生成组合记录 (每个 service + 每个 env 作为一条 {service, environment} 文档)，插入/替换 push_data 集合；
-// 修改 GetPushedServicesAndEnvs 为遍历 push_data 集合的组合记录，提取唯一 service 和 environment；
-// 其他功能保留)
+// 文件: mongo.go (完整文件，修复: createIndexes 在 NewMongoClient 前定义；initPushData 添加，生成组合记录；
+// GetPushedServicesAndEnvs 遍历组合记录；其他功能保留)
 package client
 
 import (
@@ -27,72 +25,57 @@ type MongoClient struct {
 	cfg    *config.MongoConfig
 }
 
-// 修改: NewMongoClient 添加复合唯一索引 (service+version+environment+created_at) 防重
-// 新增: 在连接成功后调用 InitPushData 初始化组合数据
-func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
-	startTime := time.Now()
-
-	// 步骤1：创建客户端配置
-	clientOptions := options.Client().
-		ApplyURI(cfg.URI).
-		SetConnectTimeout(5*time.Second).
-		SetMaxPoolSize(10).
-		SetMinPoolSize(2)
-
-	// 步骤2：连接 MongoDB
-	client, err := mongo.Connect(context.Background(), clientOptions) // client 定义
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "NewMongoClient",
-			"took":   time.Since(startTime),
-		}).Errorf("MongoDB 连接失败: %v", err)
-		return nil, fmt.Errorf("MongoDB 连接失败: %v", err)
-	}
-
-	// 步骤3：测试连接
+// 新增: createIndexes 创建 TTL + 复合唯一索引 + created_at 排序索引
+// 修复: createIndexes 完整，确保 client param 定义
+func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error { // client param
 	ctx := context.Background()
-	if err := client.Ping(ctx, readpref.Primary()); err != nil { // readpref 使用
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "NewMongoClient",
-			"took":   time.Since(startTime),
-		}).Errorf("MongoDB ping 失败: %v", err)
-		return nil, fmt.Errorf("MongoDB ping 失败: %v", err)
+
+	// 1. 为每个环境的任务集合创建索引
+	for env := range cfg.EnvMapping.Mappings {
+		collection := client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env)) // client 定义
+
+		// TTL 索引 (keys: created_at:1 + expireAfterSeconds，支持排序)
+		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys:    bson.D{{Key: "created_at", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
+		})
+		if err != nil {
+			return fmt.Errorf("创建任务 TTL 索引失败 [%s]: %v", env, err)
+		}
+
+		// 复合唯一索引 (防重: service+version+environment+created_at，支持排序)
+		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys: bson.D{
+				{Key: "service", Value: 1},
+				{Key: "version", Value: 1},
+				{Key: "environment", Value: 1},
+				{Key: "created_at", Value: 1},
+			},
+			Options: options.Index().SetUnique(true),
+		})
+		if err != nil {
+			return fmt.Errorf("创建复合唯一索引失败 [%s]: %v", env, err)
+		}
+
+		// 移除: 单独 created_at_asc 索引 (TTL/复合已覆盖排序需求，避免冲突)
 	}
 
-	// 步骤4：创建索引
-	if err := createIndexes(client, cfg); err != nil { // client 传递
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "NewMongoClient",
-			"took":   time.Since(startTime),
-		}).Errorf("创建索引失败: %v", err)
-		return nil, err
+	// 2. popup_messages TTL (不变)
+	popupColl := client.Database("cicd").Collection("popup_messages") // client 定义
+	_, err := popupColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "sent_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(7 * 24 * 60 * 60),
+	})
+	if err != nil {
+		return fmt.Errorf("创建弹窗消息 TTL 索引失败: %v", err)
 	}
 
-	// 新增: 初始化 push_data 组合数据
-	if err := initPushData(client); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "NewMongoClient",
-			"took":   time.Since(startTime),
-		}).Errorf("初始化 push_data 失败: %v", err)
-		return nil, err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "NewMongoClient",
-		"took":   time.Since(startTime),
-	}).Info("k8s-approval MongoDB 连接成功 (push_data 已初始化)")
-	return &MongoClient{client: client, cfg: cfg}, nil
+	return nil
 }
 
-// 新增: initPushData 从 global_push_data 生成组合记录，插入 push_data 集合 (每个 service + env 组合一条记录)
+// 新增: initPushData 从 push_data 集合查询 _id="global_push_data"，生成组合记录插入同一集合 (忽略 global 记录)
 func initPushData(client *mongo.Client) error {
 	ctx := context.Background()
-	globalColl := client.Database("pushlist").Collection("global_push_data") // 假设全局文档集合
 	pushColl := client.Database("pushlist").Collection("push_data")
 
 	logrus.WithFields(logrus.Fields{
@@ -100,15 +83,15 @@ func initPushData(client *mongo.Client) error {
 		"method": "initPushData",
 	}).Info("=== 开始初始化 push_data 组合数据 ===")
 
-	// 检查 global_push_data 文档
+	// 查询 global_push_data 文档
 	globalDoc := bson.M{}
-	err := globalColl.FindOne(ctx, bson.M{"_id": "global_push_data"}).Decode(&globalDoc)
+	err := pushColl.FindOne(ctx, bson.M{"_id": "global_push_data"}).Decode(&globalDoc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "initPushData",
-			}).Warn("未找到 global_push_data 文档，跳过初始化")
+			}).Warn("未找到 _id=global_push_data 文档，跳过初始化")
 			return nil
 		}
 		logrus.WithFields(logrus.Fields{
@@ -125,20 +108,18 @@ func initPushData(client *mongo.Client) error {
 		"global_doc": fmt.Sprintf("%+v", globalDoc),
 	}).Debug("找到 global_push_data 文档")
 
-	// 提取 services 和 environments (处理 primitive.A 类型)
+	// 提取 services 和 environments (处理 primitive.A 或 []interface{})
 	var services []string
 	if servicesVal, ok := globalDoc["services"]; ok {
-		if servicesSlice, okType := servicesVal.([]interface{}); okType {
-			for _, s := range servicesSlice {
-				if str, okStr := s.(string); okStr && str != "" {
-					services = append(services, str)
-				}
-			}
-		} else if servicesPrimitive, okPrimitive := servicesVal.(bson.A); okPrimitive {
-			for _, s := range servicesPrimitive {
-				if str, okStr := s.(string); okStr && str != "" {
-					services = append(services, str)
-				}
+		var servicesSlice []interface{}
+		if servicesPrimitive, okPrimitive := servicesVal.(bson.A); okPrimitive {
+			servicesSlice = servicesPrimitive
+		} else if servicesArray, okArray := servicesVal.([]interface{}); okArray {
+			servicesSlice = servicesArray
+		}
+		for _, s := range servicesSlice {
+			if str, okStr := s.(string); okStr && str != "" {
+				services = append(services, str)
 			}
 		}
 		logrus.WithFields(logrus.Fields{
@@ -150,17 +131,15 @@ func initPushData(client *mongo.Client) error {
 
 	var environments []string
 	if envsVal, ok := globalDoc["environments"]; ok {
-		if envsSlice, okType := envsVal.([]interface{}); okType {
-			for _, e := range envsSlice {
-				if str, okStr := e.(string); okStr && str != "" {
-					environments = append(environments, str)
-				}
-			}
-		} else if envsPrimitive, okPrimitive := envsVal.(bson.A); okPrimitive {
-			for _, e := range envsPrimitive {
-				if str, okStr := e.(string); okStr && str != "" {
-					environments = append(environments, str)
-				}
+		var envsSlice []interface{}
+		if envsPrimitive, okPrimitive := envsVal.(bson.A); okPrimitive {
+			envsSlice = envsPrimitive
+		} else if envsArray, okArray := envsVal.([]interface{}); okArray {
+			envsSlice = envsArray
+		}
+		for _, e := range envsSlice {
+			if str, okStr := e.(string); okStr && str != "" {
+				environments = append(environments, str)
 			}
 		}
 		logrus.WithFields(logrus.Fields{
@@ -181,20 +160,20 @@ func initPushData(client *mongo.Client) error {
 		return nil
 	}
 
-	// 清空现有 push_data
-	_, err = pushColl.DeleteMany(ctx, bson.M{})
+	// 删除现有组合记录 (保留 global_push_data)
+	_, err = pushColl.DeleteMany(ctx, bson.M{"_id": bson.M{"$ne": "global_push_data"}})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "initPushData",
 			"error":  err.Error(),
-		}).Errorf("清空 push_data 失败: %v", err)
+		}).Errorf("清空组合记录失败: %v", err)
 		return err
 	}
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "initPushData",
-	}).Debug("push_data 集合已清空")
+	}).Debug("组合记录已清空 (保留 global_push_data)")
 
 	// 生成组合并插入
 	insertedCount := 0
@@ -261,8 +240,8 @@ func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 		"collection": "push_data",
 	}).Debug("集合获取成功，准备执行 Find 查询 (filter: {})")
 
-	// 查询所有组合文档
-	cursor, err := collection.Find(ctx, bson.M{})
+	// 查询所有组合文档 (排除 global_push_data)
+	cursor, err := collection.Find(ctx, bson.M{"_id": bson.M{"$ne": "global_push_data"}})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
