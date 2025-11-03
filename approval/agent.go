@@ -1,4 +1,7 @@
-// 文件: agent.go
+// 文件: agent.go (修改: periodicQueryAndSync 重新设计数据获取：直接使用 cfg.Query.ConfirmEnvs 获取环境列表；移除服务列表获取；
+// 对于每个环境，先查询 Mongo GetPendingTasks 检查是否有 pending 任务（confirmation_status="待确认" + popup_sent=false），
+// 如果有，则调用 QueryTasks("", []string{env}) 同步所有服务任务（假设 API 支持 service="" 查询所有服务）;
+// 其他逻辑保留：存储、拆分、多环境支持、动态状态设置、handleStoredTask 验证)
 package approval
 
 import (
@@ -39,10 +42,9 @@ func (a *Approval) Start() {
 	go a.periodicQueryAndSync()
 }
 
-// 修复: periodicQueryAndSync 使用 "待确认" 状态设置、更新和验证
-// 修改: periodicQueryAndSync 支持多环境拆分存储 + 独立验证
-// 完善: periodicQueryAndSync 支持多环境拆分 + 动态状态 (confirm_envs 决定待确认/已确认)
-// 修复: periodicQueryAndSync (line 193: 改为 _, ok := a.cfg.EnvMapping.Mappings[subEnv])
+// 重新设计: periodicQueryAndSync 使用配置文件 ConfirmEnvs 作为环境列表；
+// 无服务列表：直接传递空 service 查询所有；
+// 先检查 Mongo pending 任务（GetPendingTasks），仅当有 pending 时才查询 API 同步（避免无谓查询）
 func (a *Approval) periodicQueryAndSync() {
 	ticker := time.NewTicker(a.cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -52,203 +54,187 @@ func (a *Approval) periodicQueryAndSync() {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "periodicQueryAndSync",
-		}).Debug("=== 开始新一轮查询同步循环 ===")
+		}).Debug("=== 开始新一轮查询同步循环 (基于 ConfirmEnvs + pending 检查) ===")
 
-		// 1. 获取已 push 的服务和环境 - 添加日志
-		services, envs, err := a.mongo.GetPushedServicesAndEnvs()
-		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "periodicQueryAndSync",
-			}).Errorf("获取 push 数据失败: %v", err)
-			continue
-		}
-
+		// 1. 直接使用配置文件环境列表（仅确认环境）
+		envs := a.cfg.Query.ConfirmEnvs
 		logrus.WithFields(logrus.Fields{
 			"time":     time.Now().Format("2006-01-02 15:04:05"),
 			"method":   "periodicQueryAndSync",
-			"services": services,
 			"envs":     envs,
 			"confirm_envs": a.cfg.Query.ConfirmEnvs,
-		}).Infof("已获取服务列表: %v, 环境列表: %v (确认环境: %v)", services, envs, a.cfg.Query.ConfirmEnvs)
+			"count_env": len(envs),
+		}).Infof("使用配置文件环境列表: %v (仅确认环境)", envs)
 
-		if len(services) == 0 || len(envs) == 0 {
+		if len(envs) == 0 {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "periodicQueryAndSync",
-			}).Warn("暂无已 push 的服务/环境，跳过本次查询")
+			}).Warn("配置文件无确认环境，跳过本次查询")
 			continue
 		}
 
-		// 2. 打印完整服务和环境列表 - 已存在，增强
-		logrus.WithFields(logrus.Fields{
-			"time":     time.Now().Format("2006-01-02 15:04:05"),
-			"method":   "periodicQueryAndSync",
-			"services": services,
-			"envs":     envs,
-			"count_svc": len(services),
-			"count_env": len(envs),
-		}).Infof("开始查询 /query 接口，待查服务: %v，环境: %v", services, envs)
-
-		// 3. 并发查询 - 添加每个 service/env 的日志
+		// 2. 并发查询：针对每个环境，先检查 pending 任务
 		totalNewTasks := 0
-		for _, service := range services {
-			if service == "" {
-				logrus.Warn("跳过空服务名")
+		for _, env := range envs {
+			// 检查当前环境是否有 pending 任务（confirmation_status="待确认" + popup_sent=false）
+			pendingTasks, err := a.mongo.GetPendingTasks(env)
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "periodicQueryAndSync",
+					"env":    env,
+				}).Errorf("检查 %s pending 任务失败: %v", env, err)
 				continue
 			}
 
-			for _, env := range envs {
-				if !contains(a.cfg.Query.ConfirmEnvs, env) {
-					logrus.Debugf("跳过非确认环境: %s", env)
-					continue
+			pendingCount := len(pendingTasks)
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "periodicQueryAndSync",
+				"env":    env,
+				"pending_count": pendingCount,
+			}).Debugf("%s 环境 pending 任务数: %d", env, pendingCount)
+
+			// 仅当有 pending 任务时，才查询 API 同步（判断当前环境是否有服务处于 pending 状态）
+			if pendingCount == 0 {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "periodicQueryAndSync",
+					"env":    env,
+				}).Debugf("无 pending 任务，跳过 %s 环境 API 查询", env)
+				continue
+			}
+
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "periodicQueryAndSync",
+				"env":    env,
+			}).Debugf("有 %d pending 任务，调用 /query 接口同步 %s 环境 (service='')", pendingCount, env)
+
+			// 查询 API：传递空 service 查询所有服务，环境作为唯一值
+			tasks, err := a.queryClient.QueryTasks("", []string{env})
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "periodicQueryAndSync",
+					"env":    env,
+				}).Errorf("查询任务失败: %v", err)
+				continue
+			}
+
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "periodicQueryAndSync",
+				"env":    env,
+				"task_count": len(tasks),
+			}).Debugf("查询到 %d 个任务 (service='', env=%s)", len(tasks), env)
+
+			storedCount := 0
+			for i := range tasks {
+				task := &tasks[i]
+				task.CreatedAt = time.Now() // 设置 CreatedAt (查询顺序 = 存储顺序)
+				task.Namespace = a.cfg.EnvMapping.Mappings[env]
+				// TaskID 初始设置，但多环境时会重设
+				if task.TaskID == "" {
+					task.TaskID = fmt.Sprintf("%s-%s-%s", task.Service, task.Version, env) // 默认 env-specific
 				}
 
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
 					"method": "periodicQueryAndSync",
-					"service": service,
+					"task_id": task.TaskID,
+					"service": task.Service,
+					"version": task.Version,
 					"env":     env,
-				}).Debugf("调用 /query 接口查询任务")
+					"environments_len": len(task.Environments),
+				}).Debugf("准备处理任务 (environments: %v): %+v", task.Environments, task)
 
-				tasks, err := a.queryClient.QueryTasks(service, []string{env})
-				if err != nil {
-					logrus.WithFields(logrus.Fields{
-						"time":   time.Now().Format("2006-01-02 15:04:05"),
-						"method": "periodicQueryAndSync",
-						"service": service,
-						"env":     env,
-					}).Errorf("查询任务失败: %v", err)
-					continue
-				}
-
-				logrus.WithFields(logrus.Fields{
-					"time":   time.Now().Format("2006-01-02 15:04:05"),
-					"method": "periodicQueryAndSync",
-					"service": service,
-					"env":     env,
-					"task_count": len(tasks),
-				}).Debugf("查询到 %d 个任务", len(tasks))
-
-				for i := range tasks {
-					task := &tasks[i]
-					task.CreatedAt = time.Now() // 新增: 设置 CreatedAt (查询顺序 = 存储顺序)
-					task.Namespace = a.cfg.EnvMapping.Mappings[env]
-					// 注意: TaskID 初始设置，但多环境时会重设
-					if task.TaskID == "" {
-						task.TaskID = fmt.Sprintf("%s-%s-%s", task.Service, task.Version, env) // 默认单 env TaskID
-					}
+				// 支持多环境拆分存储 + 动态状态
+				if len(task.Environments) == 1 {
+					// 单环境: 动态设置状态
+					subEnv := task.Environments[0]
+					isConfirmEnv := true // 既然在 ConfirmEnvs 中，总是 true
+					task.ConfirmationStatus = "待确认"
+					task.PopupSent = false
+					task.TaskID = fmt.Sprintf("%s-%s-%s", task.Service, task.Version, subEnv) // 确保 env-specific
 
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "periodicQueryAndSync",
 						"task_id": task.TaskID,
-						"service": task.Service,
-						"version": task.Version,
-						"env":     env,
-						"environments_len": len(task.Environments),
-					}).Debugf("准备处理任务 (environments: %v): %+v", task.Environments, task)
+						"sub_env": subEnv,
+						"is_confirm_env": isConfirmEnv,
+						"set_status": task.ConfirmationStatus,
+						"set_popup_sent": task.PopupSent,
+					}).Debugf("单环境任务状态设置: %s (popup_sent=%t)", task.ConfirmationStatus, task.PopupSent)
 
-					// 完善: 支持多环境拆分存储 + 动态状态
-					storedCount := 0
-					if len(task.Environments) == 1 {
-						// 单环境: 动态设置状态
-						subEnv := task.Environments[0]
-						isConfirmEnv := contains(a.cfg.Query.ConfirmEnvs, subEnv)
-						task.ConfirmationStatus = "待确认"
-						task.PopupSent = false
-						if !isConfirmEnv {
-							task.ConfirmationStatus = "已确认"
-							task.PopupSent = true // 跳过弹窗
-						}
-						task.TaskID = fmt.Sprintf("%s-%s-%s", task.Service, task.Version, subEnv) // 确保 env-specific
-
+					if err := a.mongo.StoreTaskIfNotExistsEnv(*task, subEnv); err != nil {
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "periodicQueryAndSync",
 							"task_id": task.TaskID,
-							"sub_env": subEnv,
-							"is_confirm_env": isConfirmEnv,
-							"set_status": task.ConfirmationStatus,
-							"set_popup_sent": task.PopupSent,
-						}).Debugf("单环境任务状态设置: %s (popup_sent=%t)", task.ConfirmationStatus, task.PopupSent)
-
-						if err := a.mongo.StoreTaskIfNotExistsEnv(*task, subEnv); err != nil {
-							logrus.WithFields(logrus.Fields{
-								"time":   time.Now().Format("2006-01-02 15:04:05"),
-								"method": "periodicQueryAndSync",
-								"task_id": task.TaskID,
-							}).Debugf("任务已存在，跳过存储: %v", err)
-						} else {
-							storedCount++
-							a.handleStoredTask(task.TaskID, subEnv, isConfirmEnv) // 传 isConfirmEnv 用于验证
-						}
+						}).Debugf("任务已存在，跳过存储: %v", err)
 					} else {
-						// 多环境: 拆分复制，每个 env 独立 TaskID、状态和存储
+						storedCount++
+						a.handleStoredTask(task.TaskID, subEnv, isConfirmEnv) // 每个任务独立验证
+					}
+				} else {
+					// 多环境: 拆分每个 subEnv
+					for _, subEnv := range task.Environments {
+						if _, ok := a.cfg.EnvMapping.Mappings[subEnv]; !ok {
+							continue // 跳过无效环境
+						}
+						taskCopy := *task
+						taskCopy.Environments = []string{subEnv}
+						isConfirmEnv := contains(a.cfg.Query.ConfirmEnvs, subEnv)
+						taskCopy.ConfirmationStatus = "待确认"
+						taskCopy.PopupSent = false
+						if !isConfirmEnv {
+							taskCopy.ConfirmationStatus = "已确认"
+							taskCopy.PopupSent = true // 跳过弹窗
+						}
+						taskCopy.TaskID = fmt.Sprintf("%s-%s-%s", taskCopy.Service, taskCopy.Version, subEnv) // env-specific TaskID
+
 						logrus.WithFields(logrus.Fields{
 							"time":   time.Now().Format("2006-01-02 15:04:05"),
 							"method": "periodicQueryAndSync",
-							"task_id": task.TaskID,
-							"environments": task.Environments,
-						}).Infof("检测到多环境任务，开始拆分存储 + 动态状态")
+							"sub_task_id": taskCopy.TaskID,
+							"sub_env":     subEnv,
+							"is_confirm_env": isConfirmEnv,
+							"set_status":  taskCopy.ConfirmationStatus,
+							"set_popup_sent": taskCopy.PopupSent,
+						}).Debugf("多环境子任务状态设置: %s (popup_sent=%t)", taskCopy.ConfirmationStatus, taskCopy.PopupSent)
 
-						for _, subEnv := range task.Environments {
-							// 修复 line 193: 检查 map key 存在
-							if _, ok := a.cfg.EnvMapping.Mappings[subEnv]; !ok {
-								logrus.WithFields(logrus.Fields{
-									"time":   time.Now().Format("2006-01-02 15:04:05"),
-									"method": "periodicQueryAndSync",
-									"sub_env": subEnv,
-								}).Debugf("跳过多环境子任务无效环境 (不在 EnvMapping): %s", subEnv)
-								continue
-							}
-
-							isConfirmEnv := contains(a.cfg.Query.ConfirmEnvs, subEnv)
-							taskCopy := *task // 复制
-							taskCopy.Environments = []string{subEnv} // 单 env
-							taskCopy.Namespace = a.cfg.EnvMapping.Mappings[subEnv]
-							taskCopy.ConfirmationStatus = "待确认"
-							taskCopy.PopupSent = false
-							if !isConfirmEnv {
-								taskCopy.ConfirmationStatus = "已确认"
-								taskCopy.PopupSent = true // 跳过弹窗
-							}
-							taskCopy.TaskID = fmt.Sprintf("%s-%s-%s", taskCopy.Service, taskCopy.Version, subEnv) // env-specific TaskID
-
+						if err := a.mongo.StoreTaskIfNotExistsEnv(taskCopy, subEnv); err != nil {
 							logrus.WithFields(logrus.Fields{
 								"time":   time.Now().Format("2006-01-02 15:04:05"),
 								"method": "periodicQueryAndSync",
 								"sub_task_id": taskCopy.TaskID,
-								"sub_env":     subEnv,
-								"is_confirm_env": isConfirmEnv,
-								"set_status":  taskCopy.ConfirmationStatus,
-								"set_popup_sent": taskCopy.PopupSent,
-							}).Debugf("多环境子任务状态设置: %s (popup_sent=%t)", taskCopy.ConfirmationStatus, taskCopy.PopupSent)
-
-							if err := a.mongo.StoreTaskIfNotExistsEnv(taskCopy, subEnv); err != nil {
-								logrus.WithFields(logrus.Fields{
-									"time":   time.Now().Format("2006-01-02 15:04:05"),
-									"method": "periodicQueryAndSync",
-									"sub_task_id": taskCopy.TaskID,
-								}).Debugf("子任务已存在，跳过存储: %v", err)
-							} else {
-								storedCount++
-								a.handleStoredTask(taskCopy.TaskID, subEnv, isConfirmEnv) // 每个子任务独立验证
-							}
+							}).Debugf("子任务已存在，跳过存储: %v", err)
+						} else {
+							storedCount++
+							a.handleStoredTask(taskCopy.TaskID, subEnv, isConfirmEnv) // 每个子任务独立验证
 						}
-
-						logrus.WithFields(logrus.Fields{
-							"time":       time.Now().Format("2006-01-02 15:04:05"),
-							"method":     "periodicQueryAndSync",
-							"task_id":    task.TaskID,
-							"stored_sub": storedCount,
-							"environments": task.Environments,
-						}).Infof("多环境任务拆分完成，存储 %d 个子任务 (动态状态基于 confirm_envs)", storedCount)
 					}
 
-					totalNewTasks += storedCount
+					logrus.WithFields(logrus.Fields{
+						"time":       time.Now().Format("2006-01-02 15:04:05"),
+						"method":     "periodicQueryAndSync",
+						"task_id":    task.TaskID,
+						"stored_sub": storedCount,
+						"environments": task.Environments,
+					}).Infof("多环境任务拆分完成，存储 %d 个子任务 (动态状态基于 confirm_envs)", storedCount)
 				}
 			}
+
+			totalNewTasks += storedCount
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "periodicQueryAndSync",
+				"env":    env,
+				"stored_count": storedCount,
+			}).Infof("%s 环境同步完成，新增 %d 个任务", env, storedCount)
 		}
 
 		logrus.WithFields(logrus.Fields{
@@ -256,7 +242,7 @@ func (a *Approval) periodicQueryAndSync() {
 			"method":       "periodicQueryAndSync",
 			"new_tasks":    totalNewTasks,
 			"took":         time.Since(startTime),
-		}).Infof("查询同步完成，本轮新增 %d 个任务 (含多环境拆分 + 动态状态)", totalNewTasks)
+		}).Infof("查询同步完成，本轮新增 %d 个任务 (基于 pending 检查 + service='' 查询)", totalNewTasks)
 	}
 }
 

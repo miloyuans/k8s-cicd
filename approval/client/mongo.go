@@ -1,10 +1,11 @@
-// 文件: mongo.go (完整文件，新增 MarkPopupSent 和 UpdateTaskStatus 函数以解决 bot.go 编译错误；其他功能保留不变)
+// 文件: mongo.go (移除 GetPushedServicesAndEnvs 函数，因为不再需要从 pushlist 查询服务/环境列表；
+// 其他功能保留：GetPendingTasks 用于 pending 检查)
 package client
 
 import (
 	"context"
 	"fmt"
-	"sort" // 新增: 导入 sort 包以支持 sort.Strings
+	"sort" // 新增: 导入 sort 包以支持 sort.Strings (虽未用，但保留以防)
 	"time"
 
 	"k8s-cicd/approval/config"
@@ -215,80 +216,6 @@ func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error
 	}).Infof("查询到 %d 个待确认任务 (popup_sent=false, sorted by created_at asc)", len(tasks))
 
 	return tasks, nil
-}
-
-// 修改: GetPushedServicesAndEnvs 扫描 push_data 集合，提取唯一服务和环境列表（支持排序）
-func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	// 获取 push_data 集合
-	collection := m.client.Database("pushlist").Collection("push_data")
-
-	// 查询所有文档
-	cursor, err := collection.Find(ctx, bson.M{})
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPushedServicesAndEnvs",
-		}).Errorf("查询 push_data 失败: %v", err)
-		return nil, nil, err
-	}
-	defer cursor.Close(ctx)
-
-	// 使用 map 去重
-	serviceSet := make(map[string]struct{})
-	envSet := make(map[string]struct{})
-
-	var doc bson.M
-	for cursor.Next(ctx) {
-		if err := cursor.Decode(&doc); err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "GetPushedServicesAndEnvs",
-			}).Errorf("解码文档失败: %v", err)
-			continue
-		}
-
-		// 提取 service 和 environment（假设字段名为 "service" 和 "environment"）
-		if service, ok := doc["service"].(string); ok && service != "" {
-			serviceSet[service] = struct{}{}
-		}
-		if env, ok := doc["environment"].(string); ok && env != "" {
-			envSet[env] = struct{}{}
-		}
-	}
-
-	if err := cursor.Err(); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPushedServicesAndEnvs",
-		}).Errorf("游标错误: %v", err)
-		return nil, nil, err
-	}
-
-	// 转换为排序后的切片
-	serviceList := make([]string, 0, len(serviceSet))
-	for service := range serviceSet {
-		serviceList = append(serviceList, service)
-	}
-	sort.Strings(serviceList)
-
-	envList := make([]string, 0, len(envSet))
-	for env := range envSet {
-		envList = append(envList, env)
-	}
-	sort.Strings(envList)
-
-	logrus.WithFields(logrus.Fields{
-		"time":     time.Now().Format("2006-01-02 15:04:05"),
-		"method":   "GetPushedServicesAndEnvs",
-		"services": serviceList,
-		"envs":     envList,
-		"took":     time.Since(startTime),
-	}).Infof("扫描完成: 服务 %v, 环境 %v (排序支持)", serviceList, envList)
-
-	return serviceList, envList, nil
 }
 
 // 修改: StoreTaskIfNotExistsEnv 生成 UUID TaskID + 设置 CreatedAt (并发安全)
