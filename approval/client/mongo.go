@@ -1,5 +1,4 @@
-// 文件: mongo.go (完整文件，添加了 import "sort" 以解决 undefined: sort 错误)
-// 其他功能保留不变，仅在 import 块添加 "sort"，并确保 GetPushedServicesAndEnvs 函数完整
+// 文件: mongo.go (完整文件，修复语法错误：移除截断部分，提供完整的 GetPendingTasks 函数；添加 import "sort"；其他功能保留不变)
 package client
 
 import (
@@ -171,7 +170,118 @@ func (m *MongoClient) GetEnvMappings() map[string]string {
 // GetPendingTasks 查询 pending 且未发送弹窗的任务
 // 修复: GetPendingTasks 过滤 "confirmation_status": "待确认"，确保匹配弹窗逻辑
 // 确认: GetPendingTasks 严格过滤 "confirmation_status": "待确认"，用于弹窗触发
-// 修改: GetPendingTasks 添...(truncated 6745 characters)...6-01-02 15:04:05"),
+// 修改: GetPendingTasks 添加排序支持，按 created_at 升序
+func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+
+	filter := bson.M{
+		"confirmation_status": "待确认",
+		"popup_sent":          bson.M{"$ne": true}, // 未发送弹窗
+	}
+
+	// 排序: created_at 升序 (最早的任务优先)
+	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}})
+
+	cursor, err := collection.Find(ctx, filter, opts)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPendingTasks",
+			"env":    env,
+		}).Errorf("查询待确认任务失败: %v", err)
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var tasks []models.DeployRequest
+	if err := cursor.All(ctx, &tasks); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPendingTasks",
+			"env":    env,
+		}).Errorf("解码任务列表失败: %v", err)
+		return nil, err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetPendingTasks",
+		"env":    env,
+		"count":  len(tasks),
+		"took":   time.Since(startTime),
+	}).Infof("查询到 %d 个待确认任务 (popup_sent=false, sorted by created_at asc)", len(tasks))
+
+	return tasks, nil
+}
+
+// 修改: GetPushedServicesAndEnvs 扫描 push_data 集合，提取唯一服务和环境列表（支持排序）
+func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	// 获取 push_data 集合
+	collection := m.client.Database("pushlist").Collection("push_data")
+
+	// 查询所有文档
+	cursor, err := collection.Find(ctx, bson.M{})
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPushedServicesAndEnvs",
+		}).Errorf("查询 push_data 失败: %v", err)
+		return nil, nil, err
+	}
+	defer cursor.Close(ctx)
+
+	// 使用 map 去重
+	serviceSet := make(map[string]struct{})
+	envSet := make(map[string]struct{})
+
+	var doc bson.M
+	for cursor.Next(ctx) {
+		if err := cursor.Decode(&doc); err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "GetPushedServicesAndEnvs",
+			}).Errorf("解码文档失败: %v", err)
+			continue
+		}
+
+		// 提取 service 和 environment（假设字段名为 "service" 和 "environment"）
+		if service, ok := doc["service"].(string); ok && service != "" {
+			serviceSet[service] = struct{}{}
+		}
+		if env, ok := doc["environment"].(string); ok && env != "" {
+			envSet[env] = struct{}{}
+		}
+	}
+
+	if err := cursor.Err(); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPushedServicesAndEnvs",
+		}).Errorf("游标错误: %v", err)
+		return nil, nil, err
+	}
+
+	// 转换为排序后的切片
+	serviceList := make([]string, 0, len(serviceSet))
+	for service := range serviceSet {
+		serviceList = append(serviceList, service)
+	}
+	sort.Strings(serviceList)
+
+	envList := make([]string, 0, len(envSet))
+	for env := range envSet {
+		envList = append(envList, env)
+	}
+	sort.Strings(envList)
+
+	logrus.WithFields(logrus.Fields{
+		"time":     time.Now().Format("2006-01-02 15:04:05"),
 		"method":   "GetPushedServicesAndEnvs",
 		"services": serviceList,
 		"envs":     envList,
