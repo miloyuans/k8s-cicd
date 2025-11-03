@@ -320,73 +320,68 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 	return nil
 }
 
-
-// GetPushedServicesAndEnvs 获取所有已 push 的服务和环境
-// 修改: UpdateTaskStatus/DeleteTask/GetTaskByID 等查询添加排序 (若需批量，示例 GetPushedServicesAndEnvs)
+// 修改: GetPushedServicesAndEnvs 扫描 push_data 集合，提取唯一服务和环境列表（支持排序）
 func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 	startTime := time.Now()
-	services := make(map[string]bool)
-	envs := make(map[string]bool)
+	ctx := context.Background()
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushedServicesAndEnvs",
-	}).Debugf("开始扫描所有环境的任务集合 (排序: created_at)")
+	// 获取 push_data 集合
+	collection := m.client.Database("pushlist").Collection("push_data")
 
-	for env := range m.cfg.EnvMapping.Mappings {
-		coll := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
-		findOptions := options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}) // 新增: 排序
-
+	// 查询所有文档
+	cursor, err := collection.Find(ctx, bson.M{})
+	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetPushedServicesAndEnvs",
-			"env":    env,
-			"coll":   fmt.Sprintf("tasks_%s", env),
-		}).Debugf("扫描环境 %s 的任务集合", env)
+		}).Errorf("查询 push_data 失败: %v", err)
+		return nil, nil, err
+	}
+	defer cursor.Close(ctx)
 
-		cursor, err := coll.Find(context.Background(), bson.M{}, findOptions)
-		if err != nil {
+	// 使用 map 去重
+	serviceSet := make(map[string]struct{})
+	envSet := make(map[string]struct{})
+
+	var doc bson.M
+	for cursor.Next(ctx) {
+		if err := cursor.Decode(&doc); err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "GetPushedServicesAndEnvs",
-				"env":    env,
-			}).Errorf("扫描集合失败: %v", err)
+			}).Errorf("解码文档失败: %v", err)
 			continue
 		}
-		var tasks []models.DeployRequest
-		if err := cursor.All(context.Background(), &tasks); err != nil {
-			logrus.Warnf("解析任务失败 [%s]: %v", env, err)
-			continue
-		}
-		cursor.Close(context.Background())
 
+		// 提取 service 和 environment（假设字段名为 "service" 和 "environment"）
+		if service, ok := doc["service"].(string); ok && service != "" {
+			serviceSet[service] = struct{}{}
+		}
+		if env, ok := doc["environment"].(string); ok && env != "" {
+			envSet[env] = struct{}{}
+		}
+	}
+
+	if err := cursor.Err(); err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetPushedServicesAndEnvs",
-			"env":    env,
-			"task_count": len(tasks),
-		}).Debugf("环境 %s 有 %d 个任务 (已排序)", env, len(tasks))
-
-		for _, t := range tasks {
-			services[t.Service] = true
-			envs[env] = true
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "GetPushedServicesAndEnvs",
-				"service": t.Service,
-				"env":     env,
-				"created_at": t.CreatedAt,
-			}).Tracef("发现服务: %s in %s (排序时间: %s)", t.Service, env, t.CreatedAt.Format("2006-01-02 15:04:05"))
-		}
+		}).Errorf("游标错误: %v", err)
+		return nil, nil, err
 	}
 
-	var serviceList, envList []string
-	for s := range services {
-		serviceList = append(serviceList, s)
+	// 转换为排序后的切片
+	serviceList := make([]string, 0, len(serviceSet))
+	for service := range serviceSet {
+		serviceList = append(serviceList, service)
 	}
-	for e := range envs {
-		envList = append(envList, e)
+	sort.Strings(serviceList)
+
+	envList := make([]string, 0, len(envSet))
+	for env := range envSet {
+		envList = append(envList, env)
 	}
+	sort.Strings(envList)
 
 	logrus.WithFields(logrus.Fields{
 		"time":     time.Now().Format("2006-01-02 15:04:05"),
