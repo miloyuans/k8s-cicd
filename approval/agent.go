@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"strings"
 
 	"k8s-cicd/approval/api"
 	"k8s-cicd/approval/client"
@@ -321,6 +322,9 @@ func (a *Approval) dedupeTasks(tasks []models.DeployRequest) []models.DeployRequ
 
 // 新增: handleStoredTask 统一处理存储后验证 (提取复用)
 // 完善: handleStoredTask 支持动态验证 (基于 isConfirmEnv 检查状态正确性)
+// 文件: agent.go (部分修复: 在 handleStoredTask 中使用 getTaskCollection 更新 popup_sent；其他逻辑保留)
+// 注意: 需要在 agent.go 中添加 import "strings" 如果未有；但主要修改 handleStoredTask 函数
+// 修改: handleStoredTask 支持动态验证 (基于 isConfirmEnv 检查状态正确性) + 使用 getTaskCollection
 func (a *Approval) handleStoredTask(taskID, env string, isConfirmEnv bool) {
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -381,8 +385,8 @@ func (a *Approval) handleStoredTask(taskID, env string, isConfirmEnv bool) {
 		}).Errorf("最新状态不匹配预期，强制更新")
 		// 强制重新更新
 		a.mongo.UpdateTaskStatus(taskID, expectedStatus, "system")
-		// 更新 PopupSent
-		coll := a.mongo.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		// 更新 PopupSent (使用 getTaskCollection)
+		coll := a.mongo.getTaskCollection(env)
 		ctx := context.Background()
 		coll.UpdateOne(ctx, bson.M{"task_id": taskID}, bson.M{"$set": bson.M{"popup_sent": expectedPopupSent}})
 		latestTask, _ = a.mongo.GetTaskByID(taskID)

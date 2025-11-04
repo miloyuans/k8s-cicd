@@ -1,11 +1,12 @@
-// 文件: mongo.go (完整文件，修复: createIndexes 在 NewMongoClient 前定义；initPushData 添加，生成组合记录；
-// GetPushedServicesAndEnvs 遍历组合记录；其他功能保留)
+// 文件: mongo.go (完整文件，优化: 集合命名使用 EnvMapping 映射到 namespace，清理为 tasks_<clean_ns> 如 tasks_eks, tasks_pro, tasks_international；添加 getTaskCollection helper；整合所有功能，包括索引创建、push数据初始化、任务CRUD、状态更新；确保无丢失，日志增强)
+// 新增 import "strings" 用于字符串清理
 package client
 
 import (
 	"context"
 	"fmt"
 	"sort"
+	"strings" // 新增: 用于字符串清理
 	"time"
 
 	"k8s-cicd/approval/config"
@@ -25,111 +26,60 @@ type MongoClient struct {
 	cfg    *config.MongoConfig
 }
 
-// NewMongoClient 创建 MongoDB 客户端（完整实现：连接、重试、索引创建、push数据初始化）
-func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "NewMongoClient",
-		"uri":    cfg.URI, // 注意: 生产中可掩码
-	}).Info("=== 开始初始化 MongoDB 客户端 ===")
-
-	// 步骤1：连接 MongoDB（带重试）
-	var mongoClient *mongo.Client
-	var err error
-	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
-		clientOptions := options.Client().
-			ApplyURI(cfg.URI).
-			SetMaxPoolSize(10).
-			SetServerSelectionTimeout(5 * time.Second)
-
-		mongoClient, err = mongo.Connect(ctx, clientOptions)
-		if err == nil {
-			// 健康检查
-			if err := mongoClient.Ping(ctx, nil); err == nil {
-				logrus.WithFields(logrus.Fields{
-					"time":   time.Now().Format("2006-01-02 15:04:05"),
-					"method": "NewMongoClient",
-					"took":   time.Since(startTime),
-				}).Info("MongoDB 连接成功")
-				break
-			} else {
-				err = fmt.Errorf("ping 失败: %v", err)
-			}
-		}
-
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "NewMongoClient",
-			"attempt": attempt + 1,
-			"max_retries": cfg.MaxRetries,
-			"error":   err.Error(),
-		}).Warnf("MongoDB 连接失败，重试中...")
-
-		if attempt < cfg.MaxRetries {
-			time.Sleep(time.Duration(attempt+1) * time.Second) // 指数退避
-		} else {
-			return nil, fmt.Errorf("MongoDB 连接失败（已重试 %d 次）: %v", cfg.MaxRetries+1, err)
-		}
-	}
-
-	// 步骤2：创建索引（TTL + 唯一 + 排序）
-	if err := createIndexes(mongoClient, cfg); err != nil {
+// 新增: getTaskCollection 返回任务集合（基于env映射到namespace，清理名称：trim "ns-" + replace "-" with "_"）
+func (m *MongoClient) getTaskCollection(env string) *mongo.Collection {
+	namespace, ok := m.cfg.EnvMapping.Mappings[env]
+	if !ok {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "NewMongoClient",
-			"took":   time.Since(startTime),
-			"error":  err.Error(),
-		}).Errorf("创建索引失败")
-		return nil, err
+			"method": "getTaskCollection",
+			"env":    env,
+		}).Warnf("未知环境 %s，使用 fallback 集合 tasks_%s", env, strings.ReplaceAll(env, "-", "_"))
+		return m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", strings.ReplaceAll(env, "-", "_")))
 	}
 
+	// 清理：trim "ns-" prefix
+	cleanNs := strings.TrimPrefix(namespace, "ns-")
+	// replace any - with _
+	cleanNs = strings.ReplaceAll(cleanNs, "-", "_")
+
+	collName := fmt.Sprintf("tasks_%s", cleanNs)
 	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "NewMongoClient",
-		"took":   time.Since(startTime),
-	}).Info("索引创建完成")
+		"time":      time.Now().Format("2006-01-02 15:04:05"),
+		"method":    "getTaskCollection",
+		"env":       env,
+		"namespace": namespace,
+		"clean_ns":  cleanNs,
+		"coll_name": collName,
+	}).Debugf("任务集合映射: %s -> %s", env, collName)
 
-	// 步骤3：初始化 push_data 组合记录
-	if err := initPushData(mongoClient); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "NewMongoClient",
-			"took":   time.Since(startTime),
-			"error":  err.Error(),
-		}).Errorf("初始化 push_data 失败")
-		return nil, err
-	}
+	return m.client.Database("cicd").Collection(collName)
+}
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "NewMongoClient",
-		"took":   time.Since(startTime),
-	}).Info("push_data 初始化完成")
-
-	m := &MongoClient{
-		client: mongoClient,
-		cfg:    cfg,
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "NewMongoClient",
-		"took":   time.Since(startTime),
-	}).Info("MongoDB 客户端初始化成功")
-	return m, nil
+// 新增: GetClient 返回底层 mongo.Client (供 agent.go 等使用)
+func (m *MongoClient) GetClient() *mongo.Client {
+	return m.client
 }
 
 // 新增: createIndexes 创建 TTL + 复合唯一索引 + created_at 排序索引
-// 修复: createIndexes 完整，确保 client param 定义
+// 优化: 使用 EnvMapping.Mappings 遍历 env，计算 clean collection name
 func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error { // client param
 	ctx := context.Background()
 
-	// 1. 为每个环境的任务集合创建索引
-	for env := range cfg.EnvMapping.Mappings {
-		collection := client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env)) // client 定义
+	// 1. 为每个环境的任务集合创建索引（基于 mappings）
+	for env, namespace := range cfg.EnvMapping.Mappings {
+		// 清理 namespace：trim "ns-" + replace "-" with "_"
+		cleanNs := strings.TrimPrefix(namespace, "ns-")
+		cleanNs = strings.ReplaceAll(cleanNs, "-", "_")
+		collection := client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", cleanNs)) // 使用 clean name
+
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "createIndexes",
+			"env":    env,
+			"namespace": namespace,
+			"coll_name": fmt.Sprintf("tasks_%s", cleanNs),
+		}).Debugf("为环境 %s 创建索引 (集合: tasks_%s)", env, cleanNs)
 
 		// TTL 索引 (keys: created_at:1 + expireAfterSeconds，支持排序)
 		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
@@ -264,7 +214,7 @@ func initPushData(client *mongo.Client) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "initPushData",
 			"error":  err.Error(),
-		}).Errorf("清空组合记录失败: %v", err)
+		}).Errorf("删除现有组合记录失败: %v", err)
 		return err
 	}
 	logrus.WithFields(logrus.Fields{
@@ -272,14 +222,15 @@ func initPushData(client *mongo.Client) error {
 		"method": "initPushData",
 	}).Debug("组合记录已清空 (保留 global_push_data)")
 
-	// 生成组合并插入
-	insertedCount := 0
+	// 生成组合记录并插入
+	generated := 0
 	for _, service := range services {
 		for _, env := range environments {
 			comboDoc := bson.M{
-				"service":     service,
+				"_id":        fmt.Sprintf("%s-%s", service, env), // 组合ID
+				"service":    service,
 				"environment": env,
-				"created_at":  time.Now(),
+				"created_at": time.Now().UnixMilli(),
 			}
 			_, err = pushColl.InsertOne(ctx, comboDoc)
 			if err != nil {
@@ -292,32 +243,27 @@ func initPushData(client *mongo.Client) error {
 				}).Errorf("插入组合记录失败: %v", err)
 				continue
 			}
-			insertedCount++
+			generated++
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "initPushData",
 				"service": service,
 				"env":     env,
-			}).Debugf("插入组合记录成功: %s + %s", service, env)
+				"combo_id": comboDoc["_id"],
+			}).Debugf("生成组合记录成功")
 		}
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"time":        time.Now().Format("2006-01-02 15:04:05"),
-		"method":      "initPushData",
-		"inserted":    insertedCount,
+		"time":     time.Now().Format("2006-01-02 15:04:05"),
+		"method":   "initPushData",
+		"generated": generated,
 		"total_combos": len(services) * len(environments),
-	}).Infof("初始化完成，生成 %d / %d 个组合记录", insertedCount, len(services)*len(environments))
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "initPushData",
-	}).Info("=== 初始化 push_data 结束 ===")
+	}).Infof("push_data 组合生成完成: %d / %d", generated, len(services)*len(environments))
 	return nil
 }
 
-// 修改: GetPushedServicesAndEnvs 遍历 push_data 组合记录，提取唯一服务和环境列表（支持排序）
-// 增强: 添加详细日志，包括每个组合文档、提取字段
+// GetPushedServicesAndEnvs 从 push_data 获取已 push 的 services 和 environments（遍历组合记录）
 func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -327,217 +273,105 @@ func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 		"method": "GetPushedServicesAndEnvs",
 	}).Info("=== 开始扫描 pushlist.push_data 组合记录 ===")
 
-	// 获取 push_data 集合
-	collection := m.client.Database("pushlist").Collection("push_data")
+	pushColl := m.client.Database("pushlist").Collection("push_data")
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushedServicesAndEnvs",
-		"database": "pushlist",
-		"collection": "push_data",
-	}).Debug("集合获取成功，准备执行 Find 查询 (filter: {})")
-
-	// 查询所有组合文档 (排除 global_push_data)
-	cursor, err := collection.Find(ctx, bson.M{"_id": bson.M{"$ne": "global_push_data"}})
+	// 查询所有组合记录 (排除 global_push_data)
+	cursor, err := pushColl.Find(ctx, bson.M{"_id": bson.M{"$ne": "global_push_data"}})
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPushedServicesAndEnvs",
-			"error":  err.Error(),
-		}).Errorf("查询 push_data 失败: %v", err)
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("查询 push_data 失败: %v", err)
 	}
 	defer cursor.Close(ctx)
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushedServicesAndEnvs",
-	}).Debug("Find 查询成功，准备遍历 cursor")
-
-	// 使用 map 去重
-	serviceSet := make(map[string]struct{})
-	envSet := make(map[string]struct{})
-
-	var doc bson.M
-	docCount := 0
-	for cursor.Next(ctx) {
-		docCount++
-		if err := cursor.Decode(&doc); err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "GetPushedServicesAndEnvs",
-				"doc_index": docCount,
-				"error":     err.Error(),
-			}).Errorf("解码文档失败: %v", err)
-			continue
-		}
-
-		logrus.WithFields(logrus.Fields{
-			"time":     time.Now().Format("2006-01-02 15:04:05"),
-			"method":   "GetPushedServicesAndEnvs",
-			"doc_index": docCount,
-			"full_doc": fmt.Sprintf("%+v", doc), // 打印完整文档内容
-		}).Debugf("成功解码组合文档 %d: %+v", docCount, doc)
-
-		// 提取 service
-		if serviceVal, ok := doc["service"]; ok {
-			if service, okType := serviceVal.(string); okType && service != "" {
-				serviceSet[service] = struct{}{}
-				logrus.WithFields(logrus.Fields{
-					"time":     time.Now().Format("2006-01-02 15:04:05"),
-					"method":   "GetPushedServicesAndEnvs",
-					"doc_index": docCount,
-					"service":   service,
-				}).Debugf("提取服务成功: %s (总计: %d)", service, len(serviceSet))
-			} else {
-				logrus.WithFields(logrus.Fields{
-					"time":     time.Now().Format("2006-01-02 15:04:05"),
-					"method":   "GetPushedServicesAndEnvs",
-					"doc_index": docCount,
-					"service_raw": fmt.Sprintf("%v", serviceVal),
-				}).Warnf("service 字段无效或为空 (类型: %T, 值: %v)", serviceVal, serviceVal)
-			}
-		} else {
-			logrus.WithFields(logrus.Fields{
-				"time":     time.Now().Format("2006-01-02 15:04:05"),
-				"method":   "GetPushedServicesAndEnvs",
-				"doc_index": docCount,
-			}).Warnf("组合文档 %d 缺少 'service' 字段", docCount)
-		}
-
-		// 提取 environment
-		if envVal, ok := doc["environment"]; ok {
-			if env, okType := envVal.(string); okType && env != "" {
-				envSet[env] = struct{}{}
-				logrus.WithFields(logrus.Fields{
-					"time":     time.Now().Format("2006-01-02 15:04:05"),
-					"method":   "GetPushedServicesAndEnvs",
-					"doc_index": docCount,
-					"environment": env,
-				}).Debugf("提取环境成功: %s (总计: %d)", env, len(envSet))
-			} else {
-				logrus.WithFields(logrus.Fields{
-					"time":     time.Now().Format("2006-01-02 15:04:05"),
-					"method":   "GetPushedServicesAndEnvs",
-					"doc_index": docCount,
-					"env_raw": fmt.Sprintf("%v", envVal),
-				}).Warnf("environment 字段无效或为空 (类型: %T, 值: %v)", envVal, envVal)
-			}
-		} else {
-			logrus.WithFields(logrus.Fields{
-				"time":     time.Now().Format("2006-01-02 15:04:05"),
-				"method":   "GetPushedServicesAndEnvs",
-				"doc_index": docCount,
-			}).Warnf("组合文档 %d 缺少 'environment' 字段", docCount)
-		}
+	var comboDocs []bson.M
+	if err := cursor.All(ctx, &comboDocs); err != nil {
+		return nil, nil, fmt.Errorf("解码 push_data 失败: %v", err)
 	}
 
-	logrus.WithFields(logrus.Fields{
-		"time":     time.Now().Format("2006-01-02 15:04:05"),
-		"method":   "GetPushedServicesAndEnvs",
-		"total_docs": docCount,
-	}).Infof("遍历完成，总组合文档数: %d", docCount)
-
-	if err := cursor.Err(); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPushedServicesAndEnvs",
-			"error":  err.Error(),
-		}).Errorf("游标错误: %v", err)
-		return nil, nil, err
-	}
+	services := make(map[string]bool)
+	envs := make(map[string]bool)
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "GetPushedServicesAndEnvs",
-		"service_set": fmt.Sprintf("%v", serviceSet),
-		"env_set":     fmt.Sprintf("%v", envSet),
-	}).Debugf("去重 set 内容: services=%v (len:%d), envs=%v (len:%d)", serviceSet, len(serviceSet), envSet, len(envSet))
+		"combo_count": len(comboDocs),
+	}).Debugf("找到 %d 个组合记录", len(comboDocs))
 
-	// 转换为排序后的切片
-	serviceList := make([]string, 0, len(serviceSet))
-	for service := range serviceSet {
-		serviceList = append(serviceList, service)
+	for i, doc := range comboDocs {
+		service, _ := doc["service"].(string)
+		env, _ := doc["environment"].(string)
+
+		if service != "" {
+			services[service] = true
+			logrus.WithFields(logrus.Fields{
+				"time":     time.Now().Format("2006-01-02 15:04:05"),
+				"method":   "GetPushedServicesAndEnvs",
+				"doc_index": i,
+				"service":  service,
+				"env":      env,
+			}).Debugf("提取 service: %s (env=%s)", service, env)
+		}
+
+		if env != "" {
+			envs[env] = true
+			logrus.WithFields(logrus.Fields{
+				"time":     time.Now().Format("2006-01-02 15:04:05"),
+				"method":   "GetPushedServicesAndEnvs",
+				"doc_index": i,
+				"service":  service,
+				"env":      env,
+			}).Debugf("提取 env: %s (service=%s)", env, service)
+		}
+
+		// Debug: 打印完整 doc (可选，生产中可移除)
+		logrus.WithFields(logrus.Fields{
+			"time":      time.Now().Format("2006-01-02 15:04:05"),
+			"method":    "GetPushedServicesAndEnvs",
+			"doc_index": i,
+			"full_doc":  fmt.Sprintf("%+v", doc),
+		}).Debugf("成功解码组合文档 %d", i)
 	}
-	sort.Strings(serviceList)
 
-	envList := make([]string, 0, len(envSet))
-	for env := range envSet {
-		envList = append(envList, env)
+	svcList := make([]string, 0, len(services))
+	for s := range services {
+		svcList = append(svcList, s)
+	}
+	sort.Strings(svcList)
+
+	envList := make([]string, 0, len(envs))
+	for e := range envs {
+		envList = append(envList, e)
 	}
 	sort.Strings(envList)
 
 	logrus.WithFields(logrus.Fields{
 		"time":     time.Now().Format("2006-01-02 15:04:05"),
 		"method":   "GetPushedServicesAndEnvs",
-		"services": serviceList,
+		"services": svcList,
 		"envs":     envList,
+		"count_svc": len(svcList),
+		"count_env": len(envList),
 		"took":     time.Since(startTime),
-	}).Infof("扫描完成: 服务 %v (len:%d), 环境 %v (len:%d) (排序支持)", serviceList, len(serviceList), envList, len(envList))
+	}).Infof("提取 push 数据成功: %d services, %d envs", len(svcList), len(envList))
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "GetPushedServicesAndEnvs",
 	}).Info("=== 扫描 pushlist.push_data 结束 ===")
 
-	return serviceList, envList, nil
+	return svcList, envList, nil
 }
 
-// createTTLIndexes 创建 TTL 索引
-func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
-	ctx := context.Background()
-
-	// 1. 为每个环境的任务集合创建 TTL 索引
-	for env := range cfg.EnvMapping.Mappings {
-		collection := client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
-		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
-			Keys:    bson.D{{Key: "created_at", Value: 1}},
-			Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
-		})
-		if err != nil {
-			return fmt.Errorf("创建任务 TTL 索引失败 [%s]: %v", env, err)
-		}
-	}
-
-	// 2. 为 popup_message 集合创建 TTL 索引
-	popupColl := client.Database("cicd").Collection("popup_messages")
-	_, err := popupColl.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "sent_at", Value: 1}},
-		Options: options.Index().SetExpireAfterSeconds(7 * 24 * 60 * 60), // 7 天
-	})
-	if err != nil {
-		return fmt.Errorf("创建弹窗消息 TTL 索引失败: %v", err)
-	}
-
-	return nil
-}
-
-// GetClient 获取 MongoDB 客户端
-func (m *MongoClient) GetClient() *mongo.Client {
-	return m.client
-}
-
-// GetEnvMappings 获取环境映射
-func (m *MongoClient) GetEnvMappings() map[string]string {
-	if m.cfg == nil || m.cfg.EnvMapping.Mappings == nil {
-		return make(map[string]string)
-	}
-	return m.cfg.EnvMapping.Mappings
-}
-
-// GetPendingTasks 查询 pending 且未发送弹窗的任务
-// 修复: GetPendingTasks 过滤 "confirmation_status": "待确认"，确保匹配弹窗逻辑
-// 确认: GetPendingTasks 严格过滤 "confirmation_status": "待确认"，用于弹窗触发
-// 修改: GetPendingTasks 添加排序支持，按 created_at 升序
+// GetPendingTasks 获取待确认任务 (状态="待确认" + popup_sent=false)
 func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 
-	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+	collection := m.getTaskCollection(env) // 优化: 使用映射的 clean collection name
 
 	filter := bson.M{
 		"confirmation_status": "待确认",
 		"popup_sent":          bson.M{"$ne": true}, // 未发送弹窗
+		"environment":         env,                 // 精确环境匹配
 	}
 
 	// 排序: created_at 升序 (最早的任务优先)
@@ -545,34 +379,103 @@ func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error
 
 	cursor, err := collection.Find(ctx, filter, opts)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPendingTasks",
-			"env":    env,
-		}).Errorf("查询待确认任务失败: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("查询待确认任务失败 [%s]: %v", env, err)
 	}
 	defer cursor.Close(ctx)
 
 	var tasks []models.DeployRequest
 	if err := cursor.All(ctx, &tasks); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPendingTasks",
-			"env":    env,
-		}).Errorf("解码任务列表失败: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("解码任务失败 [%s]: %v", env, err)
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "GetPendingTasks",
 		"env":    env,
-		"count":  len(tasks),
-		"took":   time.Since(startTime),
-	}).Infof("查询到 %d 个待确认任务 (popup_sent=false, sorted by created_at asc)", len(tasks))
+		"coll_name": collection.Name(), // 打印实际集合名
+		"count":    len(tasks),
+		"took":     time.Since(startTime),
+	}).Infof("查询待确认任务成功: %d 个 (filter: status=待确认, popup_sent≠true)", len(tasks))
 
 	return tasks, nil
+}
+
+// StoreTask 存储/更新任务 (upsert，支持多环境拆分存储)
+func (m *MongoClient) StoreTask(task *models.DeployRequest) error {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	if task.TaskID == "" {
+		task.TaskID = uuid.New().String() // 生成唯一ID
+	}
+
+	// 优化: 使用 task.Environment 作为 env，映射到 clean collection
+	env := task.Environment
+	collection := m.getTaskCollection(env)
+
+	filter := bson.M{
+		"service":     task.Service,
+		"version":     task.Version,
+		"environment": env,
+		"task_id":     task.TaskID,
+	}
+
+	update := bson.M{
+		"$setOnInsert": bson.M{ // 仅插入时设置
+			"task_id":          task.TaskID,
+			"service":          task.Service,
+			"environments":     task.Environments,
+			"environment":      env,
+			"namespace":        task.Namespace,
+			"version":          task.Version,
+			"user":             task.User,
+			"created_at":       task.CreatedAt,
+			"confirmation_status": task.ConfirmationStatus, // 默认 "待确认"
+		},
+		"$set": bson.M{ // 始终更新
+			"updated_at": time.Now(),
+		},
+	}
+
+	opts := options.Update().SetUpsert(true)
+	result, err := collection.UpdateOne(ctx, filter, update, opts)
+	if err != nil {
+		return fmt.Errorf("存储任务失败 [%s]: %v", env, err)
+	}
+
+	if result.UpsertedCount > 0 {
+		logrus.WithFields(logrus.Fields{
+			"time":      time.Now().Format("2006-01-02 15:04:05"),
+			"method":    "StoreTask",
+			"task_id":   task.TaskID,
+			"env":       env,
+			"coll_name": collection.Name(),
+			"upserted":  true,
+			"took":      time.Since(startTime),
+		}).Infof("新任务已插入: %s (service=%s, version=%s)", task.TaskID, task.Service, task.Version)
+	} else if result.ModifiedCount > 0 {
+		logrus.WithFields(logrus.Fields{
+			"time":       time.Now().Format("2006-01-02 15:04:05"),
+			"method":     "StoreTask",
+			"task_id":    task.TaskID,
+			"env":        env,
+			"coll_name":  collection.Name(),
+			"modified":   true,
+			"took":       time.Since(startTime),
+		}).Debugf("任务已更新: %s", task.TaskID)
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":     time.Now().Format("2006-01-02 15:04:05"),
+			"method":   "StoreTask",
+			"task_id":  task.TaskID,
+			"env":      env,
+			"coll_name": collection.Name(),
+			"matched":  result.MatchedCount,
+			"took":     time.Since(startTime),
+		}).Debugf("任务已存在，无变更: %s", task.TaskID)
+	}
+
+	return nil
 }
 
 // 修改: StoreTaskIfNotExistsEnv 生成 UUID TaskID + 设置 CreatedAt (并发安全)
@@ -592,8 +495,8 @@ func (m *MongoClient) StoreTaskIfNotExistsEnv(task models.DeployRequest, env str
 	// 新增: 设置 CreatedAt (当前时间，纳秒级，用于排序)
 	task.CreatedAt = time.Now()
 
-	// 获取集合 (env-specific)
-	coll := m.GetClient().Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+	// 获取集合 (env-specific，使用 clean name)
+	coll := m.getTaskCollection(env)
 
 	// 唯一键过滤 (env-specific + created_at 防同秒重)
 	filter := bson.M{
@@ -629,6 +532,7 @@ func (m *MongoClient) StoreTaskIfNotExistsEnv(task models.DeployRequest, env str
 			"method":  "StoreTaskIfNotExistsEnv",
 			"task_id": task.TaskID, // 新 UUID
 			"env":     env,
+			"coll_name": coll.Name(),
 			"status":  task.ConfirmationStatus,
 			"popup_sent": task.PopupSent,
 			"created_at": task.CreatedAt.Format("2006-01-02 15:04:05.000000000"),
@@ -640,6 +544,7 @@ func (m *MongoClient) StoreTaskIfNotExistsEnv(task models.DeployRequest, env str
 			"method":  "StoreTaskIfNotExistsEnv",
 			"task_id": task.TaskID,
 			"env":     env,
+			"coll_name": coll.Name(),
 			"took":    time.Since(startTime),
 		}).Debugf("任务已存在（跳过） - env-specific")
 	}
@@ -656,13 +561,13 @@ func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
 	return m.StoreTaskIfNotExistsEnv(task, task.Environments[0])
 }
 
-// 确认: GetTaskByID 已包含 PopupMessageID 字段，确保日志打印
+// GetTaskByID 根据 task_id 获取任务（跨环境搜索，状态过滤）
 func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 
 	for env := range m.cfg.EnvMapping.Mappings {
-		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		collection := m.getTaskCollection(env) // 优化: 使用 clean collection
 		filter := bson.M{
 			"task_id": taskID,
 			"confirmation_status": bson.M{"$in": []string{"待确认", "已确认", "已拒绝"}}, // 修复: 中文状态过滤
@@ -674,6 +579,7 @@ func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) 
 				"method": "GetTaskByID",
 				"task_id": taskID,
 				"env":     env,
+				"coll_name": collection.Name(),
 				"popup_message_id": task.PopupMessageID, // 确保包含用于删除
 				"status": task.ConfirmationStatus, // 日志当前状态
 				"full_task": fmt.Sprintf("%+v", task), // 打印完整任务数据
@@ -698,7 +604,7 @@ func (m *MongoClient) MarkPopupSent(taskID string, messageID int) error {
 
 	updated := false
 	for env := range m.cfg.EnvMapping.Mappings {
-		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		collection := m.getTaskCollection(env) // 优化: 使用 clean collection
 		filter := bson.M{"task_id": taskID}
 		update := bson.M{
 			"$set": bson.M{
@@ -714,6 +620,7 @@ func (m *MongoClient) MarkPopupSent(taskID string, messageID int) error {
 				"method":  "MarkPopupSent",
 				"task_id": taskID,
 				"env":     env,
+				"coll_name": collection.Name(),
 				"message_id": messageID,
 			}).Errorf("标记弹窗已发送失败: %v", err)
 			continue
@@ -725,6 +632,7 @@ func (m *MongoClient) MarkPopupSent(taskID string, messageID int) error {
 				"method":  "MarkPopupSent",
 				"task_id": taskID,
 				"env":     env,
+				"coll_name": collection.Name(),
 				"message_id": messageID,
 				"took":    time.Since(startTime),
 			}).Infof("弹窗标记成功: popup_sent=true, id=%d", messageID)
@@ -750,7 +658,7 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 
 	updated := false
 	for env := range m.cfg.EnvMapping.Mappings {
-		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		collection := m.getTaskCollection(env) // 优化: 使用 clean collection
 		filter := bson.M{"task_id": taskID}
 		update := bson.M{
 			"$set": bson.M{
@@ -766,6 +674,7 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 				"method":  "UpdateTaskStatus",
 				"task_id": taskID,
 				"env":     env,
+				"coll_name": collection.Name(),
 				"status":  status,
 				"user":    user,
 			}).Errorf("更新任务状态失败: %v", err)
@@ -778,6 +687,7 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 				"method":  "UpdateTaskStatus",
 				"task_id": taskID,
 				"env":     env,
+				"coll_name": collection.Name(),
 				"status":  status,
 				"user":    user,
 				"took":    time.Since(startTime),
@@ -804,13 +714,14 @@ func (m *MongoClient) DeleteTask(taskID string) error {
 
 	deleted := false
 	for env := range m.cfg.EnvMapping.Mappings {
-		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", env))
+		collection := m.getTaskCollection(env) // 优化: 使用 clean collection
 		filter := bson.M{"task_id": taskID}
 		result, err := collection.DeleteOne(ctx, filter)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":  time.Now().Format("2006-01-02 15:04:05"),
 				"env":   env,
+				"coll_name": collection.Name(),
 				"task_id": taskID,
 			}).Errorf("删除任务失败: %v", err)
 			continue
@@ -822,6 +733,7 @@ func (m *MongoClient) DeleteTask(taskID string) error {
 				"method":  "DeleteTask",
 				"task_id": taskID,
 				"env":     env,
+				"coll_name": collection.Name(),
 				"took":    time.Since(startTime),
 			}).Infof("任务删除成功")
 			break // 找到后停止遍历
@@ -844,4 +756,109 @@ func (m *MongoClient) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return m.client.Disconnect(ctx)
+}
+
+// NewMongoClient 创建 MongoDB 客户端（完整实现：连接、重试、索引创建、push数据初始化）
+func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewMongoClient",
+		"uri":    cfg.URI, // 注意: 生产中可掩码
+	}).Info("=== 开始初始化 MongoDB 客户端 ===")
+
+	// 步骤1：连接 MongoDB（带重试）
+	var mongoClient *mongo.Client
+	var err error
+	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
+		clientOptions := options.Client().
+			ApplyURI(cfg.URI).
+			SetMaxPoolSize(10).
+			SetServerSelectionTimeout(5 * time.Second)
+
+		mongoClient, err = mongo.Connect(ctx, clientOptions)
+		if err == nil {
+			// 健康检查
+			if err := mongoClient.Ping(ctx, nil); err == nil {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "NewMongoClient",
+					"took":   time.Since(startTime),
+				}).Info("MongoDB 连接成功")
+				break
+			} else {
+				err = fmt.Errorf("ping 失败: %v", err)
+			}
+		}
+
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "NewMongoClient",
+			"attempt": attempt + 1,
+			"max_retries": cfg.MaxRetries,
+			"error":   err.Error(),
+		}).Warnf("MongoDB 连接失败，重试中...")
+
+		if attempt < cfg.MaxRetries {
+			time.Sleep(time.Duration(attempt+1) * time.Second) // 指数退避
+		} else {
+			return nil, fmt.Errorf("MongoDB 连接失败（已重试 %d 次）: %v", cfg.MaxRetries+1, err)
+		}
+	}
+
+	// 步骤2：创建索引（TTL + 唯一 + 排序）
+	if err := createIndexes(mongoClient, cfg); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewMongoClient",
+			"took":   time.Since(startTime),
+			"error":  err.Error(),
+		}).Errorf("创建索引失败")
+		return nil, err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewMongoClient",
+		"took":   time.Since(startTime),
+	}).Info("索引创建完成")
+
+	// 步骤3：初始化 push_data 组合记录
+	if err := initPushData(mongoClient); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewMongoClient",
+			"took":   time.Since(startTime),
+			"error":  err.Error(),
+		}).Errorf("初始化 push_data 失败")
+		return nil, err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewMongoClient",
+		"took":   time.Since(startTime),
+	}).Info("push_data 初始化完成")
+
+	m := &MongoClient{
+		client: mongoClient,
+		cfg:    cfg,
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewMongoClient",
+		"took":   time.Since(startTime),
+	}).Info("MongoDB 客户端初始化成功")
+	return m, nil
+}
+
+// GetEnvMappings 获取环境映射
+func (m *MongoClient) GetEnvMappings() map[string]string {
+	if m.cfg == nil || m.cfg.EnvMapping.Mappings == nil {
+		return make(map[string]string)
+	}
+	return m.cfg.EnvMapping.Mappings
 }
