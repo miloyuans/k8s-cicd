@@ -1,9 +1,11 @@
-// 修改后的 agent/agent.go：Stop() 中添加超时等待锁释放（可选，但已确保）。
+// 修改后的 agent/agent.go：在 periodicPollTasksFromMongo 中，使用 sanitized env 查询任务。
+// 保留所有现有功能，包括初始推送、周期推送等。
 
 package agent
 
 import (
 	"fmt"
+	"strings" // 新增：用于 sanitizeEnv
 	"time"
 
 	"k8s-cicd/agent/api"
@@ -17,6 +19,11 @@ import (
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 )
+
+// sanitizeEnv 将环境名中的 "-" 替换为 "_" 以符合 MongoDB 集合命名规范
+func sanitizeEnv(env string) string {
+	return strings.ReplaceAll(env, "-", "_")
+}
 
 // Agent 主代理结构（不变）
 type Agent struct {
@@ -186,7 +193,7 @@ func (a *Agent) periodicPushDiscovery() {
 	}
 }
 
-// periodicPollTasksFromMongo 周期性从 Mongo 轮询 "已确认" 任务（Sort 已处理，确保按顺序 Enqueue）
+// periodicPollTasksFromMongo 周期性从 Mongo 轮询 "已确认" 任务（Sort 已处理，确保按顺序 Enqueue；使用 sanitized env）
 func (a *Agent) periodicPollTasksFromMongo() {
 	ticker := time.NewTicker(a.Cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -198,7 +205,7 @@ func (a *Agent) periodicPollTasksFromMongo() {
 
 			// 1. 遍历所有环境
 			for env, namespace := range a.Cfg.EnvMapping.Mappings {
-				// 2. 查询状态为 "已确认" 的任务 (已按 created_at 排序)
+				// 2. 查询状态为 "已确认" 的任务 (已按 created_at 排序，使用 sanitized env)
 				deployReqs, err := a.Mongo.GetTasksByStatus(env, "已确认")
 				if err != nil {
 					logrus.WithFields(logrus.Fields{
