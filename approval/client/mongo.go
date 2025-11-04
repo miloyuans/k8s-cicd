@@ -3,6 +3,7 @@
 //       修改 DropOne 调用: 先 List 找到匹配 Keys 的索引名称 (e.g., "created_at_1")，然后 DropOne(name string)，避免类型错误；
 //       修复 sort.Sort: bson.D 不实现 sort.Interface，直接迭代比较键值对 (假设顺序固定)，移除排序逻辑；
 //       修复 cursor.Next: 使用 cursor.Next(ctx) 返回 bool，检查 cursor.Err() 处理错误；
+//       新增: MarkPopupSent 方法，更新任务的 popup_sent=true + message_id + sent_at (跨环境搜索)，并插入 popup_data 记录 (TTL)；
 //       类似处理 popup_coll 的 TTL 索引删除；优化: 在 createIndexes 中统一处理 Drop 逻辑，增强日志；不改变任何功能。
 package client
 
@@ -228,6 +229,87 @@ func matchKeys(idxKeys bson.M, targetKeys bson.D) bool {
 		}
 	}
 	return true
+}
+
+// 新增: MarkPopupSent 标记弹窗已发送 (更新任务 + 插入 popup_data 记录)
+func (m *MongoClient) MarkPopupSent(taskID string, messageID int) error {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	// 1. 更新任务的 popup 字段 (跨环境)
+	updated := false
+	for env := range m.cfg.EnvMapping.Mappings {
+		collection := m.GetTaskCollection(env)
+		filter := bson.M{"task_id": taskID}
+		update := bson.M{
+			"$set": bson.M{
+				"popup_sent":        true,
+				"popup_message_id":  messageID,
+				"popup_sent_at":     time.Now(),
+			},
+		}
+		result, err := collection.UpdateOne(ctx, filter, update)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":    time.Now().Format("2006-01-02 15:04:05"),
+				"method":  "MarkPopupSent",
+				"task_id": taskID,
+				"env":     env,
+				"coll_name": collection.Name(),
+				"message_id": messageID,
+			}).Errorf("更新任务 popup_sent 失败: %v", err)
+			continue
+		}
+		if result.ModifiedCount > 0 {
+			updated = true
+			logrus.WithFields(logrus.Fields{
+				"time":    time.Now().Format("2006-01-02 15:04:05"),
+				"method":  "MarkPopupSent",
+				"task_id": taskID,
+				"env":     env,
+				"coll_name": collection.Name(),
+				"message_id": messageID,
+				"took":    time.Since(startTime),
+			}).Infof("任务 popup_sent 已更新: true, message_id=%d", messageID)
+			break
+		}
+	}
+
+	if !updated {
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "MarkPopupSent",
+			"took":    time.Since(startTime),
+		}).Warnf("未找到任务以标记 popup_sent: task_id=%s", taskID)
+		return fmt.Errorf("task not found")
+	}
+
+	// 2. 插入 popup_data 记录 (防重，TTL)
+	popupColl := m.client.Database("cicd").Collection("popup_data")
+	popupRecord := models.PopupMessage{
+		TaskID:    taskID,
+		MessageID: messageID,
+		SentAt:    time.Now(),
+	}
+	_, err := popupColl.InsertOne(ctx, popupRecord)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "MarkPopupSent",
+			"task_id": taskID,
+			"message_id": messageID,
+		}).Errorf("插入 popup_data 失败: %v", err)
+		return err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":    time.Now().Format("2006-01-02 15:04:05"),
+		"method":  "MarkPopupSent",
+		"task_id": taskID,
+		"message_id": messageID,
+		"took":    time.Since(startTime),
+	}).Infof("popup_data 记录插入成功")
+	return nil
 }
 
 // 优化: createIndexes 先清理数据 + Drop 现有索引 (使用 dropIndexByKeys 忽略不存在错误) + 创建新索引
