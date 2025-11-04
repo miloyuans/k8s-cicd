@@ -1,9 +1,9 @@
 // 修改后的 client/mongo_client.go：
-// - 将 push_data 集合从 "pushlist" 改为 "cicd" 数据库。
-// - 在 createTTLIndexes 中，为 push_data 添加复合唯一索引 {service:1, environment:1}。
-// - 修改 StorePushData：当调用时，进行全量替换（DeleteMany + InsertOne 每个 combo），使用去重 services 和 environments 创建每个 service-environment 组合的文档。
-// - 修改 GetPushData：查询所有文档，收集去重的 Services 和 Environments 到 PushData（如果无文档，返回 nil）。
-// - 保留所有现有功能，包括 TTL 索引、HasChanges 等。
+// - 确认 push_data 集合在 "cicd" 数据库中。
+// - StorePushData：每次调用时清空集合（DeleteMany），然后插入所有 service-environment 组合文档（全量格式化）。
+// - 这确保了系统重启时（通过 initialFullPush 调用 StorePushData），无论集合是否存在，都会初始化清空并重写。
+// - GetPushData：从集合中收集所有文档，提取去重 Services 和 Environments。
+// - 保留所有现有功能，包括 TTL 索引、唯一索引、HasChanges 等。
 
 package client
 
@@ -88,7 +88,7 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	return &MongoClient{client: client, cfg: cfg}, nil
 }
 
-// createTTLIndexes 创建 TTL、排序和唯一索引（使用 sanitized env；push_data 移至 cicd，并添加唯一索引）
+// createTTLIndexes 创建 TTL、排序和唯一索引（使用 sanitized env；push_data 在 cicd，并添加唯一索引）
 func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	ctx := context.Background()
 
@@ -131,7 +131,7 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 		return fmt.Errorf("创建 image_snapshots TTL 索引失败: %v", err)
 	}
 
-	// 3. 为 cicd.push_data 创建 TTL 和唯一索引 (UpdatedAt -> created_at, 每个 service-environment 组合唯一)
+	// 3. 为 cicd.push_data 创建 TTL 和唯一索引 (created_at, 每个 service-environment 组合唯一)
 	pushDataColl := client.Database("cicd").Collection("push_data")
 	// TTL 索引
 	_, err = pushDataColl.Indexes().CreateOne(ctx, mongo.IndexModel{
@@ -332,14 +332,14 @@ func (m *MongoClient) CheckDuplicateTask(task models.DeployRequest) (bool, error
 	return isDuplicate, nil
 }
 
-// StorePushData 存储推送数据到 cicd.push_data（全量替换：清空 + 插入每个 service-environment 组合文档）
+// StorePushData 存储推送数据到 cicd.push_data（全量清空 + 插入每个去重 service-environment 组合文档）
 func (m *MongoClient) StorePushData(data *models.PushData) error {
 	startTime := time.Now()
 	ctx := context.Background()
 
 	collection := m.client.Database("cicd").Collection("push_data")
 
-	// 全量替换：清空集合（格式化）
+	// 初始化/格式化：清空集合（无论是否存在）
 	_, err := collection.DeleteMany(ctx, bson.M{})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -393,11 +393,11 @@ func (m *MongoClient) StorePushData(data *models.PushData) error {
 			"env_count":     len(uniqueEnvs),
 			"inserted_docs": insertedCount,
 		},
-	}).Infof(color.GreenString("推送数据全量存储成功（格式化并插入 %d 个组合）"), insertedCount)
+	}).Infof(color.GreenString("推送数据全量存储成功到 cicd.push_data（清空并插入 %d 个组合）"), insertedCount)
 	return nil
 }
 
-// GetPushData 获取存储的推送数据（从 push_data 收集去重 services 和 environments）
+// GetPushData 获取存储的推送数据（从 cicd.push_data 收集去重 services 和 environments）
 func (m *MongoClient) GetPushData() (*models.PushData, error) {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -411,7 +411,7 @@ func (m *MongoClient) GetPushData() (*models.PushData, error) {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetPushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("查询 push_data 失败: %v"), err)
+		}).Errorf(color.RedString("查询 cicd.push_data 失败: %v"), err)
 		return nil, err
 	}
 	defer cursor.Close(ctx)
@@ -422,7 +422,7 @@ func (m *MongoClient) GetPushData() (*models.PushData, error) {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetPushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("解码 push_data 失败: %v"), err)
+		}).Errorf(color.RedString("解码 cicd.push_data 失败: %v"), err)
 		return nil, err
 	}
 
@@ -461,7 +461,7 @@ func (m *MongoClient) GetPushData() (*models.PushData, error) {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "GetPushData",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("推送数据获取成功 (从 %d 文档收集 %d 服务 %d 环境)"), len(docs), len(services), len(envs))
+	}).Infof(color.GreenString("推送数据获取成功从 cicd.push_data (从 %d 文档收集 %d 服务 %d 环境)"), len(docs), len(services), len(envs))
 	return storedData, nil
 }
 
