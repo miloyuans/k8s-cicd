@@ -2,7 +2,7 @@
 // 修复: 添加 import "go.mongodb.org/mongo-driver/bson/primitive" 以解决 undefined: primitive；
 //       修改 DropOne 调用: 先 List 找到匹配 Keys 的索引名称 (e.g., "created_at_1")，然后 DropOne(name string)，避免类型错误；
 //       修复 sort.Sort: bson.D 不实现 sort.Interface，直接迭代比较键值对 (假设顺序固定)，移除排序逻辑；
-//       修复 cursor.Next: 使用 ok, err := cursor.Next(ctx); if err != nil { ... } if !ok { ... } 处理两个返回值；
+//       修复 cursor.Next: 使用 cursor.Next(ctx) 返回 bool，检查 cursor.Err() 处理错误；
 //       类似处理 popup_coll 的 TTL 索引删除；优化: 在 createIndexes 中统一处理 Drop 逻辑，增强日志；不改变任何功能。
 package client
 
@@ -500,12 +500,11 @@ func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 	}
 	defer cursor.Close(ctx)
 
-	// 修复: 使用 ok, err := cursor.Next(ctx)
-	ok, err := cursor.Next(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("cursor.Next 失败: %v", err)
-	}
-	if !ok {
+	// 修复: cursor.Next(ctx) 只返回 bool，检查 cursor.Err()
+	if !cursor.Next(ctx) {
+		if err := cursor.Err(); err != nil {
+			return nil, nil, fmt.Errorf("cursor.Next 失败: %v", err)
+		}
 		return []string{}, []string{}, nil // 无结果，返回空列表
 	}
 
