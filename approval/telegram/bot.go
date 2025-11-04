@@ -14,10 +14,10 @@ import (
 
 	"k8s-cicd/approval/client"
 	"k8s-cicd/approval/config"
-	"k8s-cicd/approval/models"
+	//"k8s-cicd/approval/models"
 
 	"github.com/fatih/color"
-	"github.com/google/uuid"
+	//"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
