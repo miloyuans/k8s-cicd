@@ -1,5 +1,5 @@
 // 文件: client/mongo_client.go
-// 修改: 移除未使用的 uuid 导入；保留所有现有功能，包括 GetTasksByStatus filter 等。
+// 修改: 移除未使用的 uuid 导入；保留所有现有功能。
 
 package client
 

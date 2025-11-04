@@ -1,5 +1,5 @@
 // 文件: task/task.go
-// 修改: 移除未用导入 (context, metav1)；使用 k8s.SnapshotAndStoreImage (需传入 mongo)；handlePermanentFailure 添加 k8s 参数；Enqueue/Dequeue 日志长度准确。
+// 修改: 移除未用导入 (context, metav1)；使用 k8s.SnapshotAndStoreImage 获取并存储快照。
 // 保留所有现有功能，包括锁、执行、重试等。
 
 package task

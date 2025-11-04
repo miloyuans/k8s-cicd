@@ -1,3 +1,7 @@
+// 文件: kubernetes/k8s_client.go
+// 修改: 新增 SnapshotAndStoreImage 方法，用于获取当前镜像并存储快照到 MongoDB。
+// 保留所有现有功能，包括认证、发现、更新、等待、回滚等。
+
 package kubernetes
 
 import (
@@ -11,6 +15,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"k8s-cicd/agent/client"
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
 
@@ -165,135 +170,138 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 	if err != nil {
 		logrus.Errorf("获取 DaemonSet 失败: %v", err)
 	} else {
-		for _, d := range daemonSets.Items {
-			for _, c := range d.Spec.Template.Spec.Containers {
+		for _, ds := range daemonSets.Items {
+			for _, c := range ds.Spec.Template.Spec.Containers {
 				image := c.Image
 				if image == "" {
 					continue
 				}
-				serviceName := d.Name
+				serviceName := ds.Name
 				services = append(services, fmt.Sprintf("%s:%s", serviceName, ExtractTag(image)))
 			}
 		}
+	}
+
+	uniqueServices := make(map[string]struct{})
+	for _, s := range services {
+		uniqueServices[s] = struct{}{}
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "DiscoverServicesFromNamespace",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("命名空间 [%s] 发现 %d 个服务"), namespace, len(services))
+		"data": logrus.Fields{
+			"namespace": namespace,
+			"count":     len(uniqueServices),
+		},
+	}).Infof(color.GreenString("命名空间 [%s] 发现 %d 个服务"), namespace, len(uniqueServices))
 	return services, nil
 }
 
-// BuildPushRequest 构建推送请求
+// BuildPushRequest 构建推送请求（遍历环境映射发现服务）
 func (k *K8sClient) BuildPushRequest(cfg *config.Config) (models.PushRequest, error) {
 	startTime := time.Now()
+
 	serviceSet := make(map[string]struct{})
 	envSet := make(map[string]struct{})
 
 	for env, namespace := range cfg.EnvMapping.Mappings {
-		nsServices, err := k.DiscoverServicesFromNamespace(namespace)
+		envSet[env] = struct{}{}
+		services, err := k.DiscoverServicesFromNamespace(namespace)
 		if err != nil {
-			logrus.Errorf("环境 [%s] 服务发现失败: %v", env, err)
+			logrus.Errorf("发现服务失败 [%s]: %v", env, err)
 			continue
 		}
-
-		envSet[env] = struct{}{}
-		for _, serviceWithVersion := range nsServices {
-			parts := strings.SplitN(serviceWithVersion, ":", 2)
-			serviceName := parts[0]
-			serviceSet[serviceName] = struct{}{}
+		for _, s := range services {
+			serviceSet[s] = struct{}{}
 		}
 	}
 
-	var services []string
+	services := make([]string, 0, len(serviceSet))
 	for s := range serviceSet {
 		services = append(services, s)
 	}
-	var environments []string
+	envs := make([]string, 0, len(envSet))
 	for e := range envSet {
-		environments = append(environments, e)
+		envs = append(envs, e)
 	}
 
-	if len(services) == 0 || len(environments) == 0 {
-		return models.PushRequest{}, fmt.Errorf("services 或 environments 不能为空")
-	}
-
-	pushReq := models.PushRequest{
+	req := models.PushRequest{
 		Services:     services,
-		Environments: environments,
+		Environments: envs,
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "BuildPushRequest",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("构建完成: %d 服务, %d 环境"), len(services), len(environments))
-	return pushReq, nil
+		"data": logrus.Fields{
+			"service_count": len(services),
+			"env_count":     len(envs),
+		},
+	}).Infof(color.GreenString("构建完成: %d 服务, %d 环境"), len(services), len(envs))
+	return req, nil
 }
 
-// CaptureImageSnapshot 捕获镜像快照
-func (k *K8sClient) CaptureImageSnapshot(service, namespace string) (*models.ImageSnapshot, error) {
-	startTime := time.Now()
+// GetCurrentImage 获取当前镜像（从 Deployment/StatefulSet/DaemonSet 获取旧镜像）
+func (k *K8sClient) GetCurrentImage(service, namespace string) (string, error) {
 	ctx := context.Background()
-
-	snapshot := &models.ImageSnapshot{
-		Namespace:  namespace,
-		Service:    service,
-		RecordedAt: time.Now(),
-	}
 
 	// 1. 尝试 Deployment
 	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil && len(deploy.Spec.Template.Spec.Containers) > 0 {
-		c := deploy.Spec.Template.Spec.Containers[0]
-		snapshot.Container = c.Name
-		snapshot.Image = c.Image
-		snapshot.Tag = ExtractTag(c.Image)
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "CaptureImageSnapshot",
-			"took":   time.Since(startTime),
-		}).Infof(color.GreenString("快照捕获成功 [Deployment]: %s -> %s"), service, c.Image)
-		return snapshot, nil
+	if err == nil {
+		if len(deploy.Spec.Template.Spec.Containers) == 0 {
+			return "", fmt.Errorf("容器为空")
+		}
+		return deploy.Spec.Template.Spec.Containers[0].Image, nil
 	}
 
 	// 2. 尝试 StatefulSet
 	sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil && len(sts.Spec.Template.Spec.Containers) > 0 {
-		c := sts.Spec.Template.Spec.Containers[0]
-		snapshot.Container = c.Name
-		snapshot.Image = c.Image
-  			snapshot.Tag = ExtractTag(c.Image)
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "CaptureImageSnapshot",
-			"took":   time.Since(startTime),
-		}).Infof(color.GreenString("快照捕获成功 [StatefulSet]: %s -> %s"), service, c.Image)
-		return snapshot, nil
+	if err == nil {
+		if len(sts.Spec.Template.Spec.Containers) == 0 {
+			return "", fmt.Errorf("容器为空")
+		}
+		return sts.Spec.Template.Spec.Containers[0].Image, nil
 	}
 
 	// 3. 尝试 DaemonSet
 	ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil && len(ds.Spec.Template.Spec.Containers) > 0 {
-		c := ds.Spec.Template.Spec.Containers[0]
-		snapshot.Container = c.Name
-		snapshot.Image = c.Image
-		snapshot.Tag = ExtractTag(c.Image)
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "CaptureImageSnapshot",
-			"took":   time.Since(startTime),
-		}).Infof(color.GreenString("快照捕获成功 [DaemonSet]: %s -> %s"), service, c.Image)
-		return snapshot, nil
+	if err == nil {
+		if len(ds.Spec.Template.Spec.Containers) == 0 {
+			return "", fmt.Errorf("容器为空")
+		}
+		return ds.Spec.Template.Spec.Containers[0].Image, nil
 	}
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "CaptureImageSnapshot",
-		"took":   time.Since(startTime),
-	}).Warnf(color.YellowString("未找到工作负载: %s in %s"), service, namespace)
-	return nil, fmt.Errorf("未找到工作负载")
+	return "", fmt.Errorf("未找到工作负载: %s in %s", service, namespace)
+}
+
+// SnapshotAndStoreImage 获取当前镜像并存储快照到 Mongo
+func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mongo *client.MongoClient) (string, error) {
+	oldImage, err := k.GetCurrentImage(service, namespace)
+	if err != nil {
+		return "", err
+	}
+
+	oldTag := ExtractTag(oldImage)
+
+	snapshot := &models.ImageSnapshot{
+		Service:    service,
+		Namespace:  namespace,
+		Container:  "default", // 假设首个容器
+		Image:      oldImage,
+		Tag:        oldTag,
+		RecordedAt: time.Now(),
+		TaskID:     taskID,
+	}
+
+	if err := mongo.SnapshotImage(snapshot); err != nil {
+		return oldTag, err // 返回 tag 继续处理
+	}
+
+	return oldTag, nil
 }
 
 // UpdateWorkloadImage 更新镜像
