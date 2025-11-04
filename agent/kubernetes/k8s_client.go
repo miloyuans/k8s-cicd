@@ -1,6 +1,5 @@
 // 文件: kubernetes/k8s_client.go
-// 修改: 新增 SnapshotAndStoreImage 方法，用于获取当前镜像并存储快照到 MongoDB。
-// 保留所有现有功能，包括认证、发现、更新、等待、回滚等。
+// 修改: DiscoverServicesFromNamespace 仅返回服务名（去重，不含 tag）
 
 package kubernetes
 
@@ -99,37 +98,12 @@ func NewK8sClient(k8sCfg *config.K8sAuthConfig, deployCfg *config.DeployConfig) 
 	return client, nil
 }
 
-// ExtractTag 提取镜像 tag
-func ExtractTag(image string) string {
-	if idx := strings.LastIndex(image, ":"); idx != -1 {
-		return image[idx+1:]
-	}
-	return image
-}
-
-// extractBaseImage 提取 registry/repo 部分
-func extractBaseImage(image string) string {
-	if idx := strings.LastIndex(image, ":"); idx != -1 {
-		return image[:idx]
-	}
-	return image
-}
-
-// buildNewImage 拼接新镜像
-func buildNewImage(currentImage, newTag string) string {
-	base := extractBaseImage(currentImage)
-	if base == "" {
-		return newTag
-	}
-	return fmt.Sprintf("%s:%s", base, newTag)
-}
-
-// DiscoverServicesFromNamespace 发现命名空间中的服务
+// DiscoverServicesFromNamespace 发现命名空间中的服务（仅返回服务名，去重，不含 tag）
 func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 
-	services := []string{}
+	services := make(map[string]struct{})
 
 	// 1. 获取 Deployments
 	deployments, err := k.Clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
@@ -137,14 +111,8 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 		logrus.Errorf("获取 Deployment 失败: %v", err)
 	} else {
 		for _, d := range deployments.Items {
-			for _, c := range d.Spec.Template.Spec.Containers {
-				image := c.Image
-				if image == "" {
-					continue
-				}
-				serviceName := d.Name
-				services = append(services, fmt.Sprintf("%s:%s", serviceName, ExtractTag(image)))
-			}
+			serviceName := d.Name
+			services[serviceName] = struct{}{}
 		}
 	}
 
@@ -154,14 +122,8 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 		logrus.Errorf("获取 StatefulSet 失败: %v", err)
 	} else {
 		for _, s := range statefulSets.Items {
-			for _, c := range s.Spec.Template.Spec.Containers {
-				image := c.Image
-				if image == "" {
-					continue
-				}
-				serviceName := s.Name
-				services = append(services, fmt.Sprintf("%s:%s", serviceName, ExtractTag(image)))
-			}
+			serviceName := s.Name
+			services[serviceName] = struct{}{}
 		}
 	}
 
@@ -171,20 +133,14 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 		logrus.Errorf("获取 DaemonSet 失败: %v", err)
 	} else {
 		for _, ds := range daemonSets.Items {
-			for _, c := range ds.Spec.Template.Spec.Containers {
-				image := c.Image
-				if image == "" {
-					continue
-				}
-				serviceName := ds.Name
-				services = append(services, fmt.Sprintf("%s:%s", serviceName, ExtractTag(image)))
-			}
+			serviceName := ds.Name
+			services[serviceName] = struct{}{}
 		}
 	}
 
-	uniqueServices := make(map[string]struct{})
-	for _, s := range services {
-		uniqueServices[s] = struct{}{}
+	result := make([]string, 0, len(services))
+	for s := range services {
+		result = append(result, s)
 	}
 
 	logrus.WithFields(logrus.Fields{
@@ -193,10 +149,10 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 		"took":   time.Since(startTime),
 		"data": logrus.Fields{
 			"namespace": namespace,
-			"count":     len(uniqueServices),
+			"count":     len(result),
 		},
-	}).Infof(color.GreenString("命名空间 [%s] 发现 %d 个服务"), namespace, len(uniqueServices))
-	return services, nil
+	}).Infof(color.GreenString("命名空间 [%s] 发现 %d 个服务"), namespace, len(result))
+	return result, nil
 }
 
 // BuildPushRequest 构建推送请求（遍历环境映射发现服务）
@@ -290,7 +246,7 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 	snapshot := &models.ImageSnapshot{
 		Service:    service,
 		Namespace:  namespace,
-		Container:  "default", // 假设首个容器
+		Container:  "default",
 		Image:      oldImage,
 		Tag:        oldTag,
 		RecordedAt: time.Now(),
@@ -298,7 +254,7 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 	}
 
 	if err := mongo.SnapshotImage(snapshot); err != nil {
-		return oldTag, err // 返回 tag 继续处理
+		return oldTag, err
 	}
 
 	return oldTag, nil
@@ -398,7 +354,7 @@ func (k *K8sClient) WaitForRolloutComplete(service, namespace string, timeout ti
 			}
 		}
 
-		// 2. 检查 StatefulSet
+		// 2. 检查taj StatefulSet
 		sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{})
 		if err == nil {
 			if sts.Status.ObservedGeneration >= sts.Generation &&

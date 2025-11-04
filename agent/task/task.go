@@ -1,6 +1,9 @@
 // 文件: task/task.go
-// 修改: 移除所有 Debug 级别的空队列日志（避免刷屏）；仅保留关键 Info 日志。
-// 保留所有核心功能：防重复入队、快照、回滚、状态更新、并发串行、队列限流等。
+// 修改: 
+// 1. 移除未用导入
+// 2. 状态推送前构造 status_for_external = 执行结果
+// 3. 不修改原 status 字段
+// 4. 移除空队列 Debug 日志
 
 package task
 
@@ -36,7 +39,7 @@ type Task struct {
 	Retries       int
 }
 
-// TaskQueue 任务队列（添加 locks map 用于 per-service-namespace 串行）
+// TaskQueue 任务队列
 type TaskQueue struct {
 	queue        *list.List
 	mu           sync.Mutex
@@ -45,7 +48,7 @@ type TaskQueue struct {
 	wg           sync.WaitGroup
 	locks        map[string]*sync.Mutex
 	lockMu       sync.RWMutex
-	maxQueueSize int // 新增: 资源约束
+	maxQueueSize int
 }
 
 // NewTaskQueue 创建任务队列
@@ -93,7 +96,7 @@ func (q *TaskQueue) StartWorkers(cfg *config.Config, mongo *client.MongoClient, 
 	}
 }
 
-// worker 执行任务（Dequeue后立即更新confirmation_status="已执行"；仅保留关键日志）
+// worker 执行任务
 func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, workerID int) {
 	defer q.wg.Done()
 
@@ -107,19 +110,16 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 		default:
 			task, ok := q.Dequeue()
 			if !ok {
-				// 移除 Debug 空队列日志，避免刷屏
 				time.Sleep(1 * time.Second)
 				continue
 			}
 
-			// Dequeue后 log 剩余长度 (remove后)
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "worker",
 				"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "worker_id": workerID},
 			}).Infof(color.GreenString("Worker-%d 出队任务: %s (队列剩余: %d)"), workerID, task.DeployRequest.TaskID, q.queue.Len())
 
-			// 生成 TaskID 如果为空
 			if task.DeployRequest.TaskID == "" {
 				task.DeployRequest.TaskID = uuid.New().String()
 				task.ID = fmt.Sprintf("%s-%s-%s", task.DeployRequest.Service, task.DeployRequest.Version, task.DeployRequest.Environments[0])
@@ -127,13 +127,10 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 
 			env := task.DeployRequest.Environments[0]
 
-			// 新增: Dequeue后立即更新 confirmation_status="已执行"，防重复入队
 			if err := mongo.UpdateConfirmationStatus(task.DeployRequest.TaskID, "已执行"); err != nil {
-				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("更新 confirmation_status 失败: %v (继续执行)"), err)
-				// 继续执行，不阻塞
+				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("更新 confirmation_status 失败: %v"), err)
 			}
 
-			// 开始执行：立即更新 status="running"
 			if err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "running"); err != nil {
 				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("更新 running 状态失败: %v"), err)
 			}
@@ -151,7 +148,6 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				},
 			}).Infof(color.GreenString("Worker-%d 开始执行任务 (status=running): %s"), workerID, task.DeployRequest.TaskID)
 
-			// 锁逻辑
 			lock := q.getLock(task.DeployRequest.Service, task.DeployRequest.Namespace)
 			lock.Lock()
 			logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Debug("Lock acquired for serial execution")
@@ -160,7 +156,6 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Debug("Lock released after execution")
 			}()
 
-			// 执行任务并处理错误
 			err := q.executeTask(cfg, mongo, k8s, apiClient, botMgr, task)
 			if err != nil {
 				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("任务执行失败: %v"), err)
@@ -168,7 +163,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				if task.Retries < cfg.Task.MaxRetries {
 					logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID, "retries": task.Retries}).Warnf(color.YellowString("任务重试 %d/%d 次"), task.Retries, cfg.Task.MaxRetries)
 					time.Sleep(time.Duration(cfg.Task.RetryDelay) * time.Second)
-					q.Enqueue(task)  // 重入队
+					q.Enqueue(task)
 					continue
 				} else {
 					q.handlePermanentFailure(k8s, mongo, apiClient, botMgr, task)
@@ -201,60 +196,27 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	return nil
 }
 
-// handleSuccess 成功处理（使用 env）
+// handleSuccess 成功处理
 func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldTag string, env string) {
-	internalStatus := "执行成功"
-	presetStatus := mapStatusToPreset(internalStatus)
+	// 1. 更新内部状态（不修改原 status）
+	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行成功")
 
-	// 1. 更新 Mongo 状态
-	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, internalStatus)
-
-	// 2. 调用 /status 接口
+	// 2. 推送外部状态：status: 执行成功
 	_ = apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.DeployRequest.Service,
 		Version:     task.DeployRequest.Version,
 		Environment: env,
 		User:        task.DeployRequest.User,
-		Status:      presetStatus,
+		Status:      "执行成功", // 外部统一格式
 	})
 
-	// 3. 发送成功通知
+	// 3. 发送通知
 	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, true)
 }
 
-// mapStatusToPreset 状态映射（内部 -> 预设中文）
-func mapStatusToPreset(internalStatus string) string {
-	mapping := map[string]string{
-		"执行成功": "执行成功",
-		"执行失败": "执行失败",
-		"异常":    "异常",
-	}
-	if preset, ok := mapping[internalStatus]; ok {
-		return preset
-	}
-	return "未知"
-}
-
-// getImageOrUnknown 获取镜像或默认
-func getImageOrUnknown(tag string) string {
-	if tag != "" {
-		return tag
-	}
-	return "unknown"
-}
-
-// handleFailure 失败处理（回滚，使用 env；映射状态；添加 k8s 参数）
+// handleFailure 失败处理
 func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldTag string, env string) {
-	internalStatus := "执行失败"
-	presetStatus := mapStatusToPreset(internalStatus)
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "handleFailure",
-		"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env, "old_tag": getImageOrUnknown(oldTag)},
-	}).Infof(color.YellowString("开始处理失败逻辑，包括回滚通知: %s [%s]"), task.DeployRequest.TaskID, env)
-
-	// 1. 回滚（如果有旧Tag）
+	// 1. 回滚
 	if k8s != nil && oldTag != "" {
 		snapshot := &models.ImageSnapshot{
 			Namespace: task.DeployRequest.Namespace,
@@ -268,64 +230,60 @@ func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.Mongo
 		}
 	}
 
-	// 2. 更新 Mongo 状态 (内部状态)
-	mongoErr := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, internalStatus)
+	// 2. 更新内部状态
+	mongoErr := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行失败")
 	if mongoErr != nil {
 		logrus.Errorf(color.RedString("更新MongoDB状态失败 [%s]: %v"), env, mongoErr)
 	}
 
-	// 3. 调用 /status 接口 (预设状态)
+	// 3. 推送外部状态：status: 执行失败
 	statusErr := apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.DeployRequest.Service,
 		Version:     task.DeployRequest.Version,
 		Environment: env,
 		User:        task.DeployRequest.User,
-		Status:      presetStatus,
+		Status:      "执行失败",
 	})
 	if statusErr != nil {
 		logrus.Errorf(color.RedString("推送失败状态失败 [%s]: %v"), env, statusErr)
 	}
 
-	// 4. 发送通知（失败，已回滚）
+	// 4. 发送通知
 	notifyErr := botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false)
 	if notifyErr != nil {
-		logrus.Errorf(color.RedString("发送失败通知失败 [%s]: %v (模板包含'已回滚')"), env, notifyErr)
+		logrus.Errorf(color.RedString("发送失败通知失败 [%s]: %v"), env, notifyErr)
 	} else {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "handleFailure",
-			"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env},
-		}).Infof(color.GreenString("失败通知已触发发送到 Telegram 群组 (包含回滚信息)"))
+		logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env}).Infof(color.GreenString("失败通知已触发发送到 Telegram 群组"))
 	}
 }
 
-// handleException 异常处理（使用 env；映射状态）
+// handleException 异常处理
 func (q *TaskQueue) handleException(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldTag string, env string) {
-	internalStatus := "异常"
-	presetStatus := mapStatusToPreset(internalStatus)
-
-	// 1. 更新 Mongo 状态 (内部状态)
-	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, internalStatus)
-
-	// 2. 调用 /status 接口 (预设状态)
+	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "异常")
 	_ = apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.DeployRequest.Service,
 		Version:     task.DeployRequest.Version,
 		Environment: env,
 		User:        task.DeployRequest.User,
-		Status:      presetStatus,
+		Status:      "异常",
 	})
-
-	// 3. 发送通知（失败样式）
 	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false)
 }
 
 // handlePermanentFailure 永久失败处理
 func (q *TaskQueue) handlePermanentFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) {
-	q.handleFailure(k8s, mongo, apiClient, botMgr, task, "unknown", task.DeployRequest.Environments[0])  // k8s 传入，回滚 if oldTag
+	q.handleFailure(k8s, mongo, apiClient, botMgr, task, "unknown", task.DeployRequest.Environments[0])
 }
 
-// Enqueue 入队（设置 CreatedAt 如果为空 大小约束）
+// getImageOrUnknown 获取镜像或默认
+func getImageOrUnknown(tag string) string {
+	if tag != "" {
+		return tag
+	}
+	return "unknown"
+}
+
+// Enqueue 入队
 func (q *TaskQueue) Enqueue(task *Task) {
 	if task.DeployRequest.CreatedAt.IsZero() {
 		task.DeployRequest.CreatedAt = time.Now()
@@ -362,7 +320,7 @@ func (q *TaskQueue) Dequeue() (*Task, bool) {
 	return task, true
 }
 
-// Stop 停止队列（添加超时）
+// Stop 停止队列
 func (q *TaskQueue) Stop() {
 	close(q.stopCh)
 	done := make(chan struct{})
@@ -378,7 +336,6 @@ func (q *TaskQueue) Stop() {
 		logrus.Warn(color.YellowString("任务队列等待超时，强制继续"))
 	}
 
-	// 强制释放锁
 	q.lockMu.Lock()
 	for key, lock := range q.locks {
 		lock.Unlock()
