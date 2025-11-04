@@ -1,5 +1,4 @@
-// 文件: mongo.go (完整文件，优化: 集合命名使用 EnvMapping 映射到 namespace，清理为 tasks_<clean_ns> 如 tasks_eks, tasks_pro, tasks_international；添加 getTaskCollection helper；整合所有功能，包括索引创建、push数据初始化、任务CRUD、状态更新；确保无丢失，日志增强)
-// 新增 import "strings" 用于字符串清理
+// 文件: mongo.go (完整文件，修复: 导出 GetTaskCollection 方法，使其可从外部包调用；其他功能保留)
 package client
 
 import (
@@ -26,13 +25,13 @@ type MongoClient struct {
 	cfg    *config.MongoConfig
 }
 
-// 新增: getTaskCollection 返回任务集合（基于env映射到namespace，清理名称：trim "ns-" + replace "-" with "_"）
-func (m *MongoClient) getTaskCollection(env string) *mongo.Collection {
+// 修复: 导出 GetTaskCollection 返回任务集合（基于env映射到namespace，清理名称：trim "ns-" + replace "-" with "_"）
+func (m *MongoClient) GetTaskCollection(env string) *mongo.Collection {
 	namespace, ok := m.cfg.EnvMapping.Mappings[env]
 	if !ok {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "getTaskCollection",
+			"method": "GetTaskCollection",
 			"env":    env,
 		}).Warnf("未知环境 %s，使用 fallback 集合 tasks_%s", env, strings.ReplaceAll(env, "-", "_"))
 		return m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", strings.ReplaceAll(env, "-", "_")))
@@ -46,7 +45,7 @@ func (m *MongoClient) getTaskCollection(env string) *mongo.Collection {
 	collName := fmt.Sprintf("tasks_%s", cleanNs)
 	logrus.WithFields(logrus.Fields{
 		"time":      time.Now().Format("2006-01-02 15:04:05"),
-		"method":    "getTaskCollection",
+		"method":    "GetTaskCollection",
 		"env":       env,
 		"namespace": namespace,
 		"clean_ns":  cleanNs,
@@ -366,7 +365,7 @@ func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error
 	startTime := time.Now()
 	ctx := context.Background()
 
-	collection := m.getTaskCollection(env) // 优化: 使用映射的 clean collection name
+	collection := m.GetTaskCollection(env) // 优化: 使用映射的 clean collection name
 
 	filter := bson.M{
 		"confirmation_status": "待确认",
@@ -411,7 +410,7 @@ func (m *MongoClient) StoreTask(task *models.DeployRequest) error {
 
 	// 优化: 使用 task.Environment 作为 env，映射到 clean collection
 	env := task.Environment
-	collection := m.getTaskCollection(env)
+	collection := m.GetTaskCollection(env)
 
 	filter := bson.M{
 		"service":     task.Service,
@@ -496,7 +495,7 @@ func (m *MongoClient) StoreTaskIfNotExistsEnv(task models.DeployRequest, env str
 	task.CreatedAt = time.Now()
 
 	// 获取集合 (env-specific，使用 clean name)
-	coll := m.getTaskCollection(env)
+	coll := m.GetTaskCollection(env)
 
 	// 唯一键过滤 (env-specific + created_at 防同秒重)
 	filter := bson.M{
@@ -567,7 +566,7 @@ func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) 
 	ctx := context.Background()
 
 	for env := range m.cfg.EnvMapping.Mappings {
-		collection := m.getTaskCollection(env) // 优化: 使用 clean collection
+		collection := m.GetTaskCollection(env) // 优化: 使用 clean collection
 		filter := bson.M{
 			"task_id": taskID,
 			"confirmation_status": bson.M{"$in": []string{"待确认", "已确认", "已拒绝"}}, // 修复: 中文状态过滤
@@ -604,7 +603,7 @@ func (m *MongoClient) MarkPopupSent(taskID string, messageID int) error {
 
 	updated := false
 	for env := range m.cfg.EnvMapping.Mappings {
-		collection := m.getTaskCollection(env) // 优化: 使用 clean collection
+		collection := m.GetTaskCollection(env) // 优化: 使用 clean collection
 		filter := bson.M{"task_id": taskID}
 		update := bson.M{
 			"$set": bson.M{
@@ -658,7 +657,7 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 
 	updated := false
 	for env := range m.cfg.EnvMapping.Mappings {
-		collection := m.getTaskCollection(env) // 优化: 使用 clean collection
+		collection := m.GetTaskCollection(env) // 优化: 使用 clean collection
 		filter := bson.M{"task_id": taskID}
 		update := bson.M{
 			"$set": bson.M{
@@ -714,7 +713,7 @@ func (m *MongoClient) DeleteTask(taskID string) error {
 
 	deleted := false
 	for env := range m.cfg.EnvMapping.Mappings {
-		collection := m.getTaskCollection(env) // 优化: 使用 clean collection
+		collection := m.GetTaskCollection(env) // 优化: 使用 clean collection
 		filter := bson.M{"task_id": taskID}
 		result, err := collection.DeleteOne(ctx, filter)
 		if err != nil {
