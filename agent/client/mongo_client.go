@@ -1,5 +1,5 @@
 // 文件: client/mongo_client.go
-// 修改: 移除无效的filter增强（依赖update防重复）；保留Limit(100)以防过多任务；新增 UpdateConfirmationStatus 方法。
+// 修改: 新增 UpdateConfirmationStatus 方法，用于更新 confirmation_status 按 TaskID。
 // 保留所有现有功能。
 
 package client
@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	//"github.com/google/uuid"
+	"github.com/google/uuid"
 
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
@@ -121,8 +121,8 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	// 2. 为 image_snapshots 创建 TTL 索引 (RecordedAt)
 	imageSnapshotsColl := client.Database("cicd").Collection("image_snapshots")
 	_, err := imageSnapshotsColl.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "recorded_at", Value: 1}},
-		Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
+			Keys:    bson.D{{Key: "recorded_at", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
 	})
 	if err != nil {
 		return fmt.Errorf("创建 image_snapshots TTL 索引失败: %v", err)
@@ -154,14 +154,14 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	return nil
 }
 
-// GetTasksByStatus 获取指定状态的任务（按 created_at 排序；添加Limit避免过多）
+// GetTasksByStatus 获取指定状态的任务（按 created_at 排序；filter 改为 {"confirmation_status": status}，以匹配数据中的确认状态字段。）
 func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 	sanitizedEnv := sanitizeEnv(env)
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", sanitizedEnv))
 
-	filter := bson.M{"confirmation_status": status}  // 原filter，依赖update防重复
+	filter := bson.M{"confirmation_status": status}
 
 	opts := options.Find().
 		SetSort(bson.D{{Key: "created_at", Value: 1}}).  // 按创建时间升序
