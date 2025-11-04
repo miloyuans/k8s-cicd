@@ -1,18 +1,13 @@
-// 修改后的 task/task.go：在 worker 函数中，使用 sanitized env 更新状态和处理失败/异常。
-// 保留所有现有功能，包括锁、重试、回滚、通知等。
-
 package task
 
 import (
-	"context"
 	"container/list"
 	"fmt"
-	"strings" // 新增：用于 sanitizeEnv
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/client"
@@ -109,6 +104,8 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				continue
 			}
 
+			taskStartTime := time.Now() // 定义任务开始时间
+
 			// 生成 TaskID 如果为空
 			if task.DeployRequest.TaskID == "" {
 				task.DeployRequest.TaskID = uuid.New().String()
@@ -116,8 +113,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 			}
 
 			env := task.DeployRequest.Environments[0]
-			sanitizedEnv := sanitizeEnv(env)
-			// 开始执行：立即更新 status="running"（使用 sanitized env 隐式，通过 UpdateTaskStatus）
+			// 开始执行：立即更新 status="running"
 			if err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "running"); err != nil {
 				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("更新 running 状态失败: %v"), err)
 			}
@@ -144,7 +140,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Debug("Lock released after execution")
 			}()
 
-			// 执行任务并处理错误（修复：使用 err）
+			// 执行任务并处理错误
 			err := q.executeTask(cfg, mongo, k8s, apiClient, botMgr, task)
 			if err != nil {
 				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("任务执行失败: %v"), err)
@@ -163,9 +159,9 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 			// 成功处理
 			internalStatus := "执行成功"
 			presetStatus := mapStatusToPreset(internalStatus)
-			oldTag := getCurrentImageTag(k8s, task.DeployRequest.Service, task.DeployRequest.Namespace) // 假设函数获取当前 tag
+			oldTag := getCurrentImageTag(k8s, task.DeployRequest.Service, task.DeployRequest.Namespace) // 获取旧 tag（执行前已存储快照）
 
-			// 1. 更新 Mongo 状态 (内部状态，使用 sanitized env 隐式)
+			// 1. 更新 Mongo 状态 (内部状态)
 			mongoErr := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, internalStatus)
 			if mongoErr != nil {
 				logrus.Errorf(color.RedString("更新MongoDB状态失败 [%s]: %v"), env, mongoErr)
@@ -198,23 +194,21 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "worker",
-				"took":   time.Since(startTime), // 假设 startTime 在此处定义
+				"took":   time.Since(taskStartTime),
 			}).Infof(color.GreenString("Worker-%d 任务执行成功: %s [%s]"), workerID, task.DeployRequest.TaskID, env)
 		}
 	}
 }
 
-// executeTask 执行单个任务（存储快照、更新镜像、等待 rollout）（不变，但使用 sanitized env 隐式通过 mongo）
+// executeTask 执行单个任务（存储快照、更新镜像、等待 rollout）
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) error {
-	env := task.DeployRequest.Environments[0]
-
 	// 1. 存储当前镜像快照
 	currentImage := getCurrentImage(k8s, task.DeployRequest.Service, task.DeployRequest.Namespace)
 	snapshot := &models.ImageSnapshot{
 		Namespace:  task.DeployRequest.Namespace,
 		Service:    task.DeployRequest.Service,
 		Image:      currentImage,
-		Tag:        ExtractTag(currentImage),
+		Tag:        kubernetes.ExtractTag(currentImage),
 		TaskID:     task.DeployRequest.TaskID,
 	}
 	if err := mongo.StoreImageSnapshot(snapshot); err != nil {
@@ -238,7 +232,7 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	return nil
 }
 
-// mapStatusToPreset 状态映射（不变）
+// mapStatusToPreset 状态映射
 func mapStatusToPreset(internalStatus string) string {
 	mappings := map[string]string{
 		"执行成功": "执行成功",
@@ -252,13 +246,27 @@ func mapStatusToPreset(internalStatus string) string {
 	return internalStatus
 }
 
-// getCurrentImageTag 获取当前镜像 tag（假设实现）
-func getCurrentImageTag(k8s *kubernetes.K8sClient, service, namespace string) string {
-	// 实现：从 K8s 获取当前镜像 tag
-	return "unknown" // 占位
+// getCurrentImage 获取当前镜像（从 K8s 获取）
+func getCurrentImage(k8s *kubernetes.K8sClient, service, namespace string) string {
+	// 尝试从 Deployment 获取容器镜像（假设单容器）
+	deploy, err := k8s.Clientset.AppsV1().Deployments(namespace).Get(context.Background(), service, metav1.GetOptions{})
+	if err == nil && len(deploy.Spec.Template.Spec.Containers) > 0 {
+		return deploy.Spec.Template.Spec.Containers[0].Image
+	}
+	// 类似地检查 StatefulSet 等，简化返回空
+	return ""
 }
 
-// getImageOrUnknown 获取镜像或 unknown（不变）
+// getCurrentImageTag 获取当前镜像 tag（使用 ExtractTag）
+func getCurrentImageTag(k8s *kubernetes.K8sClient, service, namespace string) string {
+	currentImage := getCurrentImage(k8s, service, namespace)
+	if currentImage == "" {
+		return "unknown"
+	}
+	return kubernetes.ExtractTag(currentImage)
+}
+
+// getImageOrUnknown 获取镜像或 unknown
 func getImageOrUnknown(tag string) string {
 	if tag == "" {
 		return "unknown"
@@ -266,7 +274,7 @@ func getImageOrUnknown(tag string) string {
 	return tag
 }
 
-// handleFailure 失败处理（使用 sanitized env 隐式）
+// handleFailure 失败处理
 func (q *TaskQueue) handleFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldTag string, env string) {
 	internalStatus := "执行失败"
 	presetStatus := mapStatusToPreset(internalStatus)
