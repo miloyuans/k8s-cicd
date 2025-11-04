@@ -13,6 +13,7 @@ import (
 	"k8s-cicd/approval/models" // 确保导入 models 以使用 DeployRequest 和 Environment
 	"k8s-cicd/approval/telegram"
 
+	"github.com/google/uuid"
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
