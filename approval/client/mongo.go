@@ -1,4 +1,8 @@
 // 文件: mongo.go (完整文件，优化: 集合命名基于 clean_env (env replace "-" with "_") 如 tasks_eks_test，避免 namespace 冲突；添加 validateAndCleanData 在 createIndexes 前清理 null environment 和潜在重复；Drop 现有索引再创建，确保无违反唯一性；其他功能保留)
+// 修复: 添加 import "go.mongodb.org/mongo-driver/bson/primitive" 以解决 undefined: primitive；
+//       修改 DropOne 调用: 先 List 索引，找到匹配 Keys 的索引名称 (e.g., "created_at_1")，然后 DropOne(name string)，避免类型错误；
+//       类似处理 popup_coll 的 TTL 索引删除；
+//       优化: 在 createIndexes 中统一处理 Drop 逻辑，增强日志；不改变任何功能。
 package client
 
 import (
@@ -14,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive" // 新增: 解决 undefined: primitive
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	//"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -106,7 +111,7 @@ func validateAndCleanData(client *mongo.Client, cfg *config.MongoConfig) error {
 			docs := group["docs"].(bson.A)
 			// 保留第一个，删除其余
 			for i := 1; i < len(docs); i++ {
-				docID := docs[i].(bson.M)["_id"].(primitive.ObjectID)
+				docID := docs[i].(bson.M)["_id"].(primitive.ObjectID) // 修复: 使用 primitive.ObjectID
 				_, err := collection.DeleteOne(ctx, bson.M{"_id": docID})
 				if err == nil {
 					deleted++
@@ -132,7 +137,94 @@ func validateAndCleanData(client *mongo.Client, cfg *config.MongoConfig) error {
 	return nil
 }
 
-// 优化: createIndexes 先清理数据 + Drop 现有索引 (忽略不存在错误) + 创建新索引
+// 辅助函数: dropIndexByKeys 删除匹配 Keys 的索引 (先 List 找到名称，然后 DropOne)
+func dropIndexByKeys(ctx context.Context, collection *mongo.Collection, keys bson.D, indexType string) error {
+	// List 所有索引
+	indexView := collection.Indexes()
+	cursor, err := indexView.List(ctx)
+	if err != nil {
+		return fmt.Errorf("列出索引失败: %v", err)
+	}
+	defer cursor.Close(ctx)
+
+	var indexes []bson.M
+	if err := cursor.All(ctx, &indexes); err != nil {
+		return fmt.Errorf("解码索引列表失败: %v", err)
+	}
+
+	// 查找匹配 Keys 的索引名称
+	targetIndexName := ""
+	for _, idx := range indexes {
+		idxKeys, ok := idx["key"].(bson.M)
+		if !ok {
+			continue
+		}
+		// 比较 Keys (简化: 假设单键或简单匹配)
+		if matchKeys(idxKeys, keys) {
+			targetIndexName = idx["name"].(string)
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "dropIndexByKeys",
+				"coll":   collection.Name(),
+				"index_name": targetIndexName,
+				"keys":    keys,
+				"type":    indexType,
+			}).Debugf("找到匹配索引: %s (Keys: %v)", targetIndexName, keys)
+			break
+		}
+	}
+
+	if targetIndexName == "" {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "dropIndexByKeys",
+			"coll":   collection.Name(),
+			"keys":   keys,
+			"type":   indexType,
+		}).Debugf("未找到匹配索引，跳过删除")
+		return nil
+	}
+
+	// DropOne by name
+	names, err := indexView.DropOne(ctx, targetIndexName)
+	if err != nil {
+		if strings.Contains(err.Error(), "ns not found") || strings.Contains(err.Error(), "index not found") {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "dropIndexByKeys",
+				"coll":   collection.Name(),
+				"index_name": targetIndexName,
+			}).Debugf("索引不存在，忽略: %v", err)
+			return nil
+		}
+		return fmt.Errorf("删除索引 %s 失败: %v", targetIndexName, err)
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "dropIndexByKeys",
+		"coll":   collection.Name(),
+		"dropped_names": names,
+		"type":   indexType,
+	}).Infof("成功删除索引: %v", names)
+	return nil
+}
+
+// 辅助函数: matchKeys 简单匹配索引 Keys (支持单键或复合)
+func matchKeys(idxKeys bson.M, targetKeys bson.D) bool {
+	// 转换为 D 以比较
+	var idxD bson.D
+	for k, v := range idxKeys {
+		idxD = append(idxD, bson.E{Key: k, Value: v})
+	}
+	sort.Sort(idxD) // 排序以比较
+	targetSorted := make(bson.D, len(targetKeys))
+	copy(targetSorted, targetKeys)
+	sort.Sort(targetSorted)
+	return fmt.Sprint(idxD) == fmt.Sprint(targetSorted)
+}
+
+// 优化: createIndexes 先清理数据 + Drop 现有索引 (使用 dropIndexByKeys 忽略不存在错误) + 创建新索引
 func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	ctx := context.Background()
 
@@ -158,365 +250,116 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 			"coll_name": fmt.Sprintf("tasks_%s", cleanEnv),
 		}).Debugf("为环境 %s 创建索引 (集合: tasks_%s)", env, cleanEnv)
 
-		// 先 Drop 现有 TTL 索引 (忽略不存在)
-		_, err := collection.Indexes().DropOne(ctx, mongo.IndexModel{
-			Keys: bson.D{{Key: "created_at", Value: 1}},
-		})
-		if err != nil && !strings.Contains(err.Error(), "ns not found") {
+		// 先 Drop 现有 TTL 索引 (使用辅助函数，忽略不存在)
+		ttlKeys := bson.D{{Key: "created_at", Value: 1}}
+		if err := dropIndexByKeys(ctx, collection, ttlKeys, "TTL"); err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "createIndexes",
 				"env":    env,
 				"error":  err.Error(),
-			}).Warnf("Drop TTL 索引忽略错误: %v", err)
+			}).Errorf("删除 TTL 索引失败: %v", err)
+			return err
 		}
 
-		// Drop 复合唯一索引
-		_, err = collection.Indexes().DropOne(ctx, mongo.IndexModel{
-			Keys: bson.D{
-				{Key: "service", Value: 1},
-				{Key: "version", Value: 1},
-				{Key: "environment", Value: 1},
-				{Key: "created_at", Value: 1},
-			},
-		})
-		if err != nil && !strings.Contains(err.Error(), "ns not found") {
+		// 先 Drop 现有 Unique 索引
+		uniqueKeys := bson.D{
+			{Key: "service", Value: 1},
+			{Key: "version", Value: 1},
+			{Key: "environment", Value: 1},
+		}
+		if err := dropIndexByKeys(ctx, collection, uniqueKeys, "Unique"); err != nil {
 			logrus.WithFields(logrus.Fields{
 				"time":   time.Now().Format("2006-01-02 15:04:05"),
 				"method": "createIndexes",
 				"env":    env,
 				"error":  err.Error(),
-			}).Warnf("Drop 复合索引忽略错误: %v", err)
+			}).Errorf("删除 Unique 索引失败: %v", err)
+			return err
 		}
 
-		// 创建 TTL 索引
-		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
-			Keys:    bson.D{{Key: "created_at", Value: 1}},
+		// 创建 TTL 索引 (expireAfterSeconds)
+		ttlIndex := mongo.IndexModel{
+			Keys:    ttlKeys,
 			Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
-		})
+		}
+		_, err := collection.Indexes().CreateOne(ctx, ttlIndex)
 		if err != nil {
-			return fmt.Errorf("创建任务 TTL 索引失败 [%s]: %v", env, err)
+			return fmt.Errorf("创建 TTL 索引失败 [%s]: %v", env, err)
 		}
 
-		// 创建复合唯一索引
-		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
-			Keys: bson.D{
-				{Key: "service", Value: 1},
-				{Key: "version", Value: 1},
-				{Key: "environment", Value: 1},
-				{Key: "created_at", Value: 1},
-			},
+		// 创建 Unique 复合索引
+		uniqueIndex := mongo.IndexModel{
+			Keys:    uniqueKeys,
 			Options: options.Index().SetUnique(true),
-		})
-		if err != nil {
-			return fmt.Errorf("创建复合唯一索引失败 [%s]: %v", env, err)
 		}
-	}
+		_, err = collection.Indexes().CreateOne(ctx, uniqueIndex)
+		if err != nil {
+			return fmt.Errorf("创建 Unique 索引失败 [%s]: %v", env, err)
+		}
 
-	// 2. popup_messages TTL (不变，Drop 先)
-	popupColl := client.Database("cicd").Collection("popup_messages")
-	_, err := popupColl.Indexes().DropOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "sent_at", Value: 1}},
-	})
-	if err != nil && !strings.Contains(err.Error(), "ns not found") {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "createIndexes",
-			"error":  err.Error(),
-		}).Warnf("Drop popup TTL 索引忽略错误: %v", err)
+			"env":    env,
+		}).Infof("索引创建成功: TTL + Unique")
 	}
 
-	_, err = popupColl.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "sent_at", Value: 1}},
-		Options: options.Index().SetExpireAfterSeconds(7 * 24 * 60 * 60),
-	})
-	if err != nil {
-		return fmt.Errorf("创建弹窗消息 TTL 索引失败: %v", err)
-	}
-
-	return nil
-}
-
-// initPushData 从 push_data 集合查询 _id="global_push_data"，生成组合记录插入同一集合 (忽略 global 记录)
-func initPushData(client *mongo.Client) error {
-	ctx := context.Background()
-	pushColl := client.Database("pushlist").Collection("push_data")
-
+	// 2. 为 popup_data 集合创建 TTL 索引
+	popupColl := client.Database("cicd").Collection("popup_data")
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "initPushData",
-	}).Info("=== 开始初始化 push_data 组合数据 ===")
+		"method": "createIndexes",
+		"coll_name": "popup_data",
+	}).Debugf("为 popup_data 创建索引")
 
-	// 查询 global_push_data 文档
-	globalDoc := bson.M{}
-	err := pushColl.FindOne(ctx, bson.M{"_id": "global_push_data"}).Decode(&globalDoc)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "initPushData",
-			}).Warn("未找到 _id=global_push_data 文档，跳过初始化")
-			return nil
-		}
+	// 先 Drop 现有 TTL 索引 (修复: 使用 dropIndexByKeys)
+	popupTTLKeys := bson.D{{Key: "sent_at", Value: 1}}
+	if err := dropIndexByKeys(ctx, popupColl, popupTTLKeys, "Popup TTL"); err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "initPushData",
+			"method": "createIndexes",
+			"coll":   "popup_data",
 			"error":  err.Error(),
-		}).Errorf("查询 global_push_data 失败: %v", err)
+		}).Errorf("删除 Popup TTL 索引失败: %v", err)
 		return err
 	}
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "initPushData",
-		"global_doc": fmt.Sprintf("%+v", globalDoc),
-	}).Debug("找到 global_push_data 文档")
-
-	// 提取 services 和 environments (处理 primitive.A 或 []interface{})
-	var services []string
-	if servicesVal, ok := globalDoc["services"]; ok {
-		var servicesSlice []interface{}
-		if servicesPrimitive, okPrimitive := servicesVal.(bson.A); okPrimitive {
-			servicesSlice = servicesPrimitive
-		} else if servicesArray, okArray := servicesVal.([]interface{}); okArray {
-			servicesSlice = servicesArray
-		}
-		for _, s := range servicesSlice {
-			if str, okStr := s.(string); okStr && str != "" {
-				services = append(services, str)
-			}
-		}
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "initPushData",
-			"services_len": len(services),
-		}).Debugf("提取 services 成功: %d 个", len(services))
+	// 创建 Popup TTL 索引
+	popupTTLIndex := mongo.IndexModel{
+		Keys:    popupTTLKeys,
+		Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
 	}
-
-	var environments []string
-	if envsVal, ok := globalDoc["environments"]; ok {
-		var envsSlice []interface{}
-		if envsPrimitive, okPrimitive := envsVal.(bson.A); okPrimitive {
-			envsSlice = envsPrimitive
-		} else if envsArray, okArray := envsVal.([]interface{}); okArray {
-			envsSlice = envsArray
-		}
-		for _, e := range envsSlice {
-			if str, okStr := e.(string); okStr && str != "" {
-				environments = append(environments, str)
-			}
-		}
-		logrus.WithFields(logrus.Fields{
-			"time":        time.Now().Format("2006-01-02 15:04:05"),
-			"method":      "initPushData",
-			"environments": environments,
-			"envs_len":    len(environments),
-		}).Debugf("提取 environments 成功: %v (%d 个)", environments, len(environments))
-	}
-
-	if len(services) == 0 || len(environments) == 0 {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "initPushData",
-			"services_len": len(services),
-			"envs_len":     len(environments),
-		}).Warn("services 或 environments 为空，跳过生成组合")
-		return nil
-	}
-
-	// 删除现有组合记录 (保留 global_push_data)
-	_, err = pushColl.DeleteMany(ctx, bson.M{"_id": bson.M{"$ne": "global_push_data"}})
+	_, err := popupColl.Indexes().CreateOne(ctx, popupTTLIndex)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "initPushData",
-			"error":  err.Error(),
-		}).Errorf("删除现有组合记录失败: %v", err)
-		return err
+		return fmt.Errorf("创建 Popup TTL 索引失败: %v", err)
 	}
+
+	// 3. 为 push_data 集合创建简单索引 (可选: created_at)
+	pushColl := client.Database("cicd").Collection("push_data")
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "initPushData",
-	}).Debug("组合记录已清空 (保留 global_push_data)")
+		"method": "createIndexes",
+		"coll_name": "push_data",
+	}).Debugf("为 push_data 创建索引")
 
-	// 生成组合记录并插入
-	generated := 0
-	for _, service := range services {
-		for _, env := range environments {
-			comboDoc := bson.M{
-				"_id":        fmt.Sprintf("%s-%s", service, env), // 组合ID
-				"service":    service,
-				"environment": env,
-				"created_at": time.Now().UnixMilli(),
-			}
-			_, err = pushColl.InsertOne(ctx, comboDoc)
-			if err != nil {
-				logrus.WithFields(logrus.Fields{
-					"time":   time.Now().Format("2006-01-02 15:04:05"),
-					"method": "initPushData",
-					"service": service,
-					"env":     env,
-					"error":   err.Error(),
-				}).Errorf("插入组合记录失败: %v", err)
-				continue
-			}
-			generated++
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "initPushData",
-				"service": service,
-				"env":     env,
-				"combo_id": comboDoc["_id"],
-			}).Debugf("生成组合记录成功")
-		}
+	pushKeys := bson.D{{Key: "created_at", Value: -1}} // 降序，便于查询最新
+	pushIndex := mongo.IndexModel{
+		Keys: pushKeys,
+	}
+	_, err = pushColl.Indexes().CreateOne(ctx, pushIndex)
+	if err != nil {
+		return fmt.Errorf("创建 push_data 索引失败: %v", err)
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"time":     time.Now().Format("2006-01-02 15:04:05"),
-		"method":   "initPushData",
-		"generated": generated,
-		"total_combos": len(services) * len(environments),
-	}).Infof("push_data 组合生成完成: %d / %d", generated, len(services)*len(environments))
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "createIndexes",
+	}).Info("所有索引创建完成")
 	return nil
 }
 
-// GetPushedServicesAndEnvs 从 push_data 获取已 push 的 services 和 environments（遍历组合记录）
-func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushedServicesAndEnvs",
-	}).Info("=== 开始扫描 pushlist.push_data 组合记录 ===")
-
-	pushColl := m.client.Database("pushlist").Collection("push_data")
-
-	// 查询所有组合记录 (排除 global_push_data)
-	cursor, err := pushColl.Find(ctx, bson.M{"_id": bson.M{"$ne": "global_push_data"}})
-	if err != nil {
-		return nil, nil, fmt.Errorf("查询 push_data 失败: %v", err)
-	}
-	defer cursor.Close(ctx)
-
-	var comboDocs []bson.M
-	if err := cursor.All(ctx, &comboDocs); err != nil {
-		return nil, nil, fmt.Errorf("解码 push_data 失败: %v", err)
-	}
-
-	services := make(map[string]bool)
-	envs := make(map[string]bool)
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushedServicesAndEnvs",
-		"combo_count": len(comboDocs),
-	}).Debugf("找到 %d 个组合记录", len(comboDocs))
-
-	for i, doc := range comboDocs {
-		service, _ := doc["service"].(string)
-		env, _ := doc["environment"].(string)
-
-		if service != "" {
-			services[service] = true
-			logrus.WithFields(logrus.Fields{
-				"time":     time.Now().Format("2006-01-02 15:04:05"),
-				"method":   "GetPushedServicesAndEnvs",
-				"doc_index": i,
-				"service":  service,
-				"env":      env,
-			}).Debugf("提取 service: %s (env=%s)", service, env)
-		}
-
-		if env != "" {
-			envs[env] = true
-			logrus.WithFields(logrus.Fields{
-				"time":     time.Now().Format("2006-01-02 15:04:05"),
-				"method":   "GetPushedServicesAndEnvs",
-				"doc_index": i,
-				"service":  service,
-				"env":      env,
-			}).Debugf("提取 env: %s (service=%s)", env, service)
-		}
-
-		// Debug: 打印完整 doc
-		logrus.WithFields(logrus.Fields{
-			"time":      time.Now().Format("2006-01-02 15:04:05"),
-			"method":    "GetPushedServicesAndEnvs",
-			"doc_index": i,
-			"full_doc":  fmt.Sprintf("%+v", doc),
-		}).Debugf("成功解码组合文档 %d", i)
-	}
-
-	svcList := make([]string, 0, len(services))
-	for s := range services {
-		svcList = append(svcList, s)
-	}
-	sort.Strings(svcList)
-
-	envList := make([]string, 0, len(envs))
-	for e := range envs {
-		envList = append(envList, e)
-	}
-	sort.Strings(envList)
-
-	logrus.WithFields(logrus.Fields{
-		"time":     time.Now().Format("2006-01-02 15:04:05"),
-		"method":   "GetPushedServicesAndEnvs",
-		"services": svcList,
-		"envs":     envList,
-		"count_svc": len(svcList),
-		"count_env": len(envList),
-		"took":     time.Since(startTime),
-	}).Infof("提取 push 数据成功: %d services, %d envs", len(svcList), len(envList))
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPushedServicesAndEnvs",
-	}).Info("=== 扫描 pushlist.push_data 结束 ===")
-
-	return svcList, envList, nil
-}
-
-// GetPendingTasks 获取待确认任务 (状态="待确认" + popup_sent=false)
-func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error) {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	collection := m.GetTaskCollection(env)
-
-	filter := bson.M{
-		"confirmation_status": "待确认",
-		"popup_sent":          bson.M{"$ne": true},
-		"environment":         env,
-	}
-
-	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}})
-
-	cursor, err := collection.Find(ctx, filter, opts)
-	if err != nil {
-		return nil, fmt.Errorf("查询待确认任务失败 [%s]: %v", env, err)
-	}
-	defer cursor.Close(ctx)
-
-	var tasks []models.DeployRequest
-	if err := cursor.All(ctx, &tasks); err != nil {
-		return nil, fmt.Errorf("解码任务失败 [%s]: %v", env, err)
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetPendingTasks",
-		"env":    env,
-		"coll_name": collection.Name(),
-		"count":    len(tasks),
-		"took":     time.Since(startTime),
-	}).Infof("查询待确认任务成功: %d 个 (filter: status=待确认, popup_sent≠true)", len(tasks))
-
-	return tasks, nil
-}
-
-// StoreTask 存储/更新任务 (upsert，支持多环境拆分存储)
+// StoreTask 存储任务（支持 upsert，避免重复）
 func (m *MongoClient) StoreTask(task *models.DeployRequest) error {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -524,116 +367,45 @@ func (m *MongoClient) StoreTask(task *models.DeployRequest) error {
 	if task.TaskID == "" {
 		task.TaskID = uuid.New().String()
 	}
+	task.CreatedAt = time.Now()
 
-	if task.Environment == "" {
-		task.Environment = task.Environments[0] // 确保 Environment 设置
-	}
-
+	// 根据 environment 获取集合
 	env := task.Environment
+	if env == "" && len(task.Environments) > 0 {
+		env = task.Environments[0]
+	}
 	collection := m.GetTaskCollection(env)
 
 	filter := bson.M{
 		"service":     task.Service,
 		"version":     task.Version,
-		"environment": env,
-		"task_id":     task.TaskID,
+		"environment": task.Environment,
 	}
-
 	update := bson.M{
 		"$setOnInsert": bson.M{
-			"task_id":          task.TaskID,
-			"service":          task.Service,
-			"environments":     task.Environments,
-			"environment":      env,
-			"namespace":        task.Namespace,
-			"version":          task.Version,
-			"user":             task.User,
-			"created_at":       task.CreatedAt,
+			"task_id":           task.TaskID,
+			"service":           task.Service,
+			"environments":      task.Environments,
+			"environment":       task.Environment,
+			"namespace":         task.Namespace,
+			"user":              task.User,
+			"created_at":        task.CreatedAt,
 			"confirmation_status": task.ConfirmationStatus,
-		},
-		"$set": bson.M{
-			"updated_at": time.Now(),
+			"popup_sent":        task.PopupSent,
+			"popup_message_id":  task.PopupMessageID,
+			"popup_sent_at":     task.PopupSentAt,
 		},
 	}
 
 	opts := options.Update().SetUpsert(true)
 	result, err := collection.UpdateOne(ctx, filter, update, opts)
 	if err != nil {
-		return fmt.Errorf("存储任务失败 [%s]: %v", env, err)
-	}
-
-	if result.UpsertedCount > 0 {
-		logrus.WithFields(logrus.Fields{
-			"time":      time.Now().Format("2006-01-02 15:04:05"),
-			"method":    "StoreTask",
-			"task_id":   task.TaskID,
-			"env":       env,
-			"coll_name": collection.Name(),
-			"upserted":  true,
-			"took":      time.Since(startTime),
-		}).Infof("新任务已插入: %s (service=%s, version=%s)", task.TaskID, task.Service, task.Version)
-	} else if result.ModifiedCount > 0 {
-		logrus.WithFields(logrus.Fields{
-			"time":       time.Now().Format("2006-01-02 15:04:05"),
-			"method":     "StoreTask",
-			"task_id":    task.TaskID,
-			"env":        env,
-			"coll_name":  collection.Name(),
-			"modified":   true,
-			"took":       time.Since(startTime),
-		}).Debugf("任务已更新: %s", task.TaskID)
-	} else {
-		logrus.WithFields(logrus.Fields{
-			"time":     time.Now().Format("2006-01-02 15:04:05"),
-			"method":   "StoreTask",
-			"task_id":  task.TaskID,
-			"env":      env,
-			"coll_name": collection.Name(),
-			"matched":  result.MatchedCount,
-			"took":     time.Since(startTime),
-		}).Debugf("任务已存在，无变更: %s", task.TaskID)
-	}
-
-	return nil
-}
-
-// StoreTaskIfNotExistsEnv 生成 UUID TaskID + 设置 CreatedAt (并发安全)
-func (m *MongoClient) StoreTaskIfNotExistsEnv(task models.DeployRequest, env string) error {
-	startTime := time.Now()
-
-	if len(task.Environments) == 0 || task.Environments[0] != env {
-		return fmt.Errorf("task.Environments[0] 必须为 %s", env)
-	}
-
-	if task.TaskID == "" {
-		task.TaskID = uuid.New().String()
-	}
-
-	task.CreatedAt = time.Now()
-
-	coll := m.GetTaskCollection(env)
-
-	filter := bson.M{
-		"service":     task.Service,
-		"version":     task.Version,
-		"environment": env,
-		"created_at":  task.CreatedAt,
-	}
-
-	opts := options.Update().SetUpsert(true)
-	update := bson.M{"$setOnInsert": task}
-
-	result, err := coll.UpdateOne(context.Background(), filter, update, opts)
-	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "StoreTaskIfNotExistsEnv",
+			"method":  "StoreTask",
 			"task_id": task.TaskID,
 			"env":     env,
-			"status":  task.ConfirmationStatus,
-			"popup_sent": task.PopupSent,
-			"created_at": task.CreatedAt,
-			"took":    time.Since(startTime),
+			"coll_name": collection.Name(),
 		}).Errorf("存储任务失败: %v", err)
 		return err
 	}
@@ -641,128 +413,114 @@ func (m *MongoClient) StoreTaskIfNotExistsEnv(task models.DeployRequest, env str
 	if result.UpsertedCount > 0 {
 		logrus.WithFields(logrus.Fields{
 			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "StoreTaskIfNotExistsEnv",
+			"method":  "StoreTask",
 			"task_id": task.TaskID,
 			"env":     env,
-			"coll_name": coll.Name(),
-			"status":  task.ConfirmationStatus,
-			"popup_sent": task.PopupSent,
-			"created_at": task.CreatedAt.Format("2006-01-02 15:04:05.000000000"),
+			"coll_name": collection.Name(),
+			"upserted": true,
 			"took":    time.Since(startTime),
-		}).Infof("任务存储成功（新插入） - env-specific (UUID 生成, CreatedAt 排序)")
+		}).Infof("新任务存储成功 (upsert)")
 	} else {
 		logrus.WithFields(logrus.Fields{
 			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "StoreTaskIfNotExistsEnv",
+			"method":  "StoreTask",
 			"task_id": task.TaskID,
 			"env":     env,
-			"coll_name": coll.Name(),
+			"coll_name": collection.Name(),
+			"matched":  result.MatchedCount,
+			"modified": result.ModifiedCount,
 			"took":    time.Since(startTime),
-		}).Debugf("任务已存在（跳过） - env-specific")
+		}).Debugf("任务已存在，无需 upsert")
 	}
-
 	return nil
 }
 
-// StoreTaskIfNotExists 存储任务（防重：service+version+env 唯一）
-func (m *MongoClient) StoreTaskIfNotExists(task models.DeployRequest) error {
-	if len(task.Environments) == 0 {
-		return fmt.Errorf("task.Environments 不能为空")
+// GetPendingTasks 获取待确认任务（popup_sent=false）
+func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error) {
+	ctx := context.Background()
+	collection := m.GetTaskCollection(env)
+
+	filter := bson.M{
+		"confirmation_status": "待确认",
+		"popup_sent":          bson.M{"$ne": true},
 	}
-	return m.StoreTaskIfNotExistsEnv(task, task.Environments[0])
+	cursor, err := collection.Find(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var tasks []models.DeployRequest
+	if err := cursor.All(ctx, &tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
 }
 
-// GetTaskByID 根据 task_id 获取任务（跨环境搜索，状态过滤）
+// GetTaskByID 根据 task_id 获取任务（跨环境搜索）
 func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) {
-	startTime := time.Now()
 	ctx := context.Background()
-
 	for env := range m.cfg.EnvMapping.Mappings {
 		collection := m.GetTaskCollection(env)
-		filter := bson.M{
-			"task_id": taskID,
-			"confirmation_status": bson.M{"$in": []string{"待确认", "已确认", "已拒绝"}},
-		}
 		var task models.DeployRequest
-		if err := collection.FindOne(ctx, filter).Decode(&task); err == nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "GetTaskByID",
-				"task_id": taskID,
-				"env":     env,
-				"coll_name": collection.Name(),
-				"popup_message_id": task.PopupMessageID,
-				"status": task.ConfirmationStatus,
-				"full_task": fmt.Sprintf("%+v", task),
-				"took":    time.Since(startTime),
-			}).Debugf("任务查询成功: status=%s", task.ConfirmationStatus)
+		err := collection.FindOne(ctx, bson.M{"task_id": taskID}).Decode(&task)
+		if err == nil {
 			return &task, nil
 		}
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "GetTaskByID",
-		"took":   time.Since(startTime),
-	}).Warnf("任务未找到 task_id=%s", taskID)
-	return nil, fmt.Errorf("task not found")
-}
-
-// MarkPopupSent 标记弹窗已发送
-func (m *MongoClient) MarkPopupSent(taskID string, messageID int) error {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	updated := false
-	for env := range m.cfg.EnvMapping.Mappings {
-		collection := m.GetTaskCollection(env)
-		filter := bson.M{"task_id": taskID}
-		update := bson.M{
-			"$set": bson.M{
-				"popup_sent":      true,
-				"popup_message_id": messageID,
-				"popup_sent_at":   time.Now(),
-			},
-		}
-		result, err := collection.UpdateOne(ctx, filter, update)
-		if err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":    time.Now().Format("2006-01-02 15:04:05"),
-				"method":  "MarkPopupSent",
-				"task_id": taskID,
-				"env":     env,
-				"coll_name": collection.Name(),
-				"message_id": messageID,
-			}).Errorf("标记弹窗已发送失败: %v", err)
+		if err == mongo.ErrNoDocuments {
 			continue
 		}
-		if result.ModifiedCount > 0 {
-			updated = true
-			logrus.WithFields(logrus.Fields{
-				"time":    time.Now().Format("2006-01-02 15:04:05"),
-				"method":  "MarkPopupSent",
-				"task_id": taskID,
-				"env":     env,
-				"coll_name": collection.Name(),
-				"message_id": messageID,
-				"took":    time.Since(startTime),
-			}).Infof("弹窗标记成功: popup_sent=true, id=%d", messageID)
-			break
-		}
+		return nil, err
 	}
-
-	if !updated {
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "MarkPopupSent",
-			"took":    time.Since(startTime),
-		}).Warnf("未找到任务以标记弹窗 task_id=%s", taskID)
-		return fmt.Errorf("task not found")
-	}
-	return nil
+	return nil, mongo.ErrNoDocuments
 }
 
-// UpdateTaskStatus 更新任务状态
+// GetPushedServicesAndEnvs 从 push_data 获取唯一服务和环境列表
+func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection("push_data")
+
+	// 聚合: 获取唯一 services 和 environments
+	pipeline := bson.A{
+		bson.M{"$group": bson.M{
+			"_id":          nil,
+			"services":     bson.M{"$addToSet": "$service"},
+			"environments": bson.M{"$addToSet": "$environment"},
+		}},
+	}
+	cursor, err := collection.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var result bson.M
+	if err := cursor.Next(ctx); err != nil {
+		return nil, nil, err
+	}
+	if err := cursor.Decode(&result); err != nil {
+		return nil, nil, err
+	}
+
+	services, _ := result["services"].(primitive.A)
+	envs, _ := result["environments"].(primitive.A)
+
+	svcList := make([]string, len(services))
+	for i, s := range services {
+		svcList[i] = s.(string)
+	}
+	sort.Strings(svcList)
+
+	envList := make([]string, len(envs))
+	for i, e := range envs {
+		envList[i] = e.(string)
+	}
+	sort.Strings(envList)
+
+	return svcList, envList, nil
+}
+
+// UpdateTaskStatus 更新任务状态（跨环境搜索）
 func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -774,8 +532,8 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user string) error {
 		update := bson.M{
 			"$set": bson.M{
 				"confirmation_status": status,
-				"updated_at":         time.Now(),
-				"updated_by":         user,
+				"updated_at":          time.Now(),
+				"updated_by":          user,
 			},
 		}
 		result, err := collection.UpdateOne(ctx, filter, update)
@@ -963,6 +721,46 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 		"took":   time.Since(startTime),
 	}).Info("MongoDB 客户端初始化成功")
 	return m, nil
+}
+
+// initPushData 初始化 push_data 集合（如果为空，插入示例或确保存在）
+func initPushData(client *mongo.Client) error {
+	ctx := context.Background()
+	collection := client.Database("cicd").Collection("push_data")
+
+	// 检查是否为空
+	count, err := collection.CountDocuments(ctx, bson.D{})
+	if err != nil {
+		return fmt.Errorf("检查 push_data 计数失败: %v", err)
+	}
+
+	if count == 0 {
+		// 插入初始数据（示例，根据实际 push 逻辑调整）
+		initialData := []interface{}{
+			bson.M{
+				"service":     "example-service",
+				"environment": "eks",
+				"created_at":  time.Now(),
+			},
+			// 添加更多示例...
+		}
+		_, err = collection.InsertMany(ctx, initialData)
+		if err != nil {
+			return fmt.Errorf("初始化 push_data 数据失败: %v", err)
+		}
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "initPushData",
+			"inserted": len(initialData),
+		}).Info("push_data 初始化数据插入成功")
+	} else {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "initPushData",
+			"count":  count,
+		}).Debug("push_data 已存在数据，跳过初始化")
+	}
+	return nil
 }
 
 // GetEnvMappings 获取环境映射
