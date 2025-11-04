@@ -1,5 +1,5 @@
 // 文件: main.go
-// 修改: 在 NewTaskQueue 后添加日志打印 workers 和 maxQueueSize 配置，便于调试。
+// 修改: 无变化，保留新增的配置日志。
 // 保留所有现有功能，包括优雅关闭等。
 
 package main

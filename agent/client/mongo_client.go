@@ -1,5 +1,5 @@
 // 文件: client/mongo_client.go
-// 修改: 新增 UpdateConfirmationStatus 方法，用于更新 confirmation_status 按 TaskID。
+// 修改: 移除无效的filter增强（依赖update防重复）；保留Limit(100)以防过多任务；新增 UpdateConfirmationStatus 方法。
 // 保留所有现有功能。
 
 package client
@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	//"github.com/google/uuid"
+	"github.com/google/uuid"
 
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
@@ -154,20 +154,14 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	return nil
 }
 
-// GetTasksByStatus 获取指定状态的任务（按 created_at 排序；增强filter排除"已执行"）
+// GetTasksByStatus 获取指定状态的任务（按 created_at 排序；添加Limit避免过多）
 func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 	sanitizedEnv := sanitizeEnv(env)
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", sanitizedEnv))
 
-	// 增强filter: confirmation_status="已确认" 且 != "已执行"
-	filter := bson.M{
-		"confirmation_status": bson.M{
-			"$eq": status,
-			"$ne": "已执行",  // 新增: 排除已触发任务
-		},
-	}
+	filter := bson.M{"confirmation_status": status}  // 原filter，依赖update防重复
 
 	opts := options.Find().
 		SetSort(bson.D{{Key: "created_at", Value: 1}}).  // 按创建时间升序
