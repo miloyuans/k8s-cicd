@@ -45,6 +45,7 @@ func (a *Approval) Start() {
 // 修改: periodicQueryAndSync 恢复 pushlist 方案：获取 services/envs，组合查询 (per service+env)，收集 allTasks，去重，存储+拆分
 // 文件: approval/agent.go 中的 periodicQueryAndSync 函数完整代码（变更：每个 service 只查询一次，传所有 confirmEnvs 作为 environments[] 到 QueryTasks，支持 API 多环境查询；移除手动设置 task.Environment = env，因为假设 API 返回的任务已有 Environment 字段；调整日志和 queriedCombinations 为服务数）
 // 文件: approval/agent.go 中的 periodicQueryAndSync 函数完整代码（变更：移除 confirmEnvs 过滤，使用所有 envs 从 push_data 进行查询，传入 QueryTasks(service, envs) 支持所有环境查询；在 handleStoredTask 调用时，动态检查 env 是否在 ConfirmEnvs 来决定 isConfirmEnv=true/false，确保非白名单环境直接设为已确认而不漏查/漏存；调整日志以反映所有环境查询）
+// 文件: approval/agent.go 中的 periodicQueryAndSync 函数完整代码（最新优化: 查询所有 envs，白名单只用于 isConfirmEnv 判断）
 func (a *Approval) periodicQueryAndSync() {
 	ticker := time.NewTicker(a.cfg.API.QueryInterval)
 	defer ticker.Stop()
@@ -56,7 +57,6 @@ func (a *Approval) periodicQueryAndSync() {
 			"method": "periodicQueryAndSync",
 		}).Debug("=== 开始新一轮查询同步循环 (pushlist 组合查询 + 多环境拆分) ===")
 
-		// 1. 从 pushlist 获取已 push 服务和环境列表
 		services, envs, err := a.mongo.GetPushedServicesAndEnvs()
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
@@ -84,7 +84,6 @@ func (a *Approval) periodicQueryAndSync() {
 			continue
 		}
 
-		// 变更: 移除过滤，使用所有 envs 进行查询（白名单 ConfirmEnvs 只用于决定弹窗/状态，不用于查询过滤，避免漏查非白名单环境数据）
 		logrus.WithFields(logrus.Fields{
 			"time":       time.Now().Format("2006-01-02 15:04:05"),
 			"method":     "periodicQueryAndSync",
@@ -92,7 +91,6 @@ func (a *Approval) periodicQueryAndSync() {
 			"count_env": len(envs),
 		}).Infof("查询所有环境: %v (ConfirmEnvs 只用于弹窗判断)", envs)
 
-		// 2. 组合查询：每个 service 调用一次 QueryTasks，传入所有 envs（API 支持多环境）
 		var allTasks []models.DeployRequest
 		queriedServices := 0
 		for _, service := range services {
@@ -107,7 +105,7 @@ func (a *Approval) periodicQueryAndSync() {
 				"envs":    envs,
 			}).Debugf("调用 /query 接口查询任务 (服务=%s, 多环境: %v)", service, envs)
 
-			tasks, err := a.queryClient.QueryTasks(service, envs) // 变更: 传入所有 envs，支持查询所有环境任务
+			tasks, err := a.queryClient.QueryTasks(service, envs)
 			if err != nil {
 				logrus.WithFields(logrus.Fields{
 					"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -145,7 +143,6 @@ func (a *Approval) periodicQueryAndSync() {
 			continue
 		}
 
-		// 3. 全局去重：基于 service + environment + version + confirmation_status
 		dedupedTasks := a.dedupeTasks(allTasks)
 		logrus.WithFields(logrus.Fields{
 			"time":         time.Now().Format("2006-01-02 15:04:05"),
@@ -154,10 +151,8 @@ func (a *Approval) periodicQueryAndSync() {
 			"duplicates":   len(allTasks) - len(dedupedTasks),
 		}).Infof("去重完成: %d 个唯一任务 (去除 %d 个重复)", len(dedupedTasks), len(allTasks)-len(dedupedTasks))
 
-		// 4. 存储/更新任务（新增生成 TaskID，Upsert）
 		totalNewTasks := 0
 		for _, task := range dedupedTasks {
-			// 生成唯一 TaskID（如果为空）
 			if task.TaskID == "" {
 				task.TaskID = uuid.New().String()
 				logrus.WithFields(logrus.Fields{
@@ -170,12 +165,10 @@ func (a *Approval) periodicQueryAndSync() {
 				}).Debugf("生成新 TaskID: %s", task.TaskID)
 			}
 
-			// 默认 status 如果为空
 			if task.ConfirmationStatus == "" {
 				task.ConfirmationStatus = "待确认"
 			}
 
-			// 存储主任务（使用第一个环境作为主）
 			if len(task.Environments) > 0 && task.Environment == "" {
 				task.Environment = task.Environments[0]
 			}
@@ -190,20 +183,18 @@ func (a *Approval) periodicQueryAndSync() {
 				continue
 			}
 
-			// 变更: 动态检查 mainEnv 是否在 ConfirmEnvs 来决定 isConfirmEnv（白名单只影响状态/弹窗，不影响查询/存储）
 			isMainConfirm := contains(a.cfg.Query.ConfirmEnvs, mainEnv)
 			a.handleStoredTask(task.TaskID, mainEnv, isMainConfirm)
 			totalNewTasks++
 
-			// 5. 多环境拆分：为 Environments 中的其他环境创建子任务（动态检查 subEnv 是否在 ConfirmEnvs 设状态）
 			storedCount := 0
 			for _, subEnv := range task.Environments {
 				if subEnv == mainEnv {
-					continue // 跳过主环境
+					continue
 				}
 				taskCopy := task
 				taskCopy.Environment = subEnv
-				taskCopy.TaskID = uuid.New().String() // 子任务独立 ID
+				taskCopy.TaskID = uuid.New().String()
 
 				if err := a.mongo.StoreTask(&taskCopy); err != nil {
 					logrus.WithFields(logrus.Fields{
@@ -213,7 +204,6 @@ func (a *Approval) periodicQueryAndSync() {
 						"sub_env": subEnv,
 					}).Errorf("存储子任务失败: %v", err)
 				} else {
-					// 变更: 动态检查 subEnv 是否在 ConfirmEnvs
 					isSubConfirm := contains(a.cfg.Query.ConfirmEnvs, subEnv)
 					storedCount++
 					a.handleStoredTask(taskCopy.TaskID, subEnv, isSubConfirm)

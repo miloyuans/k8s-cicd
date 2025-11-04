@@ -1,4 +1,4 @@
-// 文件: models/types.go (完整文件，确保 Environment 字段存在，用于去重和存储；其他字段保留)
+// 文件: models/types.go (完整文件，新增 PopupBotName 字段，用于存储发送弹窗的 Bot 名称，便于 Callback 处理时获取正确 Bot)
 package models
 
 import (
@@ -18,6 +18,7 @@ type DeployRequest struct {
 	PopupSent          bool      `json:"popup_sent" bson:"popup_sent"`                 // 是否已发送弹窗
 	PopupMessageID     int       `json:"popup_message_id" bson:"popup_message_id"`     // Telegram 消息ID
 	PopupSentAt        time.Time `json:"popup_sent_at" bson:"popup_sent_at"`           // 弹窗发送时间
+	PopupBotName       string    `json:"popup_bot_name" bson:"popup_bot_name"`         // 新增: 发送弹窗的 Bot 名称
 	TaskID             string    `json:"task_id" bson:"task_id,unique"`                // UUID v4 唯一ID (全局唯一，避免并发冲突)
 }
 
