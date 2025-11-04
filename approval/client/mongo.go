@@ -4,6 +4,7 @@
 //       修复 sort.Sort: bson.D 不实现 sort.Interface，直接迭代比较键值对 (假设顺序固定)，移除排序逻辑；
 //       修复 cursor.Next: 使用 cursor.Next(ctx) 返回 bool，检查 cursor.Err() 处理错误；
 //       新增: MarkPopupSent 方法，更新任务的 popup_sent=true + message_id + sent_at (跨环境搜索)，并插入 popup_data 记录 (TTL)；
+//       重新设计: initPushData 基于 cfg.EnvMapping.Mappings 自动生成服务-环境组合数据 (默认服务列表 + 每个 env 配全服务组合)，插入 push_data (去重，确保唯一)；如果已有数据，跳过；
 //       类似处理 popup_coll 的 TTL 索引删除；优化: 在 createIndexes 中统一处理 Drop 逻辑，增强日志；不改变任何功能。
 package client
 
@@ -786,8 +787,8 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 		"took":   time.Since(startTime),
 	}).Info("索引创建完成")
 
-	// 步骤3：初始化 push_data 组合记录
-	if err := initPushData(mongoClient); err != nil {
+	// 步骤3：初始化 push_data 组合记录 (重新设计: 动态生成)
+	if err := initPushData(mongoClient, cfg); err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "NewMongoClient",
@@ -816,8 +817,8 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	return m, nil
 }
 
-// initPushData 初始化 push_data 集合（如果为空，插入示例或确保存在）
-func initPushData(client *mongo.Client) error {
+// 重新设计: initPushData 基于 cfg.EnvMapping.Mappings 自动生成服务-环境组合数据 (默认服务列表 + 每个 env 配全服务组合)，插入 push_data (去重，确保唯一)；如果已有数据，跳过
+func initPushData(client *mongo.Client, cfg *config.MongoConfig) error {
 	ctx := context.Background()
 	collection := client.Database("cicd").Collection("push_data")
 
@@ -827,32 +828,59 @@ func initPushData(client *mongo.Client) error {
 		return fmt.Errorf("检查 push_data 计数失败: %v", err)
 	}
 
-	if count == 0 {
-		// 插入初始数据（示例，根据实际 push 逻辑调整）
-		initialData := []interface{}{
-			bson.M{
-				"service":     "example-service",
-				"environment": "eks",
-				"created_at":  time.Now(),
-			},
-			// 添加更多示例...
-		}
-		_, err = collection.InsertMany(ctx, initialData)
-		if err != nil {
-			return fmt.Errorf("初始化 push_data 数据失败: %v", err)
-		}
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "initPushData",
-			"inserted": len(initialData),
-		}).Info("push_data 初始化数据插入成功")
-	} else {
+	if count > 0 {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "initPushData",
 			"count":  count,
 		}).Debug("push_data 已存在数据，跳过初始化")
+		return nil
 	}
+
+	// 动态生成组合: 默认服务列表 (可从配置扩展)
+	defaultServices := []string{"example-service", "app1", "app2"} // 可从 cfg 添加服务配置
+	envs := make([]string, 0, len(cfg.EnvMapping.Mappings))
+	for env := range cfg.EnvMapping.Mappings {
+		envs = append(envs, env)
+	}
+
+	// 生成全组合: 每个服务 x 每个 env
+	initialData := make([]interface{}, 0)
+	for _, svc := range defaultServices {
+		for _, env := range envs {
+			// 去重检查 (可选: 先查询是否存在)
+			filter := bson.M{"service": svc, "environment": env}
+			if count, _ := collection.CountDocuments(ctx, filter); count == 0 {
+				initialData = append(initialData, bson.M{
+					"service":     svc,
+					"environment": env,
+					"created_at":  time.Now(),
+				})
+			}
+		}
+	}
+
+	if len(initialData) == 0 {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "initPushData",
+		}).Warn("无新组合数据生成，push_data 保持空")
+		return nil
+	}
+
+	// 批量插入 (忽略重复)
+	_, err = collection.InsertMany(ctx, initialData)
+	if err != nil {
+		return fmt.Errorf("初始化 push_data 数据失败: %v", err)
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":     time.Now().Format("2006-01-02 15:04:05"),
+		"method":   "initPushData",
+		"services": defaultServices,
+		"envs":     envs,
+		"inserted": len(initialData),
+	}).Infof("push_data 动态组合数据插入成功 (服务 x 环境: %d 组合)", len(initialData))
 	return nil
 }
 
