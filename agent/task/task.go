@@ -1,6 +1,6 @@
 // 文件: task/task.go
-// 修改: 移除未用导入 (context, metav1)；使用 k8s.SnapshotAndStoreImage 获取并存储快照。
-// 保留所有现有功能，包括锁、执行、重试等。
+// 修改: 移除所有 Debug 级别的空队列日志（避免刷屏）；仅保留关键 Info 日志。
+// 保留所有核心功能：防重复入队、快照、回滚、状态更新、并发串行、队列限流等。
 
 package task
 
@@ -93,7 +93,7 @@ func (q *TaskQueue) StartWorkers(cfg *config.Config, mongo *client.MongoClient, 
 	}
 }
 
-// worker 执行任务（Dequeue后立即更新confirmation_status="已执行"；增强日志）
+// worker 执行任务（Dequeue后立即更新confirmation_status="已执行"；仅保留关键日志）
 func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, workerID int) {
 	defer q.wg.Done()
 
@@ -107,7 +107,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 		default:
 			task, ok := q.Dequeue()
 			if !ok {
-				logrus.Debugf("Worker-%d: 队列为空，sleep 1s", workerID)  // 新增: 空队列日志 (Debug避免刷屏)
+				// 移除 Debug 空队列日志，避免刷屏
 				time.Sleep(1 * time.Second)
 				continue
 			}
@@ -341,7 +341,7 @@ func (q *TaskQueue) Enqueue(task *Task) {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "Enqueue",
 		"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID},
-	}).Infof(color.GreenString("任务已入队: %s (队列长度: %d/%d)"), task.DeployRequest.TaskID, q.queue.Len(), q.maxQueueSize)  // 修复: 使用当前 Len()
+	}).Infof(color.GreenString("任务已入队: %s (队列长度: %d/%d)"), task.DeployRequest.TaskID, q.queue.Len(), q.maxQueueSize)
 }
 
 // Dequeue 出队
