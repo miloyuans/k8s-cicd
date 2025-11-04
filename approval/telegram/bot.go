@@ -361,6 +361,7 @@ func (bm *BotManager) handleUpdates() {
 }
 
 // HandleCallback 处理回调查询（优化: 从任务获取 PopupBotName 获取 Bot，用于 DeleteMessage 和 sendMessage；调整状态、反馈消息，并添加立即删除操作）
+// 文件: telegram/bot.go 中的 HandleCallback 函数完整代码（变更：将 chatID 从 string 断言改为 float64 转 string，以修复 interface conversion panic；messageID 已正确处理）
 func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
 	startTime := time.Now()
 
@@ -370,7 +371,12 @@ func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
 	username := user["username"].(string)
 	userID := int(user["id"].(float64))
 	message := callback["message"].(map[string]interface{})
-	chatID := message["chat"].(map[string]interface{})["id"].(string)
+
+	// 变更: chatID 从 float64 转为 string，避免类型断言 panic
+	chatMap := message["chat"].(map[string]interface{})
+	chatIDFloat := chatMap["id"].(float64)
+	chatID := fmt.Sprintf("%d", int(chatIDFloat))
+
 	messageID := int(message["message_id"].(float64))
 
 	parts := strings.Split(data, "-")
@@ -393,7 +399,7 @@ func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
 		return
 	}
 
-	// 新增: 从任务获取 PopupBotName 获取 Bot
+	// 从任务获取 PopupBotName 获取 Bot
 	botName := task.PopupBotName
 	bot, exists := bm.Bots[botName]
 	if !exists {
