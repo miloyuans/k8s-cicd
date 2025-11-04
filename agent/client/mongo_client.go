@@ -1,6 +1,8 @@
 // 文件: client/mongo_client.go
-// 修改: 新增 UpdateConfirmationStatus 方法，用于更新 confirmation_status 按 TaskID。
-// 保留所有现有功能。
+// 修改后的 client/mongo_client.go：
+// - GetTasksByStatus: filter 改为 {"confirmation_status": status}，以匹配数据中的确认状态字段。
+// - 保留所有现有功能，包括 sanitizeEnv、索引、push_data 等。
+// 新增 UpdateConfirmationStatus 方法，用于更新 confirmation_status 按 TaskID。
 
 package client
 
@@ -9,8 +11,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-//	"github.com/google/uuid"
 
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
@@ -121,8 +121,8 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	// 2. 为 image_snapshots 创建 TTL 索引 (RecordedAt)
 	imageSnapshotsColl := client.Database("cicd").Collection("image_snapshots")
 	_, err := imageSnapshotsColl.Indexes().CreateOne(ctx, mongo.IndexModel{
-			Keys:    bson.D{{Key: "recorded_at", Value: 1}},
-			Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
+		Keys:    bson.D{{Key: "recorded_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
 	})
 	if err != nil {
 		return fmt.Errorf("创建 image_snapshots TTL 索引失败: %v", err)
