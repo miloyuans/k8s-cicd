@@ -1,4 +1,5 @@
-// 修改后的 main.go：增强优雅关闭，添加超时后强制退出；资源约束已在 config。
+// 修改后的 main.go：移除冗余的 taskQ.maxQueueSize 赋值，因为 NewTaskQueue 已通过参数设置 MaxQueueSize。
+// 保留所有现有功能，包括优雅关闭等。
 
 package main
 
@@ -62,8 +63,7 @@ func main() {
 	botMgr := telegram.NewBotManager(&cfg.Telegram) // 传入配置
 
 	// 步骤7：初始化任务队列（资源约束: MaxQueueSize）
-	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers, cfg.Task.MaxQueueSize) // 修复：传入两个参数
-	taskQ.maxQueueSize = cfg.Task.MaxQueueSize // 假设添加字段
+	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers, cfg.Task.MaxQueueSize) // 已通过参数设置，无需重复赋值
 
 	// 步骤8：组装 Agent（字段名大写）
 	ag := &agent.Agent{
