@@ -2,12 +2,14 @@ package task
 
 import (
 	"container/list"
+	"context"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/client"
