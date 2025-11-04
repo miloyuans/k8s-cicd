@@ -1,9 +1,8 @@
 // 修改后的 client/mongo_client.go：
-// - 确认 push_data 集合在 "cicd" 数据库中。
-// - StorePushData：每次调用时清空集合（DeleteMany），然后插入所有 service-environment 组合文档（全量格式化）。
-// - 这确保了系统重启时（通过 initialFullPush 调用 StorePushData），无论集合是否存在，都会初始化清空并重写。
-// - GetPushData：从集合中收集所有文档，提取去重 Services 和 Environments。
-// - 保留所有现有功能，包括 TTL 索引、唯一索引、HasChanges 等。
+// - 确认所有任务相关操作（如 GetTasksByStatus, StoreTask, UpdateTaskStatus, CheckDuplicateTask）使用 sanitizeEnv(env) 处理环境名中的 "-" 转为 "_"，集合名为 "tasks_${sanitized_env}"。
+// - 发布任务功能（轮询/执行）通过 GetTasksByStatus 查询 cicd.tasks_${sanitized_env} 获取任务数据。
+// - K8s 命名空间执行使用配置文件 EnvMapping.Mappings[env] = namespace，无需 sanitize（namespace 假设无 - 或已处理）。
+// - 保留所有现有功能，包括索引、TTL、push_data 等。
 
 package client
 
@@ -163,7 +162,7 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	return nil
 }
 
-// GetTasksByStatus 获取指定状态的任务，按 created_at 升序排序（使用 sanitized env）
+// GetTasksByStatus 获取指定状态的任务，按 created_at 升序排序（使用 sanitized env，查询 cicd.tasks_${sanitized_env}）
 func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -180,7 +179,7 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetTasksByStatus",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("查询任务失败 [%s]: %v"), env, err)
+		}).Errorf(color.RedString("查询任务失败 [%s, 集合: tasks_%s]: %v"), env, sanitizedEnv, err)
 		return nil, err
 	}
 	defer cursor.Close(ctx)
@@ -199,11 +198,11 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "GetTasksByStatus",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("查询任务成功 [%s]: %d 个"), env, len(tasks))
+	}).Infof(color.GreenString("查询任务成功 [%s, 集合: tasks_%s]: %d 个"), env, sanitizedEnv, len(tasks))
 	return tasks, nil
 }
 
-// StoreTask 存储任务（使用 sanitized env）
+// StoreTask 存储任务（使用 sanitized env，插入到 cicd.tasks_${sanitized_env}）
 func (m *MongoClient) StoreTask(task models.DeployRequest) error {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -225,7 +224,7 @@ func (m *MongoClient) StoreTask(task models.DeployRequest) error {
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "StoreTask",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("存储任务失败 [%s]: %v"), task.Environments[0], err)
+		}).Errorf(color.RedString("存储任务失败 [%s, 集合: tasks_%s]: %v"), task.Environments[0], sanitizedEnv, err)
 		return err
 	}
 
@@ -233,11 +232,11 @@ func (m *MongoClient) StoreTask(task models.DeployRequest) error {
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "StoreTask",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("任务存储成功: %s [%s]"), task.TaskID, task.Environments[0])
+	}).Infof(color.GreenString("任务存储成功: %s [%s, 集合: tasks_%s]"), task.TaskID, task.Environments[0], sanitizedEnv)
 	return nil
 }
 
-// UpdateTaskStatus 更新任务状态（使用 sanitized env）
+// UpdateTaskStatus 更新任务状态（使用 sanitized env，更新 cicd.tasks_${sanitized_env}）
 func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status string) error {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -255,13 +254,13 @@ func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status strin
 		"updated_at": time.Now(),
 	}}
 
-	_, err := collection.UpdateMany(ctx, filter, update)
+	result, err := collection.UpdateMany(ctx, filter, update)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateTaskStatus",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("更新任务状态失败 [%s]: %v"), env, err)
+		}).Errorf(color.RedString("更新任务状态失败 [%s, 集合: tasks_%s]: %v"), env, sanitizedEnv, err)
 		return err
 	}
 
@@ -269,7 +268,7 @@ func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status strin
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "UpdateTaskStatus",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("任务状态更新成功 [%s]: %s"), env, status)
+	}).Infof(color.GreenString("任务状态更新成功 [%s, 集合: tasks_%s]: 更新 %d 文档"), env, sanitizedEnv, result.ModifiedCount)
 	return nil
 }
 
@@ -299,7 +298,7 @@ func (m *MongoClient) StoreImageSnapshot(snapshot *models.ImageSnapshot) error {
 	return nil
 }
 
-// CheckDuplicateTask 检查任务是否重复（使用 sanitized env）
+// CheckDuplicateTask 检查任务是否重复（使用 sanitized env，查询 cicd.tasks_${sanitized_env}）
 func (m *MongoClient) CheckDuplicateTask(task models.DeployRequest) (bool, error) {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -319,7 +318,7 @@ func (m *MongoClient) CheckDuplicateTask(task models.DeployRequest) (bool, error
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "CheckDuplicateTask",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("检查重复任务失败: %v"), err)
+		}).Errorf(color.RedString("检查重复任务失败 [%s, 集合: tasks_%s]: %v"), task.Environments[0], sanitizedEnv, err)
 		return false, err
 	}
 
@@ -328,7 +327,7 @@ func (m *MongoClient) CheckDuplicateTask(task models.DeployRequest) (bool, error
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "CheckDuplicateTask",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("任务重复检查: %t"), isDuplicate)
+	}).Infof(color.GreenString("任务重复检查 [%s, 集合: tasks_%s]: %t"), task.Environments[0], sanitizedEnv, isDuplicate)
 	return isDuplicate, nil
 }
 
