@@ -1,5 +1,4 @@
-// 修改后的 client/mongo_client.go：添加 sanitizeEnv 函数，用于将环境名中的 "-" 替换为 "_" 以符合 MongoDB 集合命名规范。
-// 在 createTTLIndexes、GetTasksByStatus、StoreTask、UpdateTaskStatus、StoreImageSnapshot、CheckDuplicateTask 等函数中，使用 sanitized env 作为集合名。
+// 修改后的 client/mongo_client.go：添加缺失的导入 "strings" 和 "github.com/google/uuid"。
 // 保留所有现有功能，包括索引创建、TTL、唯一索引、排序等。
 
 package client
@@ -7,7 +6,9 @@ package client
 import (
 	"context"
 	"fmt"
+	"strings" // 新增：用于 sanitizeEnv
 	"time"
+	"github.com/google/uuid" // 新增：用于 StoreTask 中的 UUID 生成
 
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
