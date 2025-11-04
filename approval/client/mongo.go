@@ -1,8 +1,9 @@
 // 文件: mongo.go (完整文件，优化: 集合命名基于 clean_env (env replace "-" with "_") 如 tasks_eks_test，避免 namespace 冲突；添加 validateAndCleanData 在 createIndexes 前清理 null environment 和潜在重复；Drop 现有索引再创建，确保无违反唯一性；其他功能保留)
 // 修复: 添加 import "go.mongodb.org/mongo-driver/bson/primitive" 以解决 undefined: primitive；
-//       修改 DropOne 调用: 先 List 索引，找到匹配 Keys 的索引名称 (e.g., "created_at_1")，然后 DropOne(name string)，避免类型错误；
-//       类似处理 popup_coll 的 TTL 索引删除；
-//       优化: 在 createIndexes 中统一处理 Drop 逻辑，增强日志；不改变任何功能。
+//       修改 DropOne 调用: 先 List 找到匹配 Keys 的索引名称 (e.g., "created_at_1")，然后 DropOne(name string)，避免类型错误；
+//       修复 sort.Sort: bson.D 不实现 sort.Interface，直接迭代比较键值对 (假设顺序固定)，移除排序逻辑；
+//       修复 cursor.Next: 使用 ok, err := cursor.Next(ctx); if err != nil { ... } if !ok { ... } 处理两个返回值；
+//       类似处理 popup_coll 的 TTL 索引删除；优化: 在 createIndexes 中统一处理 Drop 逻辑，增强日志；不改变任何功能。
 package client
 
 import (
@@ -159,7 +160,7 @@ func dropIndexByKeys(ctx context.Context, collection *mongo.Collection, keys bso
 		if !ok {
 			continue
 		}
-		// 比较 Keys (简化: 假设单键或简单匹配)
+		// 比较 Keys (修复: 直接迭代比较元素，假设顺序固定)
 		if matchKeys(idxKeys, keys) {
 			targetIndexName = idx["name"].(string)
 			logrus.WithFields(logrus.Fields{
@@ -210,18 +211,23 @@ func dropIndexByKeys(ctx context.Context, collection *mongo.Collection, keys bso
 	return nil
 }
 
-// 辅助函数: matchKeys 简单匹配索引 Keys (支持单键或复合)
+// 辅助函数: matchKeys 简单匹配索引 Keys (支持单键或复合，直接迭代比较)
 func matchKeys(idxKeys bson.M, targetKeys bson.D) bool {
 	// 转换为 D 以比较
 	var idxD bson.D
 	for k, v := range idxKeys {
 		idxD = append(idxD, bson.E{Key: k, Value: v})
 	}
-	sort.Sort(idxD) // 排序以比较
-	targetSorted := make(bson.D, len(targetKeys))
-	copy(targetSorted, targetKeys)
-	sort.Sort(targetSorted)
-	return fmt.Sprint(idxD) == fmt.Sprint(targetSorted)
+	// 修复: 直接比较长度和每个元素 (假设顺序一致，无需 sort)
+	if len(idxD) != len(targetKeys) {
+		return false
+	}
+	for i := range targetKeys {
+		if idxD[i].Key != targetKeys[i].Key || idxD[i].Value != targetKeys[i].Value {
+			return false
+		}
+	}
+	return true
 }
 
 // 优化: createIndexes 先清理数据 + Drop 现有索引 (使用 dropIndexByKeys 忽略不存在错误) + 创建新索引
@@ -494,12 +500,18 @@ func (m *MongoClient) GetPushedServicesAndEnvs() ([]string, []string, error) {
 	}
 	defer cursor.Close(ctx)
 
-	var result bson.M
-	if err := cursor.Next(ctx); err != nil {
-		return nil, nil, err
+	// 修复: 使用 ok, err := cursor.Next(ctx)
+	ok, err := cursor.Next(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cursor.Next 失败: %v", err)
 	}
+	if !ok {
+		return []string{}, []string{}, nil // 无结果，返回空列表
+	}
+
+	var result bson.M
 	if err := cursor.Decode(&result); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("解码聚合结果失败: %v", err)
 	}
 
 	services, _ := result["services"].(primitive.A)
