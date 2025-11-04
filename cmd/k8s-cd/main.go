@@ -1,4 +1,5 @@
-// 修改后的 main.go：移除冗余的 taskQ.maxQueueSize 赋值，因为 NewTaskQueue 已通过参数设置 MaxQueueSize。
+// 文件: main.go
+// 修改: 在 NewTaskQueue 后添加日志打印 workers 和 maxQueueSize 配置，便于调试。
 // 保留所有现有功能，包括优雅关闭等。
 
 package main
@@ -64,6 +65,7 @@ func main() {
 
 	// 步骤7：初始化任务队列（资源约束: MaxQueueSize）
 	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers, cfg.Task.MaxQueueSize) // 已通过参数设置，无需重复赋值
+	logrus.Infof(color.GreenString("任务队列配置: workers=%d, max_size=%d"), cfg.Task.QueueWorkers, cfg.Task.MaxQueueSize)  // 新增: 配置日志
 
 	// 步骤8：组装 Agent（字段名大写）
 	ag := &agent.Agent{

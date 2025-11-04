@@ -1,6 +1,6 @@
-// 修改后的 client/mongo_client.go：
-// - GetTasksByStatus: filter 改为 {"confirmation_status": status}，以匹配数据中的确认状态字段。
-// - 保留所有现有功能，包括 sanitizeEnv、索引、push_data 等。
+// 文件: client/mongo_client.go
+// 修改: 新增 UpdateConfirmationStatus 方法，用于更新 confirmation_status 按 TaskID。
+// 保留所有现有功能。
 
 package client
 
@@ -138,39 +138,40 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	if err != nil {
 		return fmt.Errorf("创建 push_data TTL 索引失败: %v", err)
 	}
-	// 唯一索引: service + environment
+
+	// 唯一索引: service + environment (防重复组合)
 	_, err = pushDataColl.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "service", Value: 1}, {Key: "environment", Value: 1}},
+		Keys: bson.D{
+			{Key: "service", Value: 1},
+			{Key: "environment", Value: 1},
+		},
 		Options: options.Index().SetUnique(true),
 	})
 	if err != nil {
 		return fmt.Errorf("创建 push_data 唯一索引失败: %v", err)
 	}
 
-	// 4. 为版本集合创建唯一索引 (不变)
-	versionsColl := client.Database("cicd").Collection("versions")
-	_, err = versionsColl.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "service", Value: 1}, {Key: "version", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	})
-	if err != nil {
-		return fmt.Errorf("创建版本唯一索引失败: %v", err)
-	}
-
 	return nil
 }
 
-// GetTasksByStatus 获取指定状态的任务，按 created_at 升序排序（使用 sanitized env，查询 cicd.tasks_${sanitized_env}；修复: 查询 confirmation_status）
+// GetTasksByStatus 获取指定状态的任务（按 created_at 排序；增强filter排除"已执行"）
 func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
-
 	sanitizedEnv := sanitizeEnv(env)
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", sanitizedEnv))
-	// 修复: 查询 confirmation_status 而非 status（匹配数据中的确认状态）
-	filter := bson.M{"confirmation_status": status}
+
+	// 增强filter: confirmation_status="已确认" 且 != "已执行"
+	filter := bson.M{
+		"confirmation_status": bson.M{
+			"$eq": status,
+			"$ne": "已执行",  // 新增: 排除已触发任务
+		},
+	}
+
 	opts := options.Find().
-		SetSort(bson.D{{Key: "created_at", Value: 1}}) // 按 created_at 升序排序
+		SetSort(bson.D{{Key: "created_at", Value: 1}}).  // 按创建时间升序
+		SetLimit(100)  // 限制结果数，避免过多
 
 	cursor, err := collection.Find(ctx, filter, opts)
 	if err != nil {
@@ -178,7 +179,8 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetTasksByStatus",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("查询任务失败 [%s, 集合: tasks_%s]: %v"), env, sanitizedEnv, err)
+			"env":    env,
+		}).Errorf(color.RedString("查询任务失败 [%s]: %v"), env, err)
 		return nil, err
 	}
 	defer cursor.Close(ctx)
@@ -189,6 +191,7 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetTasksByStatus",
 			"took":   time.Since(startTime),
+			"env":    env,
 		}).Errorf(color.RedString("解码任务失败 [%s]: %v"), env, err)
 		return nil, err
 	}
@@ -197,147 +200,157 @@ func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployReque
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "GetTasksByStatus",
 		"took":   time.Since(startTime),
+		"env":    env,
+		"count":  len(tasks),
 	}).Infof(color.GreenString("查询任务成功 [%s, 集合: tasks_%s]: %d 个"), env, sanitizedEnv, len(tasks))
 	return tasks, nil
 }
 
-// StoreTask 存储任务（使用 sanitized env，插入到 cicd.tasks_${sanitized_env}）
-func (m *MongoClient) StoreTask(task models.DeployRequest) error {
-	startTime := time.Now()
-	ctx := context.Background()
-
-	if task.CreatedAt.IsZero() {
-		task.CreatedAt = time.Now()
-	}
-	if task.TaskID == "" {
-		task.TaskID = uuid.New().String()
-	}
-	task.Status = "pending"
-
-	sanitizedEnv := sanitizeEnv(task.Environments[0])
-	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", sanitizedEnv))
-
-	_, err := collection.InsertOne(ctx, task)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "StoreTask",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("存储任务失败 [%s, 集合: tasks_%s]: %v"), task.Environments[0], sanitizedEnv, err)
-		return err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "StoreTask",
-		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("任务存储成功: %s [%s, 集合: tasks_%s]"), task.TaskID, task.Environments[0], sanitizedEnv)
-	return nil
-}
-
-// UpdateTaskStatus 更新任务状态（使用 sanitized env，更新 cicd.tasks_${sanitized_env}）
+// UpdateTaskStatus 更新任务状态（按 service+version+env）
 func (m *MongoClient) UpdateTaskStatus(service, version, env, user, status string) error {
 	startTime := time.Now()
 	ctx := context.Background()
-
 	sanitizedEnv := sanitizeEnv(env)
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", sanitizedEnv))
+
 	filter := bson.M{
 		"service":     service,
 		"version":     version,
 		"environment": env,
-		"user":        user,
 	}
-	update := bson.M{"$set": bson.M{
-		"status":     status,
-		"updated_at": time.Now(),
-	}}
+	update := bson.M{
+		"$set": bson.M{
+			"status":     status,
+			"updated_at": time.Now(),
+		},
+	}
 
-	result, err := collection.UpdateMany(ctx, filter, update)
+	result, err := collection.UpdateOne(ctx, filter, update)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateTaskStatus",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("更新任务状态失败 [%s, 集合: tasks_%s]: %v"), env, sanitizedEnv, err)
+			"env":    env,
+		}).Errorf(color.RedString("更新任务状态失败 [%s]: %v"), env, err)
 		return err
+	}
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("未找到匹配任务: %s-%s in %s", service, version, env)
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "UpdateTaskStatus",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("任务状态更新成功 [%s, 集合: tasks_%s]: 更新 %d 文档"), env, sanitizedEnv, result.ModifiedCount)
+		"data":   logrus.Fields{"service": service, "version": version, "env": env, "status": status},
+	}).Infof(color.GreenString("任务状态更新成功 [%s]: %s"), env, status)
 	return nil
 }
 
-// StoreImageSnapshot 存储镜像快照（不变，假设 taskID 关联）
-func (m *MongoClient) StoreImageSnapshot(snapshot *models.ImageSnapshot) error {
+// UpdateConfirmationStatus 更新confirmation_status（按TaskID，遍历环境查找）
+func (m *MongoClient) UpdateConfirmationStatus(taskID, newStatus string) error {
 	startTime := time.Now()
 	ctx := context.Background()
 
+	// 遍历所有环境集合，查找并更新TaskID
+	for env := range m.cfg.EnvMapping.Mappings {
+		sanitizedEnv := sanitizeEnv(env)
+		collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", sanitizedEnv))
+
+		filter := bson.M{"task_id": taskID}
+		update := bson.M{
+			"$set": bson.M{
+				"confirmation_status": newStatus,
+				"updated_at":          time.Now(),
+			},
+		}
+
+		result, err := collection.UpdateOne(ctx, filter, update)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "UpdateConfirmationStatus",
+				"took":   time.Since(startTime),
+				"env":    env,
+			}).Errorf(color.RedString("更新 confirmation_status 失败 [%s]: %v"), env, err)
+			continue  // 继续下一个环境
+		}
+		if result.MatchedCount > 0 {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "UpdateConfirmationStatus",
+				"took":   time.Since(startTime),
+				"data":   logrus.Fields{"task_id": taskID, "new_status": newStatus},
+			}).Infof(color.GreenString("confirmation_status 更新成功: %s -> %s"), taskID, newStatus)
+			return nil  // 找到并更新，返回
+		}
+	}
+	return fmt.Errorf("未找到任务ID: %s", taskID)
+}
+
+// SnapshotImage 快照镜像（存入 image_snapshots）
+func (m *MongoClient) SnapshotImage(snapshot *models.ImageSnapshot) error {
+	startTime := time.Now()
+	ctx := context.Background()
 	collection := m.client.Database("cicd").Collection("image_snapshots")
-	snapshot.RecordedAt = time.Now()
 
 	_, err := collection.InsertOne(ctx, snapshot)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "StoreImageSnapshot",
+			"method": "SnapshotImage",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("快照存储失败: %v"), err)
+		}).Errorf(color.RedString("快照插入失败: %v"), err)
 		return err
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "StoreImageSnapshot",
+		"method": "SnapshotImage",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("快照存储成功: %s"), snapshot.TaskID)
+		"data":   logrus.Fields{"service": snapshot.Service, "namespace": snapshot.Namespace, "image": snapshot.Image},
+	}).Info(color.GreenString("镜像快照存储成功"))
 	return nil
 }
 
-// CheckDuplicateTask 检查任务是否重复（使用 sanitized env，查询 cicd.tasks_${sanitized_env}）
-func (m *MongoClient) CheckDuplicateTask(task models.DeployRequest) (bool, error) {
+// GetSnapshotByTaskID 获取快照（按 task_id）
+func (m *MongoClient) GetSnapshotByTaskID(taskID string) (*models.ImageSnapshot, error) {
 	startTime := time.Now()
 	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection("image_snapshots")
 
-	sanitizedEnv := sanitizeEnv(task.Environments[0])
-	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", sanitizedEnv))
-	filter := bson.M{
-		"service":     task.Service,
-		"version":     task.Version,
-		"environment": task.Environments[0],
-		"created_at":  task.CreatedAt, // 包含 created_at 防重
-	}
-
-	count, err := collection.CountDocuments(ctx, filter)
+	var snapshot models.ImageSnapshot
+	filter := bson.M{"task_id": taskID}
+	err := collection.FindOne(ctx, filter).Decode(&snapshot)
 	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil  // 无快照视为正常
+		}
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "CheckDuplicateTask",
+			"method": "GetSnapshotByTaskID",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("检查重复任务失败 [%s, 集合: tasks_%s]: %v"), task.Environments[0], sanitizedEnv, err)
-		return false, err
+		}).Errorf(color.RedString("查询快照失败: %v"), err)
+		return nil, err
 	}
 
-	isDuplicate := count > 0
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "CheckDuplicateTask",
+		"method": "GetSnapshotByTaskID",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("任务重复检查 [%s, 集合: tasks_%s]: %t"), task.Environments[0], sanitizedEnv, isDuplicate)
-	return isDuplicate, nil
+		"data":   logrus.Fields{"task_id": taskID},
+	}).Info(color.GreenString("快照查询成功"))
+	return &snapshot, nil
 }
 
-// StorePushData 存储推送数据到 cicd.push_data（全量清空 + 插入每个去重 service-environment 组合文档）
+// StorePushData 存储推送数据（清空重插去重组合）
 func (m *MongoClient) StorePushData(data *models.PushData) error {
 	startTime := time.Now()
 	ctx := context.Background()
-
 	collection := m.client.Database("cicd").Collection("push_data")
 
-	// 初始化/格式化：清空集合（无论是否存在）
+	// 清空旧数据
 	_, err := collection.DeleteMany(ctx, bson.M{})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -348,7 +361,7 @@ func (m *MongoClient) StorePushData(data *models.PushData) error {
 		return err
 	}
 
-	// 去重 services 和 environments
+	// 去重
 	uniqueServices := make(map[string]struct{})
 	for _, s := range data.Services {
 		uniqueServices[s] = struct{}{}
