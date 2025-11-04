@@ -234,6 +234,7 @@ func matchKeys(idxKeys bson.M, targetKeys bson.D) bool {
 
 // 新增: MarkPopupSent 标记弹窗已发送 (更新任务 + 插入 popup_data 记录)
 // 文件: client/mongo.go 中的 MarkPopupSent 函数完整代码（变更：新增 botName 参数，更新任务的 popup_bot_name 字段）
+// 文件: client/mongo.go 中的 MarkPopupSent 函数完整代码（变更：新增 botName 参数，更新任务的 popup_bot_name 字段）
 func (m *MongoClient) MarkPopupSent(taskID string, messageID int, botName string) error {
 	startTime := time.Now()
 	ctx := context.Background()
