@@ -1,8 +1,6 @@
 // 修改后的 client/mongo_client.go：
-// - 确认所有任务相关操作（如 GetTasksByStatus, StoreTask, UpdateTaskStatus, CheckDuplicateTask）使用 sanitizeEnv(env) 处理环境名中的 "-" 转为 "_"，集合名为 "tasks_${sanitized_env}"。
-// - 发布任务功能（轮询/执行）通过 GetTasksByStatus 查询 cicd.tasks_${sanitized_env} 获取任务数据。
-// - K8s 命名空间执行使用配置文件 EnvMapping.Mappings[env] = namespace，无需 sanitize（namespace 假设无 - 或已处理）。
-// - 保留所有现有功能，包括索引、TTL、push_data 等。
+// - GetTasksByStatus: filter 改为 {"confirmation_status": status}，以匹配数据中的确认状态字段。
+// - 保留所有现有功能，包括 sanitizeEnv、索引、push_data 等。
 
 package client
 
@@ -162,14 +160,15 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	return nil
 }
 
-// GetTasksByStatus 获取指定状态的任务，按 created_at 升序排序（使用 sanitized env，查询 cicd.tasks_${sanitized_env}）
+// GetTasksByStatus 获取指定状态的任务，按 created_at 升序排序（使用 sanitized env，查询 cicd.tasks_${sanitized_env}；修复: 查询 confirmation_status）
 func (m *MongoClient) GetTasksByStatus(env, status string) ([]models.DeployRequest, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 
 	sanitizedEnv := sanitizeEnv(env)
 	collection := m.client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", sanitizedEnv))
-	filter := bson.M{"status": status}
+	// 修复: 查询 confirmation_status 而非 status（匹配数据中的确认状态）
+	filter := bson.M{"confirmation_status": status}
 	opts := options.Find().
 		SetSort(bson.D{{Key: "created_at", Value: 1}}) // 按 created_at 升序排序
 
