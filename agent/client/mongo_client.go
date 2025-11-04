@@ -1,14 +1,19 @@
-// 修改后的 client/mongo_client.go：添加缺失的导入 "strings" 和 "github.com/google/uuid"。
-// 保留所有现有功能，包括索引创建、TTL、唯一索引、排序等。
+// 修改后的 client/mongo_client.go：
+// - 将 push_data 集合从 "pushlist" 改为 "cicd" 数据库。
+// - 在 createTTLIndexes 中，为 push_data 添加复合唯一索引 {service:1, environment:1}。
+// - 修改 StorePushData：当调用时，进行全量替换（DeleteMany + InsertOne 每个 combo），使用去重 services 和 environments 创建每个 service-environment 组合的文档。
+// - 修改 GetPushData：查询所有文档，收集去重的 Services 和 Environments 到 PushData（如果无文档，返回 nil）。
+// - 保留所有现有功能，包括 TTL 索引、HasChanges 等。
 
 package client
 
 import (
 	"context"
 	"fmt"
-	"strings" // 新增：用于 sanitizeEnv
+	"strings"
 	"time"
-	"github.com/google/uuid" // 新增：用于 StoreTask 中的 UUID 生成
+
+	"github.com/google/uuid"
 
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/models"
@@ -83,7 +88,7 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	return &MongoClient{client: client, cfg: cfg}, nil
 }
 
-// createTTLIndexes 创建 TTL、排序和唯一索引（使用 sanitized env）
+// createTTLIndexes 创建 TTL、排序和唯一索引（使用 sanitized env；push_data 移至 cicd，并添加唯一索引）
 func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	ctx := context.Background()
 
@@ -126,14 +131,23 @@ func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 		return fmt.Errorf("创建 image_snapshots TTL 索引失败: %v", err)
 	}
 
-	// 3. 为 pushlist.push_data 创建 TTL 索引 (UpdatedAt, 单文档但仍添加)
-	pushDataColl := client.Database("pushlist").Collection("push_data")
+	// 3. 为 cicd.push_data 创建 TTL 和唯一索引 (UpdatedAt -> created_at, 每个 service-environment 组合唯一)
+	pushDataColl := client.Database("cicd").Collection("push_data")
+	// TTL 索引
 	_, err = pushDataColl.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "updated_at", Value: 1}},
+		Keys:    bson.D{{Key: "created_at", Value: 1}},
 		Options: options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())),
 	})
 	if err != nil {
 		return fmt.Errorf("创建 push_data TTL 索引失败: %v", err)
+	}
+	// 唯一索引: service + environment
+	_, err = pushDataColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "service", Value: 1}, {Key: "environment", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	if err != nil {
+		return fmt.Errorf("创建 push_data 唯一索引失败: %v", err)
 	}
 
 	// 4. 为版本集合创建唯一索引 (不变)
@@ -318,68 +332,137 @@ func (m *MongoClient) CheckDuplicateTask(task models.DeployRequest) (bool, error
 	return isDuplicate, nil
 }
 
-// StorePushData 存储推送数据到 pushlist 数据库
+// StorePushData 存储推送数据到 cicd.push_data（全量替换：清空 + 插入每个 service-environment 组合文档）
 func (m *MongoClient) StorePushData(data *models.PushData) error {
 	startTime := time.Now()
 	ctx := context.Background()
 
-	collection := m.client.Database("pushlist").Collection("push_data")
-	data.UpdatedAt = time.Now()
+	collection := m.client.Database("cicd").Collection("push_data")
 
-	// 使用 Upsert 模式：替换整个文档
-	filter := bson.M{"_id": "global_push_data"} // 固定 ID 用于全量存储
-	update := bson.M{"$set": data}
-
-	_, err := collection.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true))
+	// 全量替换：清空集合（格式化）
+	_, err := collection.DeleteMany(ctx, bson.M{})
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "StorePushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("存储推送数据失败: %v"), err)
+		}).Errorf(color.RedString("清空 push_data 失败: %v"), err)
 		return err
 	}
+
+	// 去重 services 和 environments
+	uniqueServices := make(map[string]struct{})
+	for _, s := range data.Services {
+		uniqueServices[s] = struct{}{}
+	}
+	uniqueEnvs := make(map[string]struct{})
+	for _, e := range data.Environments {
+		uniqueEnvs[e] = struct{}{}
+	}
+
+	now := time.Now()
+	insertedCount := 0
+	for s := range uniqueServices {
+		for e := range uniqueEnvs {
+			doc := bson.M{
+				"service":     s,
+				"environment": e,
+				"created_at":  now,
+			}
+			_, err := collection.InsertOne(ctx, doc)
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "StorePushData",
+					"took":   time.Since(startTime),
+				}).Errorf(color.RedString("插入 push_data 文档失败 [%s-%s]: %v"), s, e, err)
+				return err
+			}
+			insertedCount++
+		}
+	}
+
+	data.UpdatedAt = now
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "StorePushData",
 		"took":   time.Since(startTime),
 		"data": logrus.Fields{
-			"service_count": len(data.Services),
-			"env_count":     len(data.Environments),
+			"service_count": len(uniqueServices),
+			"env_count":     len(uniqueEnvs),
+			"inserted_docs": insertedCount,
 		},
-	}).Infof(color.GreenString("推送数据存储成功"))
+	}).Infof(color.GreenString("推送数据全量存储成功（格式化并插入 %d 个组合）"), insertedCount)
 	return nil
 }
 
-// GetPushData 获取存储的推送数据
+// GetPushData 获取存储的推送数据（从 push_data 收集去重 services 和 environments）
 func (m *MongoClient) GetPushData() (*models.PushData, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 
-	collection := m.client.Database("pushlist").Collection("push_data")
-	filter := bson.M{"_id": "global_push_data"}
+	collection := m.client.Database("cicd").Collection("push_data")
+	filter := bson.M{}
 
-	var data models.PushData
-	err := collection.FindOne(ctx, filter).Decode(&data)
-	if err == mongo.ErrNoDocuments {
-		return nil, nil // 无数据视为首次
-	}
+	cursor, err := collection.Find(ctx, filter)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetPushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("获取推送数据失败: %v"), err)
+		}).Errorf(color.RedString("查询 push_data 失败: %v"), err)
 		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var docs []bson.M
+	if err = cursor.All(ctx, &docs); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetPushData",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("解码 push_data 失败: %v"), err)
+		return nil, err
+	}
+
+	if len(docs) == 0 {
+		return nil, nil // 无数据视为首次
+	}
+
+	// 收集去重 services 和 environments
+	serviceSet := make(map[string]struct{})
+	envSet := make(map[string]struct{})
+	for _, doc := range docs {
+		if s, ok := doc["service"].(string); ok {
+			serviceSet[s] = struct{}{}
+		}
+		if e, ok := doc["environment"].(string); ok {
+			envSet[e] = struct{}{}
+		}
+	}
+
+	services := make([]string, 0, len(serviceSet))
+	for s := range serviceSet {
+		services = append(services, s)
+	}
+	envs := make([]string, 0, len(envSet))
+	for e := range envSet {
+		envs = append(envs, e)
+	}
+
+	storedData := &models.PushData{
+		Services:     services,
+		Environments: envs,
+		UpdatedAt:    time.Now(),
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "GetPushData",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("推送数据获取成功"))
-	return &data, nil
+	}).Infof(color.GreenString("推送数据获取成功 (从 %d 文档收集 %d 服务 %d 环境)"), len(docs), len(services), len(envs))
+	return storedData, nil
 }
 
 // HasChanges 检查当前发现数据是否有变化（返回 true 如果变化）
