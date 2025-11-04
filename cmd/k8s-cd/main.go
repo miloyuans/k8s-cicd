@@ -44,14 +44,14 @@ func main() {
 	}
 	defer func() {
 		if err := mongoClient.Close(); err != nil {
-			logrus.Errorf(color.RedString("关闭 MongoDB 连接失败: %v"), err)
+			logrus.Errorf(color.RedString("关闭 MongoDB 连接失败: %v", err)
 		}
 	}()
 
 	// 步骤4：初始化 Kubernetes 客户端（支持 kubeconfig / serviceaccount）
 	k8sClient, err := kubernetes.NewK8sClient(&cfg.Kubernetes, &cfg.Deploy)
 	if err != nil {
-		logrus.Fatalf(color.RedString("Kubernetes 连接失败: %v"), err)
+		logrus.Fatalf(color.RedString("Kubernetes 连接失败: %v", err)
 	}
 
 	// 步骤5：初始化 API 客户端

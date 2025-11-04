@@ -1,8 +1,5 @@
 // 文件: client/mongo_client.go
-// 修改后的 client/mongo_client.go：
-// - GetTasksByStatus: filter 改为 {"confirmation_status": status}，以匹配数据中的确认状态字段。
-// - 保留所有现有功能，包括 sanitizeEnv、索引、push_data 等。
-// 新增 UpdateConfirmationStatus 方法，用于更新 confirmation_status 按 TaskID。
+// 修改: 移除未使用的 uuid 导入；保留所有现有功能，包括 GetTasksByStatus filter 等。
 
 package client
 

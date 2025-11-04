@@ -1,19 +1,17 @@
 // 文件: task/task.go
-// 修改: 添加 import "container/list"；修复 SnapshotImage 调用 (返回 string, error)；handlePermanentFailure 添加 k8s 参数；移除未用 taskStartTime；Enqueue/Dequeue 日志长度准确。
+// 修改: 移除未用导入 (context, metav1)；使用 k8s.SnapshotAndStoreImage (需传入 mongo)；handlePermanentFailure 添加 k8s 参数；Enqueue/Dequeue 日志长度准确。
 // 保留所有现有功能，包括锁、执行、重试等。
 
 package task
 
 import (
 	"container/list"
-	"context"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/client"
@@ -183,7 +181,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 // executeTask 执行核心任务逻辑
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) error {
 	env := task.DeployRequest.Environments[0]
-	oldTag, err := k8s.SnapshotImage(task.DeployRequest.Service, task.DeployRequest.Namespace, task.DeployRequest.TaskID)
+	oldTag, err := k8s.SnapshotAndStoreImage(task.DeployRequest.Service, task.DeployRequest.Namespace, task.DeployRequest.TaskID, mongo)
 	if err != nil {
 		q.handleException(mongo, apiClient, botMgr, task, oldTag, env)
 		return err
@@ -258,7 +256,12 @@ func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.Mongo
 
 	// 1. 回滚（如果有旧Tag）
 	if k8s != nil && oldTag != "" {
-		if err := k8s.RollbackWithSnapshot(task.DeployRequest.Service, task.DeployRequest.Namespace, &models.ImageSnapshot{Tag: oldTag}); err != nil {
+		snapshot := &models.ImageSnapshot{
+			Namespace: task.DeployRequest.Namespace,
+			Service:   task.DeployRequest.Service,
+			Tag:       oldTag,
+		}
+		if err := k8s.RollbackWithSnapshot(task.DeployRequest.Service, task.DeployRequest.Namespace, snapshot); err != nil {
 			logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("回滚失败: %v"), err)
 		} else {
 			logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Info(color.GreenString("回滚成功到旧版本: %s"), oldTag)
