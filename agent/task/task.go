@@ -1,19 +1,16 @@
 // 文件: task/task.go
-// 修改: 修复 handleFailure 添加 k8s 参数并传入；Dequeue 日志使用 q.queue.Len() 后 remove 的剩余；Enqueue 日志使用 q.queue.Len() 当前长度。
+// 修改: 移除未用导入 (context, metav1)；移除未用变量 taskStartTime；修复 SnapshotImage 调用 (使用 oldSnapshot.Tag)；handleFailure 添加 k8s 参数并处理回滚；Enqueue/Dequeue 日志长度准确。
 // 保留所有现有功能，包括锁、执行、重试等。
 
 package task
 
 import (
-	"container/list"
-	"context"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/client"
@@ -121,8 +118,6 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "worker_id": workerID},
 			}).Infof(color.GreenString("Worker-%d 出队任务: %s (队列剩余: %d)"), workerID, task.DeployRequest.TaskID, q.queue.Len())
 
-			taskStartTime := time.Now() // 定义任务开始时间
-
 			// 生成 TaskID 如果为空
 			if task.DeployRequest.TaskID == "" {
 				task.DeployRequest.TaskID = uuid.New().String()
@@ -175,7 +170,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 					q.Enqueue(task)  // 重入队
 					continue
 				} else {
-					q.handlePermanentFailure(mongo, apiClient, botMgr, task)
+					q.handlePermanentFailure(k8s, mongo, apiClient, botMgr, task)
 				}
 			}
 		}
@@ -186,7 +181,6 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) error {
 	env := task.DeployRequest.Environments[0]
 	var oldTag string
-	var snapshotErr error
 	oldSnapshot, snapshotErr := k8s.SnapshotImage(task.DeployRequest.Service, task.DeployRequest.Namespace, task.DeployRequest.TaskID)
 	if oldSnapshot != nil {
 		oldTag = oldSnapshot.Tag
@@ -264,7 +258,7 @@ func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.Mongo
 	}).Infof(color.YellowString("开始处理失败逻辑，包括回滚通知: %s [%s]"), task.DeployRequest.TaskID, env)
 
 	// 1. 回滚（如果有旧Tag）
-	if oldTag != "" {
+	if k8s != nil && oldTag != "" {
 		snapshot := &models.ImageSnapshot{
 			Namespace: task.DeployRequest.Namespace,
 			Service:   task.DeployRequest.Service,
@@ -330,8 +324,8 @@ func (q *TaskQueue) handleException(mongo *client.MongoClient, apiClient *api.AP
 }
 
 // handlePermanentFailure 永久失败处理
-func (q *TaskQueue) handlePermanentFailure(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) {
-	q.handleFailure(nil, mongo, apiClient, botMgr, task, "unknown", task.DeployRequest.Environments[0])  // k8s nil，无回滚
+func (q *TaskQueue) handlePermanentFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) {
+	q.handleFailure(k8s, mongo, apiClient, botMgr, task, "unknown", task.DeployRequest.Environments[0])  // k8s 传入，无回滚
 }
 
 // Enqueue 入队（设置 CreatedAt 如果为空 大小约束）
