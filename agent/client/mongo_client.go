@@ -540,6 +540,40 @@ func (m *MongoClient) GetPushData() (*models.PushData, error) {
 	}, nil
 }
 
+// StoreImageSnapshot 存储镜像快照到 image_snapshots 集合
+func (m *MongoClient) StoreImageSnapshot(snapshot *models.ImageSnapshot) error {
+	startTime := time.Now()
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection("image_snapshots")
+
+	_, err := collection.InsertOne(ctx, snapshot)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "StoreImageSnapshot",
+			"took":   time.Since(startTime),
+			"data": logrus.Fields{
+				"service":   snapshot.Service,
+				"namespace": snapshot.Namespace,
+				"image":     snapshot.Image,
+			},
+		}).Errorf(color.RedString("存储镜像快照失败: %v"), err)
+		return fmt.Errorf("存储镜像快照失败: %v", err)
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "StoreImageSnapshot",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"service":   snapshot.Service,
+			"namespace": snapshot.Namespace,
+			"image":     snapshot.Image,
+		},
+	}).Infof(color.GreenString("镜像快照存储成功"))
+	return nil
+}
+
 // HasChanges 检查当前发现数据是否有变化（返回 true 如果变化）
 func (m *MongoClient) HasChanges(currentServices, currentEnvs []string, stored *models.PushData) bool {
 	if stored == nil {
