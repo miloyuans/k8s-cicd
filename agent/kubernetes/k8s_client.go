@@ -264,37 +264,68 @@ func (k *K8sClient) GetCurrentImage(service, namespace string) (string, error) {
 }
 
 // SnapshotAndStoreImage 获取当前镜像并存储快照（精准版）
+// SnapshotAndStoreImage 返回 oldTag 且确保非空
 func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mongo *client.MongoClient) (string, error) {
-	// Step 1: 获取当前镜像（精准版）
-	oldImage, err := k.getCurrentRunningImage(service, namespace)
+	startTime := time.Now()
+	ctx := context.Background()
+
+	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
 	if err != nil {
+		// 尝试 StatefulSet
+		sts, err2 := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{})
+		if err2 != nil {
+			return "", fmt.Errorf("未找到工作负载: %v", err)
+		}
+		if len(sts.Spec.Template.Spec.Containers) == 0 {
+			return "", fmt.Errorf("容器为空")
+		}
+		image := sts.Spec.Template.Spec.Containers[0].Image
+		tag := ExtractTag(image)
+		snapshot := &models.ImageSnapshot{
+			Namespace:  namespace,
+			Service:    service,
+			Container:  sts.Spec.Template.Spec.Containers[0].Name,
+			Image:      image,
+			Tag:        tag,
+			RecordedAt: time.Now(),
+			TaskID:     taskID,
+		}
+		if err := mongo.StoreImageSnapshot(snapshot); err != nil {
+			return "", err
+		}
+		_ = mongo.DeleteSnapshotsExceptTask(service, namespace, taskID)
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "SnapshotImage",
+			"took":   time.Since(startTime),
+		}).Infof(color.GreenString("快照记录成功 old_tag=%s task_id=%s"), tag, taskID)
+		return tag, nil
+	}
+
+	if len(deploy.Spec.Template.Spec.Containers) == 0 {
+		return "", fmt.Errorf("容器为空")
+	}
+	image := deploy.Spec.Template.Spec.Containers[0].Image
+	tag := ExtractTag(image)
+	snapshot := &models.ImageSnapshot{
+		Namespace:  namespace,
+		Service:    service,
+		Container:  deploy.Spec.Template.Spec.Containers[0].Name,
+		Image:      image,
+		Tag:        tag,
+		RecordedAt: time.Now(),
+		TaskID:     taskID,
+	}
+	if err := mongo.StoreImageSnapshot(snapshot); err != nil {
 		return "", err
 	}
-	oldTag := ExtractTag(oldImage)
-
-	// Step 2: 存储快照
-	snapshot := &models.ImageSnapshot{
-		Service:    service,
-		Namespace:  namespace,
-		Image:      oldImage,
-		Tag:        oldTag,
-		TaskID:     taskID,
-		RecordedAt: time.Now(),
-	}
-	if err := mongo.SnapshotImage(snapshot); err != nil {
-		return oldTag, err
-	}
-
-	// Step 3: 清理旧快照（排除当前任务）
-	if err := mongo.DeleteSnapshotsExceptTask(service, namespace, taskID); err != nil {
-		logrus.Warnf("清理旧快照失败: %v", err)
-	}
-
+	_ = mongo.DeleteSnapshotsExceptTask(service, namespace, taskID)
 	logrus.WithFields(logrus.Fields{
-		"task_id": taskID,
-		"old_tag": oldTag,
-	}).Info("快照记录成功")
-	return oldTag, nil
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "SnapshotImage",
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("快照记录成功 old_tag=%s task_id=%s"), tag, taskID)
+	return tag, nil
 }
 
 // getCurrentRunningImage 精准获取当前 Running + Ready 的镜像

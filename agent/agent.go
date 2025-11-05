@@ -202,26 +202,22 @@ func (a *Agent) periodicPollTasksFromMongo() {
 		select {
 		case <-ticker.C:
 			startTime := time.Now()
-
-			// 1. 遍历所有环境
 			for env, namespace := range a.Cfg.EnvMapping.Mappings {
-				// 2. 查询状态为 "已确认" 的任务 (已按 created_at 排序，使用 sanitized env)
-				deployReqs, err := a.Mongo.GetTasksByStatus(env, "已确认")
+				deployReqs, err := a.Mongo.GetTasksByConfirmationStatus(env, "已确认")
 				if err != nil {
 					logrus.WithFields(logrus.Fields{
-						"time":   time.Now().Format("2006-01-02 15:04:05"),
-						"method": "periodicPollTasksFromMongo",
-						"env":    env,
-						"took":   time.Since(startTime),
+						"time": time.Now().Format("2006-01-02 15:04:05"),
+						"env":  env,
+						"took": time.Since(startTime),
 					}).Errorf(color.RedString("查询 %s 任务失败: %v"), env, err)
 					continue
 				}
 
-				// 3. 提交任务到队列（按顺序 Enqueue，确保 FIFO + lock 串行）
 				for _, dr := range deployReqs {
-					// 补全 namespace（根据环境映射匹配）
 					dr.Namespace = namespace
-					// 创建 task.Task (TaskID/CreatedAt 已存在)
+					if len(dr.Environments) == 0 {
+						dr.Environments = []string{env}
+					}
 					t := &task.Task{
 						DeployRequest: dr,
 						ID:            fmt.Sprintf("%s-%s", dr.Service, dr.Version),
@@ -232,12 +228,11 @@ func (a *Agent) periodicPollTasksFromMongo() {
 
 				if len(deployReqs) > 0 {
 					logrus.WithFields(logrus.Fields{
-						"time":   time.Now().Format("2006-01-02 15:04:05"),
-						"method": "periodicPollTasksFromMongo",
-						"env":    env,
-						"count":  len(deployReqs),
-						"took":   time.Since(startTime),
-					}).Infof(color.GreenString("发现 %d 个待部署任务 (按 created_at 排序)"), len(deployReqs))
+						"time":  time.Now().Format("2006-01-02 15:04:05"),
+						"env":   env,
+						"count": len(deployReqs),
+						"took":  time.Since(startTime),
+					}).Infof(color.GreenString("发现 %d 个待部署任务"), len(deployReqs))
 				}
 			}
 		}

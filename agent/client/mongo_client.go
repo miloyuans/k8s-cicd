@@ -396,136 +396,148 @@ func (m *MongoClient) GetSnapshotByTaskID(taskID string) (*models.ImageSnapshot,
 	return &snapshot, nil
 }
 
-// StorePushData 存储推送数据（清空重插去重组合）
+// GetTasksByConfirmationStatus 查询 confirmation_status = "已确认" 的任务（按 created_at 排序）
+func (m *MongoClient) GetTasksByConfirmationStatus(env, confirmationStatus string) ([]models.DeployRequest, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+	collectionName := fmt.Sprintf("tasks_%s", sanitizeEnv(env))
+	collection := m.client.Database("cicd").Collection(collectionName)
+
+	// 排序：created_at 升序
+	findOptions := options.Find().SetSort(bson.M{"created_at": 1})
+	filter := bson.M{"confirmation_status": confirmationStatus}
+
+	cursor, err := collection.Find(ctx, filter, findOptions)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetTasksByConfirmationStatus",
+			"env":    env,
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("查询 %s 任务失败: %v"), env, err)
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var results []models.DeployRequest
+	if err = cursor.All(ctx, &results); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "GetTasksByConfirmationStatus",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("解码任务失败: %v"), err)
+		return nil, err
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "GetTasksByConfirmationStatus",
+		"env":    env,
+		"count":  len(results),
+		"took":   time.Since(startTime),
+	}).Infof(color.GreenString("查询任务成功 [%s, 集合: %s]: %d 个"), env, collectionName, len(results))
+	return results, nil
+}
+
+// StorePushData 优化：批量 upsert 替代删除+插入
 func (m *MongoClient) StorePushData(data *models.PushData) error {
 	startTime := time.Now()
 	ctx := context.Background()
 	collection := m.client.Database("cicd").Collection("push_data")
 
-	// 清空旧数据
-	_, err := collection.DeleteMany(ctx, bson.M{})
+	if len(data.Services) == 0 || len(data.Environments) == 0 {
+		return nil
+	}
+
+	// 构建唯一组合
+	now := time.Now()
+	ops := make([]mongo.WriteModel, 0, len(data.Services)*len(data.Environments))
+	for _, s := range data.Services {
+		for _, e := range data.Environments {
+			filter := bson.M{"service": s, "environment": e}
+			update := bson.M{
+				"$set": bson.M{
+					"service":     s,
+					"environment": e,
+					"created_at":  now,
+				},
+			}
+			model := mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true)
+			ops = append(ops, model)
+		}
+	}
+
+	_, err := collection.BulkWrite(ctx, ops)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "StorePushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("清空 push_data 失败: %v"), err)
+		}).Errorf(color.RedString("批量 upsert push_data 失败: %v"), err)
 		return err
 	}
-
-	// 去重
-	uniqueServices := make(map[string]struct{})
-	for _, s := range data.Services {
-		uniqueServices[s] = struct{}{}
-	}
-	uniqueEnvs := make(map[string]struct{})
-	for _, e := range data.Environments {
-		uniqueEnvs[e] = struct{}{}
-	}
-
-	now := time.Now()
-	insertedCount := 0
-	for s := range uniqueServices {
-		for e := range uniqueEnvs {
-			doc := bson.M{
-				"service":     s,
-				"environment": e,
-				"created_at":  now,
-			}
-			_, err := collection.InsertOne(ctx, doc)
-			if err != nil {
-				logrus.WithFields(logrus.Fields{
-					"time":   time.Now().Format("2006-01-02 15:04:05"),
-					"method": "StorePushData",
-					"took":   time.Since(startTime),
-				}).Errorf(color.RedString("插入 push_data 文档失败 [%s-%s]: %v"), s, e, err)
-				return err
-			}
-			insertedCount++
-		}
-	}
-
-	data.UpdatedAt = now
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "StorePushData",
 		"took":   time.Since(startTime),
 		"data": logrus.Fields{
-			"service_count": len(uniqueServices),
-			"env_count":     len(uniqueEnvs),
-			"inserted_docs": insertedCount,
+			"service_count": len(data.Services),
+			"env_count":     len(data.Environments),
+			"upsert_count":  len(ops),
 		},
-	}).Infof(color.GreenString("推送数据全量存储成功到 cicd.push_data（清空并插入 %d 个组合）"), insertedCount)
+	}).Infof(color.GreenString("推送数据存储成功（upsert %d 个组合）"), len(ops))
 	return nil
 }
 
-// GetPushData 获取存储的推送数据（从 cicd.push_data 收集去重 services 和 environments）
+// GetPushData 优化：聚合去重
 func (m *MongoClient) GetPushData() (*models.PushData, error) {
 	startTime := time.Now()
 	ctx := context.Background()
-
 	collection := m.client.Database("cicd").Collection("push_data")
-	filter := bson.M{}
 
-	cursor, err := collection.Find(ctx, filter)
+	pipeline := mongo.Pipeline{
+		{{Key: "$group", Value: bson.M{
+			"_id":       nil,
+			"services":  bson.M{"$addToSet": "$service"},
+			"envs":      bson.M{"$addToSet": "$environment"},
+		}}},
+	}
+
+	cursor, err := collection.Aggregate(ctx, pipeline)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "GetPushData",
 			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("查询 cicd.push_data 失败: %v"), err)
+		}).Errorf(color.RedString("聚合 push_data 失败: %v"), err)
 		return nil, err
 	}
 	defer cursor.Close(ctx)
 
-	var docs []bson.M
-	if err = cursor.All(ctx, &docs); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "GetPushData",
-			"took":   time.Since(startTime),
-		}).Errorf(color.RedString("解码 cicd.push_data 失败: %v"), err)
+	if !cursor.Next(ctx) {
+		return &models.PushData{}, nil
+	}
+
+	var result struct {
+		Services []string `bson:"services"`
+		Envs     []string `bson:"envs"`
+	}
+	if err := cursor.Decode(&result); err != nil {
 		return nil, err
-	}
-
-	if len(docs) == 0 {
-		return nil, nil // 无数据视为首次
-	}
-
-	// 收集去重 services 和 environments
-	serviceSet := make(map[string]struct{})
-	envSet := make(map[string]struct{})
-	for _, doc := range docs {
-		if s, ok := doc["service"].(string); ok {
-			serviceSet[s] = struct{}{}
-		}
-		if e, ok := doc["environment"].(string); ok {
-			envSet[e] = struct{}{}
-		}
-	}
-
-	services := make([]string, 0, len(serviceSet))
-	for s := range serviceSet {
-		services = append(services, s)
-	}
-	envs := make([]string, 0, len(envSet))
-	for e := range envSet {
-		envs = append(envs, e)
-	}
-
-	storedData := &models.PushData{
-		Services:     services,
-		Environments: envs,
-		UpdatedAt:    time.Now(),
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
 		"method": "GetPushData",
 		"took":   time.Since(startTime),
-	}).Infof(color.GreenString("推送数据获取成功从 cicd.push_data (从 %d 文档收集 %d 服务 %d 环境)"), len(docs), len(services), len(envs))
-	return storedData, nil
+	}).Infof(color.GreenString("推送数据获取成功 (聚合 %d 服务 %d 环境)"), len(result.Services), len(result.Envs))
+
+	return &models.PushData{
+		Services:     result.Services,
+		Environments: result.Envs,
+		UpdatedAt:    time.Now(),
+	}, nil
 }
 
 // HasChanges 检查当前发现数据是否有变化（返回 true 如果变化）

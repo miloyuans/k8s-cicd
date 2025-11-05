@@ -261,15 +261,17 @@ func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.Mongo
 	if k8s != nil && oldTag != "" {
 		snapshot := &models.ImageSnapshot{Tag: oldTag}
 		if err := k8s.RollbackWithSnapshot(task.DeployRequest.Service, task.DeployRequest.Namespace, snapshot); err != nil {
-			logrus.Errorf("回滚失败: %v", err)
+			logrus.Errorf(color.RedString("回滚失败: %v"), err)
 		} else {
-			logrus.Info("回滚成功")
+			logrus.Info(color.GreenString("回滚成功"))
 		}
+	} else {
+		logrus.Warn(color.YellowString("回滚失败: 无效快照"))
 	}
 
 	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行失败")
-	_ = mongo.DeleteTask(task.DeployRequest.Service, task.DeployRequest.Version, env) // 关键：删除记录
-	botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false, extra)
+	_ = mongo.DeleteTask(task.DeployRequest.Service, task.DeployRequest.Version, env)
+	botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, oldTag, task.DeployRequest.Version, false, extra)
 }
 
 func (q *TaskQueue) handlePermanentFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, botMgr *telegram.BotManager, apiClient *api.APIClient, task *Task) {

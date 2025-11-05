@@ -44,38 +44,9 @@ type BotManager struct {
 	Token   string // Bot Token
 	GroupID string // 群组ID
 	Enabled bool   // 是否启用
-	buffer  *NotificationBuffer
 }
 
-// NewBotManager 创建 BotManager（从配置读取，初始化缓冲）
-func NewBotManager(cfg *config.TelegramConfig) *BotManager {
-	if cfg == nil || !cfg.Enabled || cfg.Token == "" || cfg.GroupID == "" {
-		logrus.Warn(color.YellowString("Telegram 配置无效，通知功能禁用"))
-		return &BotManager{Enabled: false}
-	}
 
-	bm := &BotManager{
-		Token:   cfg.Token,
-		GroupID: cfg.GroupID,
-		Enabled: true,
-		buffer:  &NotificationBuffer{
-			buffers:   make(map[string][]*NotificationItem),
-			mergeChan: make(chan struct{}, 1),
-		},
-	}
-	bm.buffer.mergeTimer = time.AfterFunc(5*time.Second, bm.flushBuffer)
-	logrus.Info(color.GreenString("Telegram BotManager 创建成功（通知专用，5s合并缓冲）"))
-	return bm
-}
-
-// escapeForMarkdown 简单 Markdown 转义函数 (单参数)
-func escapeForMarkdown(text string) string {
-	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
-	for _, char := range escapeChars {
-		text = strings.ReplaceAll(text, char, "\\"+char)
-	}
-	return text
-}
 
 // AddNotification 添加通知到缓冲（支持 extra）
 func (bm *BotManager) AddNotification(service, env, user, oldVersion, newVersion string, success bool, extra string) {
@@ -153,16 +124,52 @@ func (bm *BotManager) generateMergedMessage(items []*NotificationItem, success b
 	return header + body + footer
 }
 
-// SendNotification 发送部署通知（现在缓冲添加）
+func NewBotManager(cfg *config.TelegramConfig) *BotManager {
+	if cfg == nil || cfg.Token == "" || cfg.GroupID == "" {
+		logrus.Warn(color.YellowString("Telegram 配置不完整，通知功能禁用"))
+		return &BotManager{Enabled: false}
+	}
+	bm := &BotManager{
+		Token:   cfg.Token,
+		GroupID: cfg.GroupID,
+		Enabled: true,
+	}
+	logrus.Info(color.GreenString("Telegram BotManager 创建成功（立即发送模式）"))
+	return bm
+}
+
+func escapeForMarkdown(text string) string {
+	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
+	for _, char := range escapeChars {
+		text = strings.ReplaceAll(text, char, "\\"+char)
+	}
+	return text
+}
+
 func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool, extra string) error {
 	if !bm.Enabled {
 		return nil
 	}
-	bm.AddNotification(service, env, user, oldVersion, newVersion, success, extra)
-	return nil
+
+	safe := escapeForMarkdown
+	status := map[bool]string{true: "成功", false: "失败"}[success]
+	emoji := map[bool]string{true: "Success", false: "Failed"}[success]
+	header := fmt.Sprintf("*部署%s*\n", status)
+	body := fmt.Sprintf("*服务*: `%s`\n*环境*: `%s`\n*操作人*: `%s`\n*旧版本*: `%s`\n*新版本*: `%s`\n",
+		safe(service), safe(env), safe(user), safe(oldVersion), safe(newVersion))
+
+	footer := ""
+	if !success && extra != "" {
+		footer = fmt.Sprintf("\n_异常_: %s", safe(extra))
+	}
+	footer += fmt.Sprintf("\n\n%s *由 K8s\\-CICD Agent 发送* — `%s`", emoji, time.Now().Format("15:04:05"))
+
+	msg := header + body + footer
+
+	_, err := bm.sendMessage(msg, "MarkdownV2")
+	return err
 }
 
-// sendMessage 发送消息（使用 MarkdownV2）
 func (bm *BotManager) sendMessage(text, parseMode string) (int, error) {
 	if !bm.Enabled {
 		return 0, fmt.Errorf("Telegram 未启用")
@@ -181,27 +188,20 @@ func (bm *BotManager) sendMessage(text, parseMode string) (int, error) {
 	defer resp.Body.Close()
 
 	var result struct {
-		Ok          bool                   `json:"ok"`
-		Result      map[string]interface{} `json:"result"`
-		ErrorCode   int                    `json:"error_code"`
-		Description string                 `json:"description"`
+		Ok          bool   `json:"ok"`
+		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || !result.Ok {
+		errMsg := "未知错误"
+		if result.Description != "" {
+			errMsg = result.Description
+		}
+		return 0, fmt.Errorf("Telegram API 错误: %s", errMsg)
 	}
-	if !result.Ok {
-		return 0, fmt.Errorf("Telegram API错误: code=%d, description=%s", result.ErrorCode, result.Description)
-	}
-	messageID := int(result.Result["message_id"].(float64))
-	logrus.Infof(color.GreenString("消息发送成功，message_id=%d"), messageID)
-	return messageID, nil
+	logrus.Infof(color.GreenString("Telegram 通知已发送: %s", text[:50]))
+	return 0, nil
 }
 
-// Stop 停止（刷新缓冲）—— 仅保留一个
 func (bm *BotManager) Stop() {
-	if bm.buffer != nil && bm.buffer.mergeTimer != nil {
-		bm.buffer.mergeTimer.Stop()
-		bm.flushBuffer() // 异步刷新
-	}
-	logrus.Info(color.GreenString("Telegram BotManager 停止 (缓冲已刷新)"))
+	logrus.Info(color.GreenString("Telegram BotManager 已停止"))
 }
