@@ -324,3 +324,57 @@ subjects:
   namespace: monitoring
 
 ```
+### MongoDB Deploy K8S yaml tm
+```
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: monitoring
+  labels:
+    app: mongodb
+spec:
+  selector:
+    app: mongodb
+  ports:
+    - protocol: TCP
+      port: 27017
+      targetPort: 27017
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  namespace: monitoring
+  labels:
+    app: mongodb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      containers:
+        - name: mongodb
+          image: mongo:8.0
+          ports:
+            - containerPort: 27017
+          volumeMounts:
+            - name: mongo-data
+              mountPath: /data/db
+          # 明确禁用认证（MongoDB 8.0 默认已禁用，但加上参数更明确）
+          args: ["--bind_ip", "0.0.0.0", "--noauth"]
+      volumes:
+        - name: mongo-data
+          emptyDir: {}
+```
