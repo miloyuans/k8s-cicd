@@ -1,9 +1,12 @@
 // 文件: task/task.go
 // 修改: 
-// 1. 移除未用导入
-// 2. 状态推送前构造 status_for_external = 执行结果
-// 3. 不修改原 status 字段
-// 4. 移除空队列 Debug 日志
+// 1. checkNewPodStatusAfterUpdate 升级为多 Pod + 事件检查
+//    - 过滤新镜像 Pod
+//    - 任意新 Pod Running → 成功
+//    - 60 秒后仍有 Pending 或事件异常 → 回滚
+//    - 收集 Pod 事件异常信息
+// 2. Telegram 通知附加异常事件（可选）
+// 3. 保留所有原有功能
 
 package task
 
@@ -25,6 +28,8 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // sanitizeEnv 将环境名中的 "-" 替换为 "_" 以符合 MongoDB 集合命名规范
@@ -173,7 +178,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 	}
 }
 
-// executeTask 执行核心任务逻辑
+// executeTask 执行核心任务逻辑（优化等待逻辑）
 func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) error {
 	env := task.DeployRequest.Environments[0]
 	oldTag, err := k8s.SnapshotAndStoreImage(task.DeployRequest.Service, task.DeployRequest.Namespace, task.DeployRequest.TaskID, mongo)
@@ -182,41 +187,156 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 		return err
 	}
 
+	// 1. 更新镜像
 	if err := k8s.UpdateWorkloadImage(task.DeployRequest.Service, task.DeployRequest.Namespace, task.DeployRequest.Version); err != nil {
-		q.handleFailure(k8s, mongo, apiClient, botMgr, task, oldTag, env)
+		q.handleFailure(k8s, mongo, apiClient, botMgr, task, oldTag, env, "")
 		return err
 	}
 
+	// 2. 构造预期新镜像完整路径
+	oldImage, _ := k8s.GetCurrentImage(task.DeployRequest.Service, task.DeployRequest.Namespace)
+	newImage := kubernetes.BuildNewImage(oldImage, task.DeployRequest.Version)
+
+	// 3. 快速判断：多 Pod + 事件检查
+	quickResult, eventMsg := q.checkNewPodStatusWithEvents(k8s, task.DeployRequest.Service, task.DeployRequest.Namespace, newImage, oldTag, env)
+	if quickResult != "" {
+		if quickResult == "success" {
+			q.handleSuccess(mongo, apiClient, botMgr, task, oldTag, env, "")
+			return nil
+		} else if quickResult == "rollback" {
+			q.handleFailure(k8s, mongo, apiClient, botMgr, task, oldTag, env, eventMsg)
+			return fmt.Errorf("发布失败: %s", eventMsg)
+		}
+	}
+
+	// 4. 快速判断未通过 → 按原逻辑等待 rollout 完成
 	if err := k8s.WaitForRolloutComplete(task.DeployRequest.Service, task.DeployRequest.Namespace, cfg.Deploy.WaitTimeout); err != nil {
-		q.handleFailure(k8s, mongo, apiClient, botMgr, task, oldTag, env)
+		q.handleFailure(k8s, mongo, apiClient, botMgr, task, oldTag, env, "")
 		return err
 	}
 
-	q.handleSuccess(mongo, apiClient, botMgr, task, oldTag, env)
+	q.handleSuccess(mongo, apiClient, botMgr, task, oldTag, env, "")
 	return nil
 }
 
-// handleSuccess 成功处理
-func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldTag string, env string) {
-	// 1. 更新内部状态（不修改原 status）
-	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行成功")
+// checkNewPodStatusWithEvents 多 Pod + 事件检查
+func (q *TaskQueue) checkNewPodStatusWithEvents(k8s *kubernetes.K8sClient, service, namespace, expectedImage, oldTag, env string) (string, string) {
+	ctx := context.Background()
+	labelSelector := fmt.Sprintf("app=%s", service)
 
-	// 2. 推送外部状态：status: 执行成功
+	// 等待 5 秒让 Pod 开始调度
+	time.Sleep(5 * time.Second)
+
+	startTime := time.Now()
+	pendingDeadline := startTime.Add(60 * time.Second)
+	eventMsgs := []string{}
+
+	for time.Now().Before(pendingDeadline) {
+		pods, err := k8s.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			logrus.Errorf("查询 Pod 失败: %v", err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		// 过滤新镜像 Pod
+		newPods := []v1.Pod{}
+		for _, pod := range pods.Items {
+			for _, container := range pod.Spec.Containers {
+				if container.Image == expectedImage {
+					newPods = append(newPods, pod)
+					break
+				}
+			}
+		}
+
+		if len(newPods) == 0 {
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		// 检查 Pod 状态
+		hasRunning := false
+		hasPending := false
+		for _, pod := range newPods {
+			if pod.Status.Phase == v1.PodRunning {
+				hasRunning = true
+			}
+			if pod.Status.Phase == v1.PodPending {
+				hasPending = true
+			}
+		}
+
+		if hasRunning {
+			logrus.Info("新版本 Pod 已出现 Running 状态，发布成功")
+			return "success", ""
+		}
+
+		// 检查事件
+		events, err := k8s.Clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+			FieldSelector: fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s", strings.Join(getPodNames(newPods), ",")),
+		})
+		if err == nil {
+			for _, event := range events.Items {
+				if event.Type == "Warning" || strings.Contains(event.Message, "Err") || strings.Contains(event.Message, "Failed") {
+					msg := fmt.Sprintf("%s: %s", event.Reason, event.Message)
+					if !contains(eventMsgs, msg) {
+						eventMsgs = append(eventMsgs, msg)
+					}
+				}
+			}
+		}
+
+		if hasPending {
+			logrus.Info("新版本 Pod 处于 Pending 状态，等待中...")
+		}
+
+		time.Sleep(3 * time.Second)
+	}
+
+	// 超时或异常事件 → 回滚
+	msg := "60 秒后新版本 Pod 仍未进入 Running 状态"
+	if len(eventMsgs) > 0 {
+		msg = strings.Join(eventMsgs, "\n")
+	}
+	logrus.Warnf("触发快速回滚: %s", msg)
+	return "rollback", msg
+}
+
+// getPodNames 提取 Pod 名称
+func getPodNames(pods []v1.Pod) []string {
+	names := []string{}
+	for _, pod := range pods {
+		names = append(names, pod.Name)
+	}
+	return names
+}
+
+// contains 检查字符串是否存在
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// handleSuccess 成功处理
+func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldTag string, env string, extra string) {
+	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行成功")
 	_ = apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.DeployRequest.Service,
 		Version:     task.DeployRequest.Version,
 		Environment: env,
 		User:        task.DeployRequest.User,
-		Status:      "执行成功", // 外部统一格式
+		Status:      "执行成功",
 	})
-
-	// 3. 发送通知
-	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, true)
+	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, true, extra)
 }
 
 // handleFailure 失败处理
-func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldTag string, env string) {
-	// 1. 回滚
+func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task, oldTag string, env string, extra string) {
 	if k8s != nil && oldTag != "" {
 		snapshot := &models.ImageSnapshot{
 			Namespace: task.DeployRequest.Namespace,
@@ -230,13 +350,11 @@ func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.Mongo
 		}
 	}
 
-	// 2. 更新内部状态
 	mongoErr := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行失败")
 	if mongoErr != nil {
 		logrus.Errorf(color.RedString("更新MongoDB状态失败 [%s]: %v"), env, mongoErr)
 	}
 
-	// 3. 推送外部状态：status: 执行失败
 	statusErr := apiClient.UpdateStatus(models.StatusRequest{
 		Service:     task.DeployRequest.Service,
 		Version:     task.DeployRequest.Version,
@@ -248,13 +366,7 @@ func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.Mongo
 		logrus.Errorf(color.RedString("推送失败状态失败 [%s]: %v"), env, statusErr)
 	}
 
-	// 4. 发送通知
-	notifyErr := botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false)
-	if notifyErr != nil {
-		logrus.Errorf(color.RedString("发送失败通知失败 [%s]: %v"), env, notifyErr)
-	} else {
-		logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID, "env": env}).Infof(color.GreenString("失败通知已触发发送到 Telegram 群组"))
-	}
+	botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false, extra)
 }
 
 // handleException 异常处理
@@ -267,12 +379,12 @@ func (q *TaskQueue) handleException(mongo *client.MongoClient, apiClient *api.AP
 		User:        task.DeployRequest.User,
 		Status:      "异常",
 	})
-	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false)
+	_ = botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false, "")
 }
 
 // handlePermanentFailure 永久失败处理
 func (q *TaskQueue) handlePermanentFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, apiClient *api.APIClient, botMgr *telegram.BotManager, task *Task) {
-	q.handleFailure(k8s, mongo, apiClient, botMgr, task, "unknown", task.DeployRequest.Environments[0])
+	q.handleFailure(k8s, mongo, apiClient, botMgr, task, "unknown", task.DeployRequest.Environments[0], "")
 }
 
 // getImageOrUnknown 获取镜像或默认
@@ -280,7 +392,7 @@ func getImageOrUnknown(tag string) string {
 	if tag != "" {
 		return tag
 	}
-	return "unknown"
+	return "无"
 }
 
 // Enqueue 入队

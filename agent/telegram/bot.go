@@ -1,4 +1,11 @@
-// 修改后的 telegram/bot.go：修复 safe 函数定义（单参数转义）；使用简单 Markdown 转义函数。
+// 文件: telegram/bot.go
+// 修改: 
+// 1. 完全基于原代码，保留 5s 合并缓冲机制
+// 2. 简化模板：仅保留服务、环境、命名空间、新/旧版本、结果
+// 3. 支持附加事件信息（extra）
+// 4. 使用 safe 转义函数，避免 Markdown 转义问题
+// 5. 合并发送时：相同状态合并，附加事件分别列出
+// 6. 保留所有原有功能：Stop、flushBuffer、sendMessage 等
 
 package telegram
 
@@ -25,7 +32,7 @@ type NotificationBuffer struct {
 	mergeChan   chan struct{}
 }
 
-// NotificationItem 通知项
+// NotificationItem 通知项（新增 extra 字段）
 type NotificationItem struct {
 	Service    string
 	Env        string
@@ -33,6 +40,7 @@ type NotificationItem struct {
 	OldVersion string
 	NewVersion string
 	Success    bool
+	Extra      string // 附加事件信息
 	SendTime   time.Time
 }
 
@@ -67,7 +75,6 @@ func NewBotManager(cfg *config.TelegramConfig) *BotManager {
 
 // escapeForMarkdown 简单 Markdown 转义函数 (单参数)
 func escapeForMarkdown(text string) string {
-	// 基本转义 Markdown 特殊字符
 	escapeChars := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	for _, char := range escapeChars {
 		text = strings.ReplaceAll(text, char, "\\"+char)
@@ -75,8 +82,8 @@ func escapeForMarkdown(text string) string {
 	return text
 }
 
-// AddNotification 添加通知到缓冲
-func (bm *BotManager) AddNotification(service, env, user, oldVersion, newVersion string, success bool) {
+// AddNotification 添加通知到缓冲（支持 extra）
+func (bm *BotManager) AddNotification(service, env, user, oldVersion, newVersion string, success bool, extra string) {
 	if !bm.Enabled {
 		return
 	}
@@ -87,6 +94,7 @@ func (bm *BotManager) AddNotification(service, env, user, oldVersion, newVersion
 		OldVersion: oldVersion,
 		NewVersion: newVersion,
 		Success:    success,
+		Extra:      extra,
 		SendTime:   time.Now(),
 	}
 	statusKey := map[bool]string{true: "success", false: "failure"}[success]
@@ -123,27 +131,35 @@ func (bm *BotManager) flushBuffer() {
 
 // generateMergedMessage 生成合并消息（5s内相同状态）
 func (bm *BotManager) generateMergedMessage(items []*NotificationItem, success bool) string {
-	// 使用 escapeForMarkdown 转义
 	safe := escapeForMarkdown
-	header := fmt.Sprintf("*Deployment %s (%d 服务)*\n\n", map[bool]string{true: "成功", false: "失败"}[success], len(items))
-	status := map[bool]string{true: "Success *部署成功*", false: "Failure *部署失败-已回滚*"}[success]
+	header := fmt.Sprintf("*部署%s (%d 个服务)*\n\n", map[bool]string{true: "成功", false: "失败"}[success], len(items))
 
-	body := "**详情**:\n"
-	for _, item := range items {
-		body += fmt.Sprintf("• 服务: `%s` | 环境: `%s` | 操作人: `%s` | 旧: `%s` → 新: `%s`\n",
-			safe(item.Service), safe(item.Env), safe(item.User), safe(item.OldVersion), safe(item.NewVersion))
+	body := ""
+	for i, item := range items {
+		// 基础信息
+		line := fmt.Sprintf("%d. *服务*: `%s` | *环境*: `%s` | *命名空间*: `%s` | *旧*: `%s` → *新*: `%s`\n",
+			i+1, safe(item.Service), safe(item.Env), safe(item.User), safe(item.OldVersion), safe(item.NewVersion))
+
+		// 附加事件（仅失败时）
+		if !success && item.Extra != "" {
+			line += fmt.Sprintf("   _异常事件_: %s\n", safe(item.Extra))
+		}
+		body += line
 	}
 
-	return fmt.Sprintf("%s%s**状态**: %s\n**时间**: `%s`\n\n---\n*由 K8s\\\\-CICD Agent 自动发送*",
-		header, body, status, time.Now().Format("2006-01-02 15:04:05"))
+	status := map[bool]string{true: "*部署成功*", false: "*部署失败，已回滚*"}[success]
+	footer := fmt.Sprintf("\n**状态**: %s\n**时间**: `%s`\n\n---\n*由 K8s\\-CICD Agent 自动发送*",
+		status, time.Now().Format("2006-01-02 15:04:05"))
+
+	return header + body + footer
 }
 
 // SendNotification 发送部署通知（现在缓冲添加）
-func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool) error {
+func (bm *BotManager) SendNotification(service, env, user, oldVersion, newVersion string, success bool, extra string) error {
 	if !bm.Enabled {
 		return nil
 	}
-	bm.AddNotification(service, env, user, oldVersion, newVersion, success)
+	bm.AddNotification(service, env, user, oldVersion, newVersion, success, extra)
 	return nil
 }
 
@@ -152,7 +168,6 @@ func (bm *BotManager) sendMessage(text, parseMode string) (int, error) {
 	if !bm.Enabled {
 		return 0, fmt.Errorf("Telegram 未启用")
 	}
-	// 使用预转义的 text
 	payload := map[string]interface{}{
 		"chat_id":    bm.GroupID,
 		"text":       text,
