@@ -104,6 +104,26 @@ func (m *MongoClient) DeleteSnapshotsExceptTask(service, namespace, taskID strin
 }
 
 // 文件: client/mongo_client.go
+// 新增 DeleteTask 方法
+
+func (m *MongoClient) DeleteTask(service, version, env string) error {
+	ctx := context.Background()
+	collection := fmt.Sprintf("tasks_%s", sanitizeEnv(env))
+	filter := bson.M{
+		"service": service,
+		"version": version,
+	}
+	result, err := m.client.Database("cicd").Collection(collection).DeleteOne(ctx, filter)
+	if err != nil {
+		return err
+	}
+	if result.DeletedCount > 0 {
+		logrus.WithFields(logrus.Fields{"service": service, "version": version, "env": env}).Info("删除任务记录")
+	}
+	return nil
+}
+
+// 文件: client/mongo_client.go
 // 新增 DeleteSnapshots 方法
 
 func (m *MongoClient) DeleteSnapshots(service, namespace string) error {
