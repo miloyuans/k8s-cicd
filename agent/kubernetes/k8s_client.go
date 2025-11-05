@@ -1,11 +1,9 @@
 // 文件: kubernetes/k8s_client.go
 // 完整、可直接编译使用的版本
-// 功能：
-// 1. 每次发布前删除 service+namespace 所有快照
-// 2. 精准快照：Deployment → ReadyReplicas>0 且 Age>1s 的最新 ReplicaSet → pod-template-hash → Pod(Running+Ready)
-// 3. 非 Deployment 使用基本标签
-// 4. 导出 BuildNewImage、ExtractTag
-// 5. 所有功能完整，无删减
+// 修复: 
+// 1. 移除 mongo.client 直接访问 → 使用 mongo.DeleteSnapshots
+// 2. 移除未使用变量 deploy
+// 3. 所有功能完整：精准快照、历史清理、BuildNewImage 等
 
 package kubernetes
 
@@ -262,46 +260,30 @@ func (k *K8sClient) GetCurrentImage(service, namespace string) (string, error) {
 	return "", fmt.Errorf("未找到工作负载: %s in %s", service, namespace)
 }
 
-// DeleteOldSnapshots 删除 service+namespace 下的所有历史快照
-func (k *K8sClient) DeleteOldSnapshots(service, namespace string, mongo *client.MongoClient) error {
-	ctx := context.Background()
-	collection := mongo.client.Database("cicd").Collection("image_snapshots")
-
-	filter := map[string]interface{}{
-		"service":   service,
-		"namespace": namespace,
-	}
-
-	result, err := collection.DeleteMany(ctx, filter)
-	if err != nil {
-		return fmt.Errorf("删除历史快照失败: %v", err)
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"service":   service,
-		"namespace": namespace,
-		"deleted":   result.DeletedCount,
-	}).Info("历史快照清理完成")
-	return nil
-}
-
 // SnapshotAndStoreImage 获取当前镜像并存储快照（精准版）
 func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mongo *client.MongoClient) (string, error) {
 	ctx := context.Background()
 
 	// Step 1: 清理历史快照
-	if err := k.DeleteOldSnapshots(service, namespace, mongo); err != nil {
+	if err := mongo.DeleteSnapshots(service, namespace); err != nil {
 		return "", err
 	}
 
 	// Step 2: 尝试获取 Deployment
-	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err != nil {
-		// 非 Deployment → 使用基本标签
-		return k.snapshotFromBasicLabel(service, namespace, taskID, mongo)
+	if _, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
+		// Deployment 路径
+		return k.snapshotFromDeployment(service, namespace, taskID, mongo)
 	}
 
-	// Step 3: 获取所有 ReplicaSet
+	// 非 Deployment → 使用基本标签
+	return k.snapshotFromBasicLabel(service, namespace, taskID, mongo)
+}
+
+// snapshotFromDeployment Deployment 路径（精准）
+func (k *K8sClient) snapshotFromDeployment(service, namespace, taskID string, mongo *client.MongoClient) (string, error) {
+	ctx := context.Background()
+
+	// 获取所有 ReplicaSet
 	rsList, err := k.Clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("app=%s", service),
 	})
@@ -309,7 +291,7 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 		return "", fmt.Errorf("未找到 ReplicaSet")
 	}
 
-	// Step 4: 筛选 ReadyReplicas > 0 且 Age > 1s 的 RS
+	// 筛选 ReadyReplicas > 0 且 Age > 1s
 	now := time.Now()
 	candidates := []appsv1.ReplicaSet{}
 	for _, rs := range rsList.Items {
@@ -324,26 +306,26 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 		return "", fmt.Errorf("无就绪且 Age>1s 的 ReplicaSet")
 	}
 
-	// Step 5: 按创建时间降序，取最新
+	// 按创建时间降序，取最新
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].CreationTimestamp.After(candidates[j].CreationTimestamp.Time)
 	})
 	rs := candidates[0]
 
-	// Step 6: 获取 pod-template-hash
+	// 获取 pod-template-hash
 	hash, ok := rs.Labels["pod-template-hash"]
 	if !ok {
 		return "", fmt.Errorf("ReplicaSet 无 pod-template-hash")
 	}
 	labelSelector := fmt.Sprintf("app=%s,pod-template-hash=%s", service, hash)
 
-	// Step 7: 查询 Pod
+	// 查询 Pod
 	pods, err := k.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
 		return "", fmt.Errorf("查询 Pod 失败: %v", err)
 	}
 
-	// Step 8: 筛选 Running + Ready Pod
+	// 筛选 Running + Ready Pod
 	runningReadyPods := []v1.Pod{}
 	for _, pod := range pods.Items {
 		if pod.Status.Phase == v1.PodRunning {
@@ -364,7 +346,7 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 		return "", fmt.Errorf("无 Running + Ready 的 Pod")
 	}
 
-	// Step 9: 提取镜像
+	// 提取镜像
 	pod := runningReadyPods[0]
 	if len(pod.Spec.Containers) == 0 {
 		return "", fmt.Errorf("Pod 无容器")
@@ -372,7 +354,7 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 	oldImage := pod.Spec.Containers[0].Image
 	oldTag := ExtractTag(oldImage)
 
-	// Step 10: 存储快照
+	// 存储快照
 	snapshot := &models.ImageSnapshot{
 		Service:    service,
 		Namespace:  namespace,
