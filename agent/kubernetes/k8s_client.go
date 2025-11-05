@@ -266,22 +266,31 @@ func (k *K8sClient) GetCurrentImage(service, namespace string) (string, error) {
 // SnapshotAndStoreImage 获取当前镜像并存储快照（精准版）
 // SnapshotAndStoreImage 返回 oldTag 且确保非空
 // SnapshotAndStoreImage 创建并存储镜像快照，返回 oldTag
+// SnapshotAndStoreImage 支持多容器：只快照容器名包含 service 的容器
 func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mongo *client.MongoClient) (string, error) {
 	startTime := time.Now()
 	ctx := context.Background()
 
-	// 尝试 Deployment
-	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil {
-		if len(deploy.Spec.Template.Spec.Containers) == 0 {
-			return "", fmt.Errorf("容器为空")
+	// 辅助函数：查找并返回匹配容器的镜像 tag
+	findMatchingContainer := func(containers []v1.Container) (string, string, error) {
+		for _, c := range containers {
+			if strings.Contains(c.Name, service) {
+				return c.Image, ExtractTag(c.Image), nil
+			}
 		}
-		image := deploy.Spec.Template.Spec.Containers[0].Image
-		tag := ExtractTag(image)
+		return "", "", fmt.Errorf("未找到匹配的容器: %s", service)
+	}
+
+	// 1. Deployment
+	if deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
+		image, tag, err := findMatchingContainer(deploy.Spec.Template.Spec.Containers)
+		if err != nil {
+			return "", err
+		}
 		snapshot := &models.ImageSnapshot{
 			Namespace:  namespace,
 			Service:    service,
-			Container:  deploy.Spec.Template.Spec.Containers[0].Name,
+			Container:  "", // 可选：记录容器名
 			Image:      image,
 			Tag:        tag,
 			RecordedAt: time.Now(),
@@ -290,38 +299,25 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 		if err := mongo.StoreImageSnapshot(snapshot); err != nil {
 			return "", err
 		}
-		if err := mongo.DeleteSnapshotsExceptTask(service, namespace, taskID); err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "SnapshotAndStoreImage",
-				"took":   time.Since(startTime),
-			}).Warnf(color.YellowString("清理旧快照失败: %v"), err)
-		}
+		_ = mongo.DeleteSnapshotsExceptTask(service, namespace, taskID)
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "SnapshotAndStoreImage",
 			"took":   time.Since(startTime),
-			"data": logrus.Fields{
-				"image":     image,
-				"namespace": namespace,
-				"service":   service,
-			},
 		}).Infof(color.GreenString("快照记录成功 old_tag=%s task_id=%s"), tag, taskID)
 		return tag, nil
 	}
 
-	// 尝试 StatefulSet
-	sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil {
-		if len(sts.Spec.Template.Spec.Containers) == 0 {
-			return "", fmt.Errorf("容器为空")
+	// 2. StatefulSet
+	if sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
+		image, tag, err := findMatchingContainer(sts.Spec.Template.Spec.Containers)
+		if err != nil {
+			return "", err
 		}
-		image := sts.Spec.Template.Spec.Containers[0].Image
-		tag := ExtractTag(image)
 		snapshot := &models.ImageSnapshot{
 			Namespace:  namespace,
 			Service:    service,
-			Container:  sts.Spec.Template.Spec.Containers[0].Name,
+			Container:  "",
 			Image:      image,
 			Tag:        tag,
 			RecordedAt: time.Now(),
@@ -330,38 +326,25 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 		if err := mongo.StoreImageSnapshot(snapshot); err != nil {
 			return "", err
 		}
-		if err := mongo.DeleteSnapshotsExceptTask(service, namespace, taskID); err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "SnapshotAndStoreImage",
-				"took":   time.Since(startTime),
-			}).Warnf(color.YellowString("清理旧快照失败: %v"), err)
-		}
+		_ = mongo.DeleteSnapshotsExceptTask(service, namespace, taskID)
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "SnapshotAndStoreImage",
 			"took":   time.Since(startTime),
-			"data": logrus.Fields{
-				"image":     image,
-				"namespace": namespace,
-				"service":   service,
-			},
 		}).Infof(color.GreenString("快照记录成功 old_tag=%s task_id=%s"), tag, taskID)
 		return tag, nil
 	}
 
-	// 尝试 DaemonSet
-	ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil {
-		if len(ds.Spec.Template.Spec.Containers) == 0 {
-			return "", fmt.Errorf("容器为空")
+	// 3. DaemonSet
+	if ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
+		image, tag, err := findMatchingContainer(ds.Spec.Template.Spec.Containers)
+		if err != nil {
+			return "", err
 		}
-		image := ds.Spec.Template.Spec.Containers[0].Image
-		tag := ExtractTag(image)
 		snapshot := &models.ImageSnapshot{
 			Namespace:  namespace,
 			Service:    service,
-			Container:  ds.Spec.Template.Spec.Containers[0].Name,
+			Container:  "",
 			Image:      image,
 			Tag:        tag,
 			RecordedAt: time.Now(),
@@ -370,22 +353,11 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 		if err := mongo.StoreImageSnapshot(snapshot); err != nil {
 			return "", err
 		}
-		if err := mongo.DeleteSnapshotsExceptTask(service, namespace, taskID); err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "SnapshotAndStoreImage",
-				"took":   time.Since(startTime),
-			}).Warnf(color.YellowString("清理旧快照失败: %v"), err)
-		}
+		_ = mongo.DeleteSnapshotsExceptTask(service, namespace, taskID)
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "SnapshotAndStoreImage",
 			"took":   time.Since(startTime),
-			"data": logrus.Fields{
-				"image":     image,
-				"namespace": namespace,
-				"service":   service,
-			},
 		}).Infof(color.GreenString("快照记录成功 old_tag=%s task_id=%s"), tag, taskID)
 		return tag, nil
 	}
@@ -534,18 +506,39 @@ func (k *K8sClient) getImageFromBasicLabel(service, namespace string) (string, e
 }
 
 // UpdateWorkloadImage 更新镜像
+// UpdateWorkloadImage 支持多容器：只更新容器名包含 service 名的容器
 func (k *K8sClient) UpdateWorkloadImage(service, namespace, newVersion string) error {
 	startTime := time.Now()
 	ctx := context.Background()
 
+	// 辅助函数：更新容器镜像（只匹配容器名包含 service 的容器）
+	updateContainers := func(containers []v1.Container, newImage string) (bool, error) {
+		updated := false
+		for i := range containers {
+			if strings.Contains(containers[i].Name, service) {
+				oldImage := containers[i].Image
+				containers[i].Image = newImage
+				updated = true
+				logrus.WithFields(logrus.Fields{
+					"time":   time.Now().Format("2006-01-02 15:04:05"),
+					"method": "UpdateWorkloadImage",
+					"took":   time.Since(startTime),
+				}).Infof(color.GreenString("容器镜像更新: %s -> %s [容器: %s]"), oldImage, newImage, containers[i].Name)
+			}
+		}
+		return updated, nil
+	}
+
 	// 1. 尝试 Deployment
 	if deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
-		if len(deploy.Spec.Template.Spec.Containers) == 0 {
-			return fmt.Errorf("容器为空")
+		newImage := BuildNewImage(deploy.Spec.Template.Spec.Containers[0].Image, newVersion)
+		updated, err := updateContainers(deploy.Spec.Template.Spec.Containers, newImage)
+		if err != nil {
+			return err
 		}
-		oldImage := deploy.Spec.Template.Spec.Containers[0].Image
-		newImage := BuildNewImage(oldImage, newVersion)
-		deploy.Spec.Template.Spec.Containers[0].Image = newImage
+		if !updated {
+			return fmt.Errorf("未找到匹配的容器: %s", service)
+		}
 		_, err = k.Clientset.AppsV1().Deployments(namespace).Update(ctx, deploy, metav1.UpdateOptions{})
 		if err != nil {
 			return err
@@ -554,18 +547,20 @@ func (k *K8sClient) UpdateWorkloadImage(service, namespace, newVersion string) e
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateWorkloadImage",
 			"took":   time.Since(startTime),
-		}).Infof(color.GreenString("镜像更新成功 [Deployment]: %s -> %s"), oldImage, newImage)
+		}).Infof(color.GreenString("镜像更新成功 [Deployment]: %s"), service)
 		return nil
 	}
 
 	// 2. 尝试 StatefulSet
 	if sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
-		if len(sts.Spec.Template.Spec.Containers) == 0 {
-			return fmt.Errorf("容器为空")
+		newImage := BuildNewImage(sts.Spec.Template.Spec.Containers[0].Image, newVersion)
+		updated, err := updateContainers(sts.Spec.Template.Spec.Containers, newImage)
+		if err != nil {
+			return err
 		}
-		oldImage := sts.Spec.Template.Spec.Containers[0].Image
-		newImage := BuildNewImage(oldImage, newVersion)
-		sts.Spec.Template.Spec.Containers[0].Image = newImage
+		if !updated {
+			return fmt.Errorf("未找到匹配的容器: %s", service)
+		}
 		_, err = k.Clientset.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{})
 		if err != nil {
 			return err
@@ -574,18 +569,20 @@ func (k *K8sClient) UpdateWorkloadImage(service, namespace, newVersion string) e
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateWorkloadImage",
 			"took":   time.Since(startTime),
-		}).Infof(color.GreenString("镜像更新成功 [StatefulSet]: %s -> %s"), oldImage, newImage)
+		}).Infof(color.GreenString("镜像更新成功 [StatefulSet]: %s"), service)
 		return nil
 	}
 
 	// 3. 尝试 DaemonSet
 	if ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
-		if len(ds.Spec.Template.Spec.Containers) == 0 {
-			return fmt.Errorf("容器为空")
+		newImage := BuildNewImage(ds.Spec.Template.Spec.Containers[0].Image, newVersion)
+		updated, err := updateContainers(ds.Spec.Template.Spec.Containers, newImage)
+		if err != nil {
+			return err
 		}
-		oldImage := ds.Spec.Template.Spec.Containers[0].Image
-		newImage := BuildNewImage(oldImage, newVersion)
-		ds.Spec.Template.Spec.Containers[0].Image = newImage
+		if !updated {
+			return fmt.Errorf("未找到匹配的容器: %s", service)
+		}
 		_, err = k.Clientset.AppsV1().DaemonSets(namespace).Update(ctx, ds, metav1.UpdateOptions{})
 		if err != nil {
 			return err
@@ -594,7 +591,7 @@ func (k *K8sClient) UpdateWorkloadImage(service, namespace, newVersion string) e
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "UpdateWorkloadImage",
 			"took":   time.Since(startTime),
-		}).Infof(color.GreenString("镜像更新成功 [DaemonSet]: %s -> %s"), oldImage, newImage)
+		}).Infof(color.GreenString("镜像更新成功 [DaemonSet]: %s"), service)
 		return nil
 	}
 

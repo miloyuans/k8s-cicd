@@ -127,7 +127,9 @@ func LoadConfig(filename string) (*Config, error) {
 
 // setDefaults 设置默认值（添加 Telegram 默认）
 // setDefaults 移除所有硬编码默认值
+// setDefaults 设置默认值（强制 MaxRetries=1，发布失败不重试）
 func (c *Config) setDefaults() {
+	// API 默认值
 	if c.API.PushInterval == 0 {
 		c.API.PushInterval = 30 * time.Second
 	}
@@ -138,6 +140,7 @@ func (c *Config) setDefaults() {
 		c.API.MaxRetries = 3
 	}
 
+	// MongoDB 默认值
 	if c.Mongo.TTL == 0 {
 		c.Mongo.TTL = 30 * 24 * time.Hour
 	}
@@ -148,8 +151,9 @@ func (c *Config) setDefaults() {
 		c.Mongo.URI = "mongodb://localhost:27017"
 	}
 
+	// 任务队列：强制 MaxRetries=1，失败后直接进入失败处理
 	if c.Task.MaxRetries == 0 {
-		c.Task.MaxRetries = 3
+		c.Task.MaxRetries = 1 // 关键：不再重试
 	}
 	if c.Task.RetryDelay == 0 {
 		c.Task.RetryDelay = 30
@@ -161,6 +165,7 @@ func (c *Config) setDefaults() {
 		c.Task.MaxQueueSize = 100
 	}
 
+	// 部署默认值
 	if c.Deploy.WaitTimeout == 0 {
 		c.Deploy.WaitTimeout = 5 * time.Minute
 	}
@@ -171,6 +176,7 @@ func (c *Config) setDefaults() {
 		c.Deploy.PollInterval = 5 * time.Second
 	}
 
+	// Kubernetes 默认值
 	if c.Kubernetes.AuthType == "" {
 		c.Kubernetes.AuthType = "kubeconfig"
 	}
@@ -178,10 +184,7 @@ func (c *Config) setDefaults() {
 		c.Kubernetes.Namespace = "default"
 	}
 
-	// 移除 EnvMapping 默认值
-	// if len(c.EnvMapping.Mappings) == 0 { ... } 删除
-
-	// Telegram：配置文件优先，token+group_id 存在即启用
+	// Telegram：配置文件优先
 	if c.Telegram.Token == "" {
 		c.Telegram.Token = os.Getenv("TELEGRAM_TOKEN")
 	}

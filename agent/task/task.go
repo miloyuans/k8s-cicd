@@ -112,11 +112,12 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				task.ID = fmt.Sprintf("%s-%s-%s", task.DeployRequest.Service, task.DeployRequest.Version, task.DeployRequest.Environments[0])
 			}
 
+			// 更新状态
 			env := task.DeployRequest.Environments[0]
 			_ = mongo.UpdateConfirmationStatus(task.DeployRequest.TaskID, "已执行")
 			_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "running")
 
-			// 关键修复：用 func() 包裹，确保 defer 执行
+			// 关键：直接执行，不重试
 			func() {
 				lock := q.getLock(task.DeployRequest.Service, task.DeployRequest.Namespace)
 				lock.Lock()
@@ -124,17 +125,10 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 
 				err := q.executeTask(cfg, mongo, k8s, botMgr, apiClient, task)
 				if err != nil {
-					task.Retries++
-					if task.Retries < cfg.Task.MaxRetries {
-						time.Sleep(time.Duration(cfg.Task.RetryDelay) * time.Second)
-						q.Enqueue(task)
-					} else {
-						q.handlePermanentFailure(k8s, mongo, botMgr, apiClient, task)
-					}
+					// 直接进入失败处理（不再入队）
+					q.handlePermanentFailure(k8s, mongo, botMgr, apiClient, task)
 				}
 			}()
-
-			continue
 		}
 	}
 }
@@ -274,8 +268,9 @@ func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.Mongo
 	botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, oldTag, task.DeployRequest.Version, false, extra)
 }
 
+// handlePermanentFailure 直接处理失败（不再重试）
 func (q *TaskQueue) handlePermanentFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, botMgr *telegram.BotManager, apiClient *api.APIClient, task *Task) {
-	q.handleFailure(k8s, mongo, botMgr, apiClient, task, "unknown", task.DeployRequest.Environments[0], "达到最大重试次数")
+	q.handleFailure(k8s, mongo, botMgr, apiClient, task, "unknown", task.DeployRequest.Environments[0], "发布执行失败")
 }
 
 func getImageOrUnknown(tag string) string {
