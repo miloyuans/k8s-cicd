@@ -165,7 +165,7 @@ func NewServer(mongoStorage *storage.MongoStorage, statsStorage *storage.StatsSt
 	server.Router.HandleFunc("/push", server.ipWhitelistMiddleware(server.handlePush))
 	server.Router.HandleFunc("/query", server.ipWhitelistMiddleware(server.handleQuery))
 	server.Router.HandleFunc("/status", server.ipWhitelistMiddleware(server.handleStatus))
-	server.Router.HandleFunc("/deploy", server.ipWhitelistMiddleware(server.handleDeploy))
+	server.Router.HandleFunc("/submit-task", server.ipWhitelistMiddleware(server.handleDeploy))
 
 	getGlobalWorkerPool() // 初始化工作池
 	return server
