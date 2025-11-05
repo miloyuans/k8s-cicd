@@ -1,5 +1,6 @@
 // 文件: kubernetes/k8s_client.go
 // 完整、可直接编译使用的版本
+// 修复: 移除未使用的 ctx 变量
 // 功能：
 // 1. 精准快照：Deployment → ownerReferences → ReadyReplicas>0 && Age>1s → hash → Pod(Running+Ready)
 // 2. 存储快照时带 task_id
@@ -264,8 +265,6 @@ func (k *K8sClient) GetCurrentImage(service, namespace string) (string, error) {
 
 // SnapshotAndStoreImage 获取当前镜像并存储快照（精准版）
 func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mongo *client.MongoClient) (string, error) {
-	ctx := context.Background()
-
 	// Step 1: 获取当前镜像（精准版）
 	oldImage, err := k.getCurrentRunningImage(service, namespace)
 	if err != nil {
