@@ -1,11 +1,6 @@
 // 文件: telegram/bot.go
-// 修改: 
-// 1. 完全基于原代码，保留 5s 合并缓冲机制
-// 2. 简化模板：仅保留服务、环境、命名空间、新/旧版本、结果
-// 3. 支持附加事件信息（extra）
-// 4. 使用 safe 转义函数，避免 Markdown 转义问题
-// 5. 合并发送时：相同状态合并，附加事件分别列出
-// 6. 保留所有原有功能：Stop、flushBuffer、sendMessage 等
+// 修复: 删除重复的 Stop 方法（只保留一个）
+// 保留所有功能：5s 合并、Markdown 转义、异步 flush、附加事件
 
 package telegram
 
@@ -112,10 +107,7 @@ func (bm *BotManager) AddNotification(service, env, user, oldVersion, newVersion
 	}
 }
 
-// flushBuffer 刷新缓冲，合并发送
-// 文件: telegram/bot.go
-// 修改: flushBuffer 异步发送，避免阻塞 Stop
-
+// flushBuffer 刷新缓冲，合并发送（异步）
 func (bm *BotManager) flushBuffer() {
 	bm.buffer.mu.Lock()
 	items := make(map[string][]*NotificationItem)
@@ -128,20 +120,14 @@ func (bm *BotManager) flushBuffer() {
 	// 异步发送
 	go func() {
 		for statusKey, list := range items {
-			if len(list) == 0 { continue }
+			if len(list) == 0 {
+				continue
+			}
 			success := statusKey == "success"
 			msg := bm.generateMergedMessage(list, success)
 			bm.sendMessage(msg, "MarkdownV2")
 		}
 	}()
-}
-
-func (bm *BotManager) Stop() {
-	if bm.buffer != nil && bm.buffer.mergeTimer != nil {
-		bm.buffer.mergeTimer.Stop()
-		bm.flushBuffer() // 异步
-	}
-	logrus.Info(color.GreenString("Telegram BotManager 停止"))
 }
 
 // generateMergedMessage 生成合并消息（5s内相同状态）
@@ -151,11 +137,9 @@ func (bm *BotManager) generateMergedMessage(items []*NotificationItem, success b
 
 	body := ""
 	for i, item := range items {
-		// 基础信息
 		line := fmt.Sprintf("%d. *服务*: `%s` | *环境*: `%s` | *命名空间*: `%s` | *旧*: `%s` → *新*: `%s`\n",
 			i+1, safe(item.Service), safe(item.Env), safe(item.User), safe(item.OldVersion), safe(item.NewVersion))
 
-		// 附加事件（仅失败时）
 		if !success && item.Extra != "" {
 			line += fmt.Sprintf("   _异常事件_: %s\n", safe(item.Extra))
 		}
@@ -213,11 +197,11 @@ func (bm *BotManager) sendMessage(text, parseMode string) (int, error) {
 	return messageID, nil
 }
 
-// Stop 停止（刷新缓冲）
+// Stop 停止（刷新缓冲）—— 仅保留一个
 func (bm *BotManager) Stop() {
 	if bm.buffer != nil && bm.buffer.mergeTimer != nil {
 		bm.buffer.mergeTimer.Stop()
-		bm.flushBuffer() // 强制发送剩余
+		bm.flushBuffer() // 异步刷新
 	}
 	logrus.Info(color.GreenString("Telegram BotManager 停止 (缓冲已刷新)"))
 }
