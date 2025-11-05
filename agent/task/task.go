@@ -99,58 +99,51 @@ func (q *TaskQueue) StartWorkers(cfg *config.Config, mongo *client.MongoClient, 
 
 // worker 执行任务
 func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, workerID int) {
-	defer q.wg.Done()
-	logrus.Infof(color.GreenString("Worker-%d 启动"), workerID)
+    defer q.wg.Done()
+    logrus.Infof(color.GreenString("Worker-%d 启动"), workerID)
 
-	for {
-		select {
-		case <-q.stopCh:
-			logrus.Infof(color.GreenString("Worker-%d 停止"), workerID)
-			return
-		default:
-			task, ok := q.Dequeue()
-			if !ok {
-				time.Sleep(1 * time.Second)
-				continue
-			}
+    for {
+        select {
+        case <-q.stopCh:
+            logrus.Infof(color.GreenString("Worker-%d 停止"), workerID)
+            return
+        default:
+            task, ok := q.Dequeue()
+            if !ok {
+                time.Sleep(1 * time.Second)
+                continue
+            }
 
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "worker",
-				"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "worker_id": workerID},
-			}).Infof(color.GreenString("Worker-%d 出队任务: %s (队列剩余: %d)"), workerID, task.DeployRequest.TaskID, q.queue.Len())
+            if task.DeployRequest.TaskID == "" {
+                task.DeployRequest.TaskID = uuid.New().String()
+                task.ID = fmt.Sprintf("%s-%s-%s", task.DeployRequest.Service, task.DeployRequest.Version, task.DeployRequest.Environments[0])
+            }
 
-			// 生成 TaskID
-			if task.DeployRequest.TaskID == "" {
-				task.DeployRequest.TaskID = uuid.New().String()
-				task.ID = fmt.Sprintf("%s-%s-%s", task.DeployRequest.Service, task.DeployRequest.Version, task.DeployRequest.Environments[0])
-			}
+            env := task.DeployRequest.Environments[0]
+            _ = mongo.UpdateConfirmationStatus(task.DeployRequest.TaskID, "已执行")
+            _ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "running")
 
-			env := task.DeployRequest.Environments[0]
+            // 关键修复：用匿名函数包裹，确保 defer 执行
+            func() {
+                lock := q.getLock(task.DeployRequest.Service, task.DeployRequest.Namespace)
+                lock.Lock()
+                defer lock.Unlock()
 
-			// 防重复入队
-			_ = mongo.UpdateConfirmationStatus(task.DeployRequest.TaskID, "已执行")
-			_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "running")
+                err := q.executeTask(cfg, mongo, k8s, botMgr, apiClient, task)
+                if err != nil {
+                    task.Retries++
+                    if task.Retries < cfg.Task.MaxRetries {
+                        time.Sleep(time.Duration(cfg.Task.RetryDelay) * time.Second)
+                        q.Enqueue(task)
+                    } else {
+                        q.handlePermanentFailure(k8s, mongo, botMgr, apiClient, task)
+                    }
+                }
+            }()
 
-			// 串行锁
-			lock := q.getLock(task.DeployRequest.Service, task.DeployRequest.Namespace)
-			lock.Lock()
-			defer lock.Unlock()
-
-			// 执行任务
-			err := q.executeTask(cfg, mongo, k8s, botMgr, apiClient, task)
-			if err != nil {
-				task.Retries++
-				if task.Retries < cfg.Task.MaxRetries {
-					time.Sleep(time.Duration(cfg.Task.RetryDelay) * time.Second)
-					q.Enqueue(task)
-				} else {
-					q.handlePermanentFailure(k8s, mongo, botMgr, apiClient, task)
-				}
-			}
-			continue
-		}
-	}
+            continue
+        }
+    }
 }
 
 // executeTask 执行核心任务逻辑

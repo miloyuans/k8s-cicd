@@ -82,6 +82,27 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	return &MongoClient{client: client, cfg: cfg}, nil
 }
 
+// DeleteSnapshotsExceptTask 清理旧快照，保留当前任务的
+func (m *MongoClient) DeleteSnapshotsExceptTask(service, namespace, taskID string) error {
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection("image_snapshots")
+
+	filter := bson.M{
+		"service":   service,
+		"namespace": namespace,
+		"task_id":   bson.M{"$ne": taskID},
+	}
+
+	result, err := collection.DeleteMany(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("删除历史快照失败: %v", err)
+	}
+	if result.DeletedCount > 0 {
+		logrus.WithFields(logrus.Fields{"deleted": result.DeletedCount}).Info("清理旧快照")
+	}
+	return nil
+}
+
 // 文件: client/mongo_client.go
 // 新增 DeleteSnapshots 方法
 
