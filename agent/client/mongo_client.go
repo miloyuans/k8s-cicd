@@ -82,6 +82,26 @@ func NewMongoClient(cfg *config.MongoConfig) (*MongoClient, error) {
 	return &MongoClient{client: client, cfg: cfg}, nil
 }
 
+// 文件: client/mongo_client.go
+// 新增 DeleteSnapshots 方法
+
+func (m *MongoClient) DeleteSnapshots(service, namespace string) error {
+	ctx := context.Background()
+	collection := m.client.Database("cicd").Collection("image_snapshots")
+
+	filter := bson.M{
+		"service":   service,
+		"namespace": namespace,
+	}
+
+	result, err := collection.DeleteMany(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("删除历史快照失败: %v", err)
+	}
+	logrus.WithFields(logrus.Fields{"deleted": result.DeletedCount}).Info("历史快照清理完成")
+	return nil
+}
+
 // createTTLIndexes 创建 TTL、排序和唯一索引（使用 sanitized env；push_data 在 cicd，并添加唯一索引）
 func createTTLIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	ctx := context.Background()
