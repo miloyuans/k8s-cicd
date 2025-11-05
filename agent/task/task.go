@@ -102,10 +102,9 @@ func (q *TaskQueue) StartWorkers(cfg *config.Config, mongo *client.MongoClient, 
 	}
 }
 
-// worker 执行任务
+// worker 执行任务（防止worker 进入sleep）
 func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, workerID int) {
 	defer q.wg.Done()
-
 	logrus.Infof(color.GreenString("Worker-%d 启动"), workerID)
 
 	for {
@@ -120,12 +119,7 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 				continue
 			}
 
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "worker",
-				"data":   logrus.Fields{"task_id": task.DeployRequest.TaskID, "worker_id": workerID},
-			}).Infof(color.GreenString("Worker-%d 出队任务: %s (队列剩余: %d)"), workerID, task.DeployRequest.TaskID, q.queue.Len())
-
+			// 生成 TaskID
 			if task.DeployRequest.TaskID == "" {
 				task.DeployRequest.TaskID = uuid.New().String()
 				task.ID = fmt.Sprintf("%s-%s-%s", task.DeployRequest.Service, task.DeployRequest.Version, task.DeployRequest.Environments[0])
@@ -133,48 +127,29 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 
 			env := task.DeployRequest.Environments[0]
 
-			if err := mongo.UpdateConfirmationStatus(task.DeployRequest.TaskID, "已执行"); err != nil {
-				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("更新 confirmation_status 失败: %v"), err)
-			}
+			// 防重复
+			_ = mongo.UpdateConfirmationStatus(task.DeployRequest.TaskID, "已执行")
+			_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "running")
 
-			if err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "running"); err != nil {
-				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("更新 running 状态失败: %v"), err)
-			}
-
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "worker",
-				"data": logrus.Fields{
-					"task_id":     task.DeployRequest.TaskID,
-					"service":     task.DeployRequest.Service,
-					"version":     task.DeployRequest.Version,
-					"environment": env,
-					"user":        task.DeployRequest.User,
-					"namespace":   task.DeployRequest.Namespace,
-				},
-			}).Infof(color.GreenString("Worker-%d 开始执行任务 (status=running): %s"), workerID, task.DeployRequest.TaskID)
-
+			// 串行锁
 			lock := q.getLock(task.DeployRequest.Service, task.DeployRequest.Namespace)
 			lock.Lock()
-			logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Debug("Lock acquired for serial execution")
-			defer func() {
-				lock.Unlock()
-				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Debug("Lock released after execution")
-			}()
+			defer lock.Unlock()
 
+			// 执行
 			err := q.executeTask(cfg, mongo, k8s, apiClient, botMgr, task)
 			if err != nil {
-				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("任务执行失败: %v"), err)
 				task.Retries++
 				if task.Retries < cfg.Task.MaxRetries {
-					logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID, "retries": task.Retries}).Warnf(color.YellowString("任务重试 %d/%d 次"), task.Retries, cfg.Task.MaxRetries)
 					time.Sleep(time.Duration(cfg.Task.RetryDelay) * time.Second)
 					q.Enqueue(task)
-					continue
 				} else {
 					q.handlePermanentFailure(k8s, mongo, apiClient, botMgr, task)
 				}
 			}
+
+			// 继续下一个任务
+			continue
 		}
 	}
 }
