@@ -1,7 +1,10 @@
 // 文件: kubernetes/k8s_client.go
-// 修改: DiscoverServicesFromNamespace 仅返回服务名（去重，不含 tag）；新增 SnapshotAndStoreImage 方法，用于获取当前镜像并存储快照到 MongoDB。
-// 统一将 buildNewImage 改为导出 BuildNewImage，并修复所有调用处。
-// 保留所有现有功能，包括 ExtractTag、ExtractBaseImage 等。
+// 修改: SnapshotAndStoreImage 升级为：仅记录 Running 状态的 Pod 镜像作为旧版本快照
+// 1. 获取所有 Pod
+// 2. 过滤出 Running 状态的 Pod
+// 3. 若无 Running Pod → 返回错误，任务失败
+// 4. 若有多个 Running Pod，取第一个容器的镜像（假设一致）
+// 5. 存储快照并返回旧 tag
 
 package kubernetes
 
@@ -22,6 +25,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
+	v1 "k8s.io/api/core/v1"
 )
 
 // K8sClient Kubernetes 客户端
@@ -258,19 +262,43 @@ func (k *K8sClient) GetCurrentImage(service, namespace string) (string, error) {
 	return "", fmt.Errorf("未找到工作负载: %s in %s", service, namespace)
 }
 
-// SnapshotAndStoreImage 获取当前镜像并存储快照到 Mongo
+// SnapshotAndStoreImage 获取当前镜像并存储快照到 Mongo（仅 Running Pod）
 func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mongo *client.MongoClient) (string, error) {
-	oldImage, err := k.GetCurrentImage(service, namespace)
+	ctx := context.Background()
+	labelSelector := fmt.Sprintf("app=%s", service)
+
+	// 1. 获取所有 Pod
+	pods, err := k.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("查询 Pod 失败: %v", err)
 	}
 
+	// 2. 过滤 Running 状态的 Pod
+	runningPods := []v1.Pod{}
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == v1.PodRunning {
+			runningPods = append(runningPods, pod)
+		}
+	}
+
+	// 3. 无 Running Pod → 失败
+	if len(runningPods) == 0 {
+		return "", fmt.Errorf("当前服务无 Running 状态的 Pod，无法记录快照")
+	}
+
+	// 4. 取第一个 Running Pod 的镜像（假设一致）
+	pod := runningPods[0]
+	if len(pod.Spec.Containers) == 0 {
+		return "", fmt.Errorf("Running Pod 无容器")
+	}
+	oldImage := pod.Spec.Containers[0].Image
 	oldTag := ExtractTag(oldImage)
 
+	// 5. 存储快照
 	snapshot := &models.ImageSnapshot{
 		Service:    service,
 		Namespace:  namespace,
-		Container:  "default", // 假设首个容器
+		Container:  "default",
 		Image:      oldImage,
 		Tag:        oldTag,
 		RecordedAt: time.Now(),
@@ -281,6 +309,11 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 		return oldTag, err
 	}
 
+	logrus.WithFields(logrus.Fields{
+		"task_id": taskID,
+		"service": service,
+		"old_image": oldImage,
+	}).Info("快照记录成功（基于 Running Pod）")
 	return oldTag, nil
 }
 
