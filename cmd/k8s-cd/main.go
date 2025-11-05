@@ -1,6 +1,7 @@
-// 文件: main.go
-// 修改: 在 NewTaskQueue 后添加日志打印 workers 和 maxQueueSize 配置，便于调试。
-// 保留所有现有功能，包括优雅关闭等。
+// 文件: cmd/k8s-cd/main.go
+// 完整、可直接编译使用的 main.go
+// 修复所有编译错误：ctx、stopStart、done 未使用/未定义
+// 保留优雅关闭逻辑，10 秒超时
 
 package main
 
@@ -48,26 +49,26 @@ func main() {
 		}
 	}()
 
-	// 步骤4：初始化 Kubernetes 客户端（支持 kubeconfig / serviceaccount）
+	// 步骤4：初始化 Kubernetes 客户端
 	k8sClient, err := kubernetes.NewK8sClient(&cfg.Kubernetes, &cfg.Deploy)
 	if err != nil {
 		logrus.Fatalf(color.RedString("Kubernetes 连接失败: %v"), err)
 	}
 
-	// 步骤5：初始化 API 客户端
+	// 步骤5：初始化 API 客户端（push 功能用）
 	apiClient := api.NewAPIClient(&cfg.API)
 
-	// 步骤6：初始化 Telegram BotManager（从配置读取）
+	// 步骤6：初始化 Telegram BotManager
 	if !cfg.Telegram.Enabled || cfg.Telegram.Token == "" || cfg.Telegram.GroupID == "" {
 		logrus.Warn(color.YellowString("Telegram 配置未完整，通知功能将禁用"))
 	}
-	botMgr := telegram.NewBotManager(&cfg.Telegram) // 传入配置
+	botMgr := telegram.NewBotManager(&cfg.Telegram)
 
-	// 步骤7：初始化任务队列（资源约束: MaxQueueSize）
-	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers, cfg.Task.MaxQueueSize) // 已通过参数设置，无需重复赋值
-	logrus.Infof(color.GreenString("任务队列配置: workers=%d, max_size=%d"), cfg.Task.QueueWorkers, cfg.Task.MaxQueueSize)  // 新增: 配置日志
+	// 步骤7：初始化任务队列
+	taskQ := task.NewTaskQueue(cfg.Task.QueueWorkers, cfg.Task.MaxQueueSize)
+	logrus.Infof(color.GreenString("任务队列配置: workers=%d, max_size=%d"), cfg.Task.QueueWorkers, cfg.Task.MaxQueueSize)
 
-	// 步骤8：组装 Agent（字段名大写）
+	// 步骤8：组装 Agent
 	ag := &agent.Agent{
 		Cfg:       cfg,
 		Mongo:     mongoClient,
@@ -97,13 +98,14 @@ func main() {
 
 	<-sigChan
 
-	// 步骤11：优雅关闭，带超时强制
+	// 步骤11：优雅关闭，带超时
 	logrus.Info(color.YellowString("收到关闭信号，开始优雅关闭..."))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // 30s 超时
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	stopStart := time.Now()
+	done := make(chan struct{})
+
 	go func() {
 		ag.Stop()
 		close(done)
@@ -111,8 +113,12 @@ func main() {
 
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
-		logrus.Warn("优雅关闭超时，强制退出")
+		logrus.Info(color.GreenString("k8s-cd Agent 关闭完成"))
+	case <-ctx.Done():
+		if ctx.Err() == context.DeadlineExceeded {
+			logrus.Error(color.RedString("优雅关闭超时，强制终止进程"))
+			os.Exit(1)
+		}
 	}
 
 	// 正常退出
