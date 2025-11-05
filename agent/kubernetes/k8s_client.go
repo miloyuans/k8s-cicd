@@ -1,6 +1,7 @@
 // 文件: kubernetes/k8s_client.go
 // 修改: DiscoverServicesFromNamespace 仅返回服务名（去重，不含 tag）；新增 SnapshotAndStoreImage 方法，用于获取当前镜像并存储快照到 MongoDB。
-// 保留所有现有功能，包括 ExtractTag、extractBaseImage、buildNewImage 等。
+// 统一将 buildNewImage 改为导出 BuildNewImage，并修复所有调用处。
+// 保留所有现有功能，包括 ExtractTag、ExtractBaseImage 等。
 
 package kubernetes
 
@@ -124,7 +125,7 @@ func BuildNewImage(currentImage, newTag string) string {
 	return fmt.Sprintf("%s:%s", base, newTag)
 }
 
-// DiscoverServicesFromNamespace 发现命名空间中的服务（仅服务名，去重，不含 tag）
+// DiscoverServicesFromNamespace 发现命名空间中的服务（仅返回服务名，去重，不含 tag）
 func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, error) {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -137,9 +138,7 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 		logrus.Errorf("获取 Deployment 失败: %v", err)
 	} else {
 		for _, d := range deployments.Items {
-			if len(d.Spec.Template.Spec.Containers) > 0 {
-				serviceSet[d.Name] = struct{}{}
-			}
+			serviceSet[d.Name] = struct{}{}
 		}
 	}
 
@@ -149,9 +148,7 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 		logrus.Errorf("获取 StatefulSet 失败: %v", err)
 	} else {
 		for _, s := range statefulSets.Items {
-			if len(s.Spec.Template.Spec.Containers) > 0 {
-				serviceSet[s.Name] = struct{}{}
-			}
+			serviceSet[s.Name] = struct{}{}
 		}
 	}
 
@@ -161,9 +158,7 @@ func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, e
 		logrus.Errorf("获取 DaemonSet 失败: %v", err)
 	} else {
 		for _, ds := range daemonSets.Items {
-			if len(ds.Spec.Template.Spec.Containers) > 0 {
-				serviceSet[ds.Name] = struct{}{}
-			}
+			serviceSet[ds.Name] = struct{}{}
 		}
 	}
 
@@ -275,7 +270,7 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 	snapshot := &models.ImageSnapshot{
 		Service:    service,
 		Namespace:  namespace,
-		Container:  "default",
+		Container:  "default", // 假设首个容器
 		Image:      oldImage,
 		Tag:        oldTag,
 		RecordedAt: time.Now(),
@@ -301,7 +296,7 @@ func (k *K8sClient) UpdateWorkloadImage(service, namespace, newVersion string) e
 			return fmt.Errorf("容器为空")
 		}
 		oldImage := deploy.Spec.Template.Spec.Containers[0].Image
-		newImage := buildNewImage(oldImage, newVersion)
+		newImage := BuildNewImage(oldImage, newVersion)
 		deploy.Spec.Template.Spec.Containers[0].Image = newImage
 		_, err = k.Clientset.AppsV1().Deployments(namespace).Update(ctx, deploy, metav1.UpdateOptions{})
 		if err != nil {
@@ -322,7 +317,7 @@ func (k *K8sClient) UpdateWorkloadImage(service, namespace, newVersion string) e
 			return fmt.Errorf("容器为空")
 		}
 		oldImage := sts.Spec.Template.Spec.Containers[0].Image
-		newImage := buildNewImage(oldImage, newVersion)
+		newImage := BuildNewImage(oldImage, newVersion)
 		sts.Spec.Template.Spec.Containers[0].Image = newImage
 		_, err = k.Clientset.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{})
 		if err != nil {
@@ -343,7 +338,7 @@ func (k *K8sClient) UpdateWorkloadImage(service, namespace, newVersion string) e
 			return fmt.Errorf("容器为空")
 		}
 		oldImage := ds.Spec.Template.Spec.Containers[0].Image
-		newImage := buildNewImage(oldImage, newVersion)
+		newImage := BuildNewImage(oldImage, newVersion)
 		ds.Spec.Template.Spec.Containers[0].Image = newImage
 		_, err = k.Clientset.AppsV1().DaemonSets(namespace).Update(ctx, ds, metav1.UpdateOptions{})
 		if err != nil {
