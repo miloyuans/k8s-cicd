@@ -107,17 +107,17 @@ func ExtractTag(image string) string {
 	return image
 }
 
-// extractBaseImage 提取 registry/repo 部分
-func extractBaseImage(image string) string {
+// ExtractBaseImage 提取 registry/repo 部分（导出）
+func ExtractBaseImage(image string) string {
 	if idx := strings.LastIndex(image, ":"); idx != -1 {
 		return image[:idx]
 	}
 	return image
 }
 
-// buildNewImage 拼接新镜像
-func buildNewImage(currentImage, newTag string) string {
-	base := extractBaseImage(currentImage)
+// BuildNewImage 拼接新镜像（导出）
+func BuildNewImage(currentImage, newTag string) string {
+	base := ExtractBaseImage(currentImage)
 	if base == "" {
 		return newTag
 	}

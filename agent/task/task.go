@@ -12,6 +12,7 @@ package task
 
 import (
 	"container/list"
+	"context"  // 必须添加
 	"fmt"
 	"strings"
 	"sync"
