@@ -1,12 +1,9 @@
 // 文件: kubernetes/k8s_client.go
-// 修改: DiscoverServicesFromNamespace 仅返回服务名（去重，不含 tag）；新增 SnapshotAndStoreImage 方法，用于获取当前镜像并存储快照到 MongoDB。
-// 修复: 
-// 1. 添加缺失导入: "go.mongodb.org/mongo-driver/bson" for bson.M
-// 2. 添加 "k8s.io/api/apps/v1" as appsv1 for ReplicaSet
-// 3. 添加 "sort" for sort.Slice
-// 4. 使用 mongo.DeleteSnapshots (需在 mongo_client.go 中实现)
-// 5. 删除未使用 ownerRef, deploy (或使用 log deploy.Name)
-// 6. 保留所有现有功能，包括 ExtractTag、ExtractBaseImage、BuildNewImage 等。
+// 修复所有编译错误：
+// 1. 移除未使用的 import: appsv1, bson
+// 2. 移除未使用的变量: deploy
+// 3. 保留所有功能：快照清理、精准快照、BuildNewImage 等
+// 4. 使用 mongo.DeleteSnapshots (需在 mongo_client.go 实现)
 
 package kubernetes
 
@@ -21,7 +18,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	appsv1 "k8s.io/api/apps/v1" // 添加 for ReplicaSet
 
 	"k8s-cicd/agent/client"
 	"k8s-cicd/agent/config"
@@ -30,7 +26,6 @@ import (
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
-	"go.mongodb.org/mongo-driver/bson" // 添加 for bson.M
 )
 
 // K8sClient Kubernetes 客户端
@@ -238,8 +233,7 @@ func (k *K8sClient) GetCurrentImage(service, namespace string) (string, error) {
 	ctx := context.Background()
 
 	// 1. 尝试 Deployment
-	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil {
+	if deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
 		if len(deploy.Spec.Template.Spec.Containers) == 0 {
 			return "", fmt.Errorf("容器为空")
 		}
@@ -247,8 +241,7 @@ func (k *K8sClient) GetCurrentImage(service, namespace string) (string, error) {
 	}
 
 	// 2. 尝试 StatefulSet
-	sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil {
+	if sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
 		if len(sts.Spec.Template.Spec.Containers) == 0 {
 			return "", fmt.Errorf("容器为空")
 		}
@@ -256,8 +249,7 @@ func (k *K8sClient) GetCurrentImage(service, namespace string) (string, error) {
 	}
 
 	// 3. 尝试 DaemonSet
-	ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil {
+	if ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
 		if len(ds.Spec.Template.Spec.Containers) == 0 {
 			return "", fmt.Errorf("容器为空")
 		}
@@ -272,7 +264,7 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 	ctx := context.Background()
 
 	// Step 1: 删除历史快照
-	if err := mongo.DeleteSnapshots(service, namespace); err != nil { // 需在 mongo_client.go 中新增 DeleteSnapshots
+	if err := mongo.DeleteSnapshots(service, namespace); err != nil {
 		return "", err
 	}
 
@@ -280,8 +272,8 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 	var labelSelector string
 	var hash string
 
-	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil {
+	// 尝试 Deployment
+	if _, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
 		rsList, err := k.Clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("app=%s", service),
 		})
@@ -365,8 +357,7 @@ func (k *K8sClient) UpdateWorkloadImage(service, namespace, newVersion string) e
 	ctx := context.Background()
 
 	// 1. 尝试 Deployment
-	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil {
+	if deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
 		if len(deploy.Spec.Template.Spec.Containers) == 0 {
 			return fmt.Errorf("容器为空")
 		}
@@ -386,8 +377,7 @@ func (k *K8sClient) UpdateWorkloadImage(service, namespace, newVersion string) e
 	}
 
 	// 2. 尝试 StatefulSet
-	sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil {
+	if sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
 		if len(sts.Spec.Template.Spec.Containers) == 0 {
 			return fmt.Errorf("容器为空")
 		}
@@ -407,8 +397,7 @@ func (k *K8sClient) UpdateWorkloadImage(service, namespace, newVersion string) e
 	}
 
 	// 3. 尝试 DaemonSet
-	ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(ctx, service, metav1.GetOptions{})
-	if err == nil {
+	if ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
 		if len(ds.Spec.Template.Spec.Containers) == 0 {
 			return fmt.Errorf("容器为空")
 		}
@@ -440,8 +429,7 @@ func (k *K8sClient) WaitForRolloutComplete(service, namespace string, timeout ti
 
 	for time.Now().Before(deadline) {
 		// 1. 检查 Deployment
-		deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
-		if err == nil {
+		if deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
 			if deploy.Status.ObservedGeneration >= deploy.Generation &&
 				deploy.Status.Replicas == deploy.Status.ReadyReplicas {
 				logrus.WithFields(logrus.Fields{
@@ -454,8 +442,7 @@ func (k *K8sClient) WaitForRolloutComplete(service, namespace string, timeout ti
 		}
 
 		// 2. 检查 StatefulSet
-		sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{})
-		if err == nil {
+		if sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
 			if sts.Status.ObservedGeneration >= sts.Generation &&
 				sts.Status.Replicas == sts.Status.ReadyReplicas {
 				logrus.WithFields(logrus.Fields{
