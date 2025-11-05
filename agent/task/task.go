@@ -1,13 +1,13 @@
 // 文件: task/task.go
 // 完整、可直接编译使用的版本
 // 功能：
-// 1. 仅本地更新任务状态（MongoDB）
-// 2. 所有状态变更（成功/失败/异常）都发送 Telegram 通知
-// 3. 快照基于 Running Pod
-// 4. 快速回滚：60 秒内新 Pod 未 Running 或有异常事件
-// 5. 串行锁 + 并行 Worker
-// 6. 失败重试 + 重新入队
-// 7. 优雅关闭不阻塞
+// 1. push 接口功能保留（StartWorkers 接受 apiClient）
+// 2. /status 外部推送已移除（不调用 apiClient.UpdateStatus）
+// 3. 所有状态变更都发送 Telegram 通知
+// 4. 快照基于 Running Pod
+// 5. 快速回滚：60 秒内新 Pod 未 Running 或有异常事件
+// 6. 串行锁 + 并行 Worker
+// 7. 失败重试 + 重新入队
 
 package task
 
@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"k8s-cicd/agent/api"
 	"k8s-cicd/agent/client"
 	"k8s-cicd/agent/config"
 	"k8s-cicd/agent/kubernetes"
@@ -90,11 +91,11 @@ func (q *TaskQueue) getLock(service, namespace string) *sync.Mutex {
 	return newLock
 }
 
-// StartWorkers 启动任务 worker
-func (q *TaskQueue) StartWorkers(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager) {
+// StartWorkers 启动任务 worker（保留 apiClient 用于 push 功能）
+func (q *TaskQueue) StartWorkers(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient) {
 	q.wg.Add(q.workers)
 	for i := 0; i < q.workers; i++ {
-		go q.worker(cfg, mongo, k8s, botMgr, i+1)
+		go q.worker(cfg, mongo, k8s, botMgr, apiClient, i+1)
 	}
 	logrus.Infof(color.GreenString("启动 %d 个任务 worker"), q.workers)
 	if q.workers == 0 {
@@ -103,7 +104,7 @@ func (q *TaskQueue) StartWorkers(cfg *config.Config, mongo *client.MongoClient, 
 }
 
 // worker 执行任务
-func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, workerID int) {
+func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, workerID int) {
 	defer q.wg.Done()
 	logrus.Infof(color.GreenString("Worker-%d 启动"), workerID)
 
@@ -137,14 +138,14 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 			defer lock.Unlock()
 
 			// 执行任务
-			err := q.executeTask(cfg, mongo, k8s, botMgr, task)
+			err := q.executeTask(cfg, mongo, k8s, botMgr, apiClient, task)
 			if err != nil {
 				task.Retries++
 				if task.Retries < cfg.Task.MaxRetries {
 					time.Sleep(time.Duration(cfg.Task.RetryDelay) * time.Second)
 					q.Enqueue(task)
 				} else {
-					q.handlePermanentFailure(k8s, mongo, botMgr, task)
+					q.handlePermanentFailure(k8s, mongo, botMgr, apiClient, task)
 				}
 			}
 			// 继续下一个任务
@@ -154,19 +155,19 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 }
 
 // executeTask 执行核心任务逻辑
-func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, task *Task) error {
+func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k8s *kubernetes.K8sClient, botMgr *telegram.BotManager, apiClient *api.APIClient, task *Task) error {
 	env := task.DeployRequest.Environments[0]
 
 	// 1. 快照（仅 Running Pod）
 	oldTag, err := k8s.SnapshotAndStoreImage(task.DeployRequest.Service, task.DeployRequest.Namespace, task.DeployRequest.TaskID, mongo)
 	if err != nil {
-		q.handleFailure(k8s, mongo, botMgr, task, "", env, err.Error())
+		q.handleFailure(k8s, mongo, botMgr, apiClient, task, "", env, err.Error())
 		return err
 	}
 
 	// 2. 更新镜像
 	if err := k8s.UpdateWorkloadImage(task.DeployRequest.Service, task.DeployRequest.Namespace, task.DeployRequest.Version); err != nil {
-		q.handleFailure(k8s, mongo, botMgr, task, oldTag, env, err.Error())
+		q.handleFailure(k8s, mongo, botMgr, apiClient, task, oldTag, env, err.Error())
 		return err
 	}
 
@@ -178,21 +179,21 @@ func (q *TaskQueue) executeTask(cfg *config.Config, mongo *client.MongoClient, k
 	quickResult, eventMsg := q.checkNewPodStatusWithEvents(k8s, task.DeployRequest.Service, task.DeployRequest.Namespace, newImage, oldTag, env)
 	if quickResult != "" {
 		if quickResult == "success" {
-			q.handleSuccess(mongo, botMgr, task, oldTag, env)
+			q.handleSuccess(mongo, botMgr, apiClient, task, oldTag, env)
 			return nil
 		} else {
-			q.handleFailure(k8s, mongo, botMgr, task, oldTag, env, eventMsg)
+			q.handleFailure(k8s, mongo, botMgr, apiClient, task, oldTag, env, eventMsg)
 			return fmt.Errorf("快速回滚: %s", eventMsg)
 		}
 	}
 
 	// 5. 正常 rollout 等待
 	if err := k8s.WaitForRolloutComplete(task.DeployRequest.Service, task.DeployRequest.Namespace, cfg.Deploy.WaitTimeout); err != nil {
-		q.handleFailure(k8s, mongo, botMgr, task, oldTag, env, "")
+		q.handleFailure(k8s, mongo, botMgr, apiClient, task, oldTag, env, "")
 		return err
 	}
 
-	q.handleSuccess(mongo, botMgr, task, oldTag, env)
+	q.handleSuccess(mongo, botMgr, apiClient, task, oldTag, env)
 	return nil
 }
 
@@ -275,14 +276,15 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// handleSuccess 成功处理
-func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, botMgr *telegram.BotManager, task *Task, oldTag, env string) {
+// handleSuccess 成功处理（不推 /status）
+func (q *TaskQueue) handleSuccess(mongo *client.MongoClient, botMgr *telegram.BotManager, apiClient *api.APIClient, task *Task, oldTag, env string) {
 	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行成功")
+	// 不再调用 apiClient.UpdateStatus
 	botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, true, "")
 }
 
-// handleFailure 失败处理
-func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, botMgr *telegram.BotManager, task *Task, oldTag, env, extra string) {
+// handleFailure 失败处理（不推 /status）
+func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, botMgr *telegram.BotManager, apiClient *api.APIClient, task *Task, oldTag, env, extra string) {
 	if k8s != nil && oldTag != "" {
 		snapshot := &models.ImageSnapshot{Tag: oldTag}
 		if err := k8s.RollbackWithSnapshot(task.DeployRequest.Service, task.DeployRequest.Namespace, snapshot); err != nil {
@@ -293,12 +295,13 @@ func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.Mongo
 	}
 
 	_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "执行失败")
+	// 不再调用 apiClient.UpdateStatus
 	botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false, extra)
 }
 
 // handlePermanentFailure 永久失败处理
-func (q *TaskQueue) handlePermanentFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, botMgr *telegram.BotManager, task *Task) {
-	q.handleFailure(k8s, mongo, botMgr, task, "unknown", task.DeployRequest.Environments[0], "达到最大重试次数")
+func (q *TaskQueue) handlePermanentFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, botMgr *telegram.BotManager, apiClient *api.APIClient, task *Task) {
+	q.handleFailure(k8s, mongo, botMgr, apiClient, task, "unknown", task.DeployRequest.Environments[0], "达到最大重试次数")
 }
 
 // getImageOrUnknown 获取镜像或默认
