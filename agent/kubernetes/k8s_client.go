@@ -1,9 +1,13 @@
 // 文件: kubernetes/k8s_client.go
 // 完整、可直接编译使用的版本
-// 修复: 
-// 1. 移除 mongo.client 直接访问 → 使用 mongo.DeleteSnapshots
-// 2. 移除未使用变量 deploy
-// 3. 所有功能完整：精准快照、历史清理、BuildNewImage 等
+// 修复: 精准获取 Deployment 控制的 ReplicaSet
+// 1. 使用 Deployment.Spec.Selector 作为 LabelSelector
+// 2. 查询 ReplicaSet
+// 3. 通过 ownerReferences 过滤出由该 Deployment 控制的 RS
+// 4. 筛选 ReadyReplicas > 0 且 Age > 1s
+// 5. 取最新一个
+// 6. 使用 pod-template-hash 过滤 Pod
+// 7. 兼容非 Deployment
 
 package kubernetes
 
@@ -270,31 +274,45 @@ func (k *K8sClient) SnapshotAndStoreImage(service, namespace, taskID string, mon
 	}
 
 	// Step 2: 尝试获取 Deployment
-	if _, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
-		// Deployment 路径
-		return k.snapshotFromDeployment(service, namespace, taskID, mongo)
+	deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{})
+	if err != nil {
+		// 非 Deployment → 使用基本标签
+		return k.snapshotFromBasicLabel(service, namespace, taskID, mongo)
 	}
 
-	// 非 Deployment → 使用基本标签
-	return k.snapshotFromBasicLabel(service, namespace, taskID, mongo)
-}
+	// Step 3: 构建 LabelSelector
+	selector, err := metav1.LabelSelectorAsSelector(deploy.Spec.Selector)
+	if err != nil {
+		return "", fmt.Errorf("构建 LabelSelector 失败: %v", err)
+	}
 
-// snapshotFromDeployment Deployment 路径（精准）
-func (k *K8sClient) snapshotFromDeployment(service, namespace, taskID string, mongo *client.MongoClient) (string, error) {
-	ctx := context.Background()
-
-	// 获取所有 ReplicaSet
+	// Step 4: 查询所有匹配的 ReplicaSet
 	rsList, err := k.Clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app=%s", service),
+		LabelSelector: selector.String(),
 	})
-	if err != nil || len(rsList.Items) == 0 {
-		return "", fmt.Errorf("未找到 ReplicaSet")
+	if err != nil {
+		return "", fmt.Errorf("查询 ReplicaSet 失败: %v", err)
 	}
 
-	// 筛选 ReadyReplicas > 0 且 Age > 1s
+	// Step 5: 过滤出由该 Deployment 控制的 RS
+	controlledRS := []appsv1.ReplicaSet{}
+	for _, rs := range rsList.Items {
+		for _, owner := range rs.OwnerReferences {
+			if owner.Kind == "Deployment" && owner.Name == deploy.Name && owner.UID == deploy.UID {
+				controlledRS = append(controlledRS, rs)
+				break
+			}
+		}
+	}
+
+	if len(controlledRS) == 0 {
+		return "", fmt.Errorf("未找到由 Deployment %s 控制的 ReplicaSet", deploy.Name)
+	}
+
+	// Step 6: 筛选 ReadyReplicas > 0 且 Age > 1s
 	now := time.Now()
 	candidates := []appsv1.ReplicaSet{}
-	for _, rs := range rsList.Items {
+	for _, rs := range controlledRS {
 		ready := rs.Status.ReadyReplicas > 0
 		age := now.Sub(rs.CreationTimestamp.Time)
 		if ready && age > time.Second {
@@ -306,26 +324,26 @@ func (k *K8sClient) snapshotFromDeployment(service, namespace, taskID string, mo
 		return "", fmt.Errorf("无就绪且 Age>1s 的 ReplicaSet")
 	}
 
-	// 按创建时间降序，取最新
+	// Step 7: 按创建时间降序，取最新
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].CreationTimestamp.After(candidates[j].CreationTimestamp.Time)
 	})
 	rs := candidates[0]
 
-	// 获取 pod-template-hash
+	// Step 8: 获取 pod-template-hash
 	hash, ok := rs.Labels["pod-template-hash"]
 	if !ok {
 		return "", fmt.Errorf("ReplicaSet 无 pod-template-hash")
 	}
-	labelSelector := fmt.Sprintf("app=%s,pod-template-hash=%s", service, hash)
+	labelSelector := fmt.Sprintf("%s,pod-template-hash=%s", selector.String(), hash)
 
-	// 查询 Pod
+	// Step 9: 查询 Pod
 	pods, err := k.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
 		return "", fmt.Errorf("查询 Pod 失败: %v", err)
 	}
 
-	// 筛选 Running + Ready Pod
+	// Step 10: 筛选 Running + Ready Pod
 	runningReadyPods := []v1.Pod{}
 	for _, pod := range pods.Items {
 		if pod.Status.Phase == v1.PodRunning {
@@ -346,7 +364,7 @@ func (k *K8sClient) snapshotFromDeployment(service, namespace, taskID string, mo
 		return "", fmt.Errorf("无 Running + Ready 的 Pod")
 	}
 
-	// 提取镜像
+	// Step 11: 提取镜像
 	pod := runningReadyPods[0]
 	if len(pod.Spec.Containers) == 0 {
 		return "", fmt.Errorf("Pod 无容器")
@@ -354,7 +372,7 @@ func (k *K8sClient) snapshotFromDeployment(service, namespace, taskID string, mo
 	oldImage := pod.Spec.Containers[0].Image
 	oldTag := ExtractTag(oldImage)
 
-	// 存储快照
+	// Step 12: 存储快照
 	snapshot := &models.ImageSnapshot{
 		Service:    service,
 		Namespace:  namespace,
@@ -370,13 +388,14 @@ func (k *K8sClient) snapshotFromDeployment(service, namespace, taskID string, mo
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"task_id": taskID,
-		"rs_name": rs.Name,
-		"hash":    hash,
-		"age":     now.Sub(rs.CreationTimestamp.Time).Round(time.Second),
-		"ready":   rs.Status.ReadyReplicas,
-		"pods":    len(runningReadyPods),
-		"old_tag": oldTag,
+		"task_id":   taskID,
+		"deploy":    deploy.Name,
+		"rs_name":   rs.Name,
+		"hash":      hash,
+		"age":       now.Sub(rs.CreationTimestamp.Time).Round(time.Second),
+		"ready":     rs.Status.ReadyReplicas,
+		"pods":      len(runningReadyPods),
+		"old_tag":   oldTag,
 	}).Info("快照记录成功（精准版）")
 	return oldTag, nil
 }
