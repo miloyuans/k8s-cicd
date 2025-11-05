@@ -1,10 +1,11 @@
 // 文件: kubernetes/k8s_client.go
+// 完整、可直接编译使用的版本
 // 功能：
 // 1. 每次发布前删除 service+namespace 所有快照
-// 2. 精准快照：仅就绪（ReadyReplicas>0）且 Age>1s 的 ReplicaSet
-// 3. Pod 必须 Running + ContainersReady
-// 4. 兼容 Deployment/StatefulSet/DaemonSet
-// 5. 导出 BuildNewImage、ExtractTag
+// 2. 精准快照：Deployment → ReadyReplicas>0 且 Age>1s 的最新 ReplicaSet → pod-template-hash → Pod(Running+Ready)
+// 3. 非 Deployment 使用基本标签
+// 4. 导出 BuildNewImage、ExtractTag
+// 5. 所有功能完整，无删减
 
 package kubernetes
 
@@ -19,6 +20,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	appsv1 "k8s.io/api/apps/v1"
 
 	"k8s-cicd/agent/client"
 	"k8s-cicd/agent/config"
@@ -27,7 +29,6 @@ import (
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
-	appsv1 "k8s.io/api/apps/v1"
 )
 
 // K8sClient Kubernetes 客户端
@@ -38,13 +39,228 @@ type K8sClient struct {
 
 // NewK8sClient 创建 K8s 客户端
 func NewK8sClient(k8sCfg *config.K8sAuthConfig, deployCfg *config.DeployConfig) (*K8sClient, error) {
-	// ...（保持不变）
+	startTime := time.Now()
+
+	var config *rest.Config
+	var err error
+
+	switch k8sCfg.AuthType {
+	case "kubeconfig":
+		config, err = clientcmd.BuildConfigFromFlags("", k8sCfg.Kubeconfig)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "NewK8sClient",
+				"took":   time.Since(startTime),
+			}).Errorf(color.RedString("kubeconfig 认证失败: %v"), err)
+			return nil, fmt.Errorf("kubeconfig 认证失败: %v", err)
+		}
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewK8sClient",
+			"took":   time.Since(startTime),
+		}).Infof(color.GreenString("使用 kubeconfig 认证成功"))
+	case "serviceaccount":
+		config, err = rest.InClusterConfig()
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"time":   time.Now().Format("2006-01-02 15:04:05"),
+				"method": "NewK8sClient",
+				"took":   time.Since(startTime),
+			}).Errorf(color.RedString("ServiceAccount 认证失败: %v"), err)
+			return nil, fmt.Errorf("ServiceAccount 认证失败: %v", err)
+		}
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewK8sClient",
+			"took":   time.Since(startTime),
+		}).Infof(color.GreenString("使用 ServiceAccount 认证成功"))
+	default:
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewK8sClient",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("不支持的认证类型: %s"), k8sCfg.AuthType)
+		return nil, fmt.Errorf("不支持的认证类型: %s", k8sCfg.AuthType)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"method": "NewK8sClient",
+			"took":   time.Since(startTime),
+		}).Errorf(color.RedString("创建 K8s 客户端失败: %v"), err)
+		return nil, fmt.Errorf("创建 K8s 客户端失败: %v", err)
+	}
+
+	client := &K8sClient{
+		Clientset: clientset,
+		cfg:       deployCfg,
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "NewK8sClient",
+		"took":   time.Since(startTime),
+	}).Info(color.GreenString("K8s 客户端创建成功"))
+	return client, nil
 }
 
-// ExtractTag / ExtractBaseImage / BuildNewImage（保持不变）
-func ExtractTag(image string) string { /* ... */ }
-func ExtractBaseImage(image string) string { /* ... */ }
-func BuildNewImage(currentImage, newTag string) string { /* ... */ }
+// ExtractTag 提取镜像 tag
+func ExtractTag(image string) string {
+	if idx := strings.LastIndex(image, ":"); idx != -1 {
+		return image[idx+1:]
+	}
+	return image
+}
+
+// ExtractBaseImage 提取 registry/repo 部分
+func ExtractBaseImage(image string) string {
+	if idx := strings.LastIndex(image, ":"); idx != -1 {
+		return image[:idx]
+	}
+	return image
+}
+
+// BuildNewImage 拼接新镜像
+func BuildNewImage(currentImage, newTag string) string {
+	base := ExtractBaseImage(currentImage)
+	if base == "" {
+		return newTag
+	}
+	return fmt.Sprintf("%s:%s", base, newTag)
+}
+
+// DiscoverServicesFromNamespace 发现命名空间中的服务（仅返回服务名，去重，不含 tag）
+func (k *K8sClient) DiscoverServicesFromNamespace(namespace string) ([]string, error) {
+	startTime := time.Now()
+	ctx := context.Background()
+
+	serviceSet := make(map[string]struct{})
+
+	// 1. 获取 Deployments
+	deployments, err := k.Clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		logrus.Errorf("获取 Deployment 失败: %v", err)
+	} else {
+		for _, d := range deployments.Items {
+			serviceSet[d.Name] = struct{}{}
+		}
+	}
+
+	// 2. 获取 StatefulSets
+	statefulSets, err := k.Clientset.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		logrus.Errorf("获取 StatefulSet 失败: %v", err)
+	} else {
+		for _, s := range statefulSets.Items {
+			serviceSet[s.Name] = struct{}{}
+		}
+	}
+
+	// 3. 获取 DaemonSets
+	daemonSets, err := k.Clientset.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		logrus.Errorf("获取 DaemonSet 失败: %v", err)
+	} else {
+		for _, ds := range daemonSets.Items {
+			serviceSet[ds.Name] = struct{}{}
+		}
+	}
+
+	services := make([]string, 0, len(serviceSet))
+	for s := range serviceSet {
+		services = append(services, s)
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "DiscoverServicesFromNamespace",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"namespace": namespace,
+			"count":     len(services),
+		},
+	}).Infof(color.GreenString("命名空间 [%s] 发现 %d 个服务"), namespace, len(services))
+	return services, nil
+}
+
+// BuildPushRequest 构建推送请求（遍历环境映射发现服务）
+func (k *K8sClient) BuildPushRequest(cfg *config.Config) (models.PushRequest, error) {
+	startTime := time.Now()
+
+	serviceSet := make(map[string]struct{})
+	envSet := make(map[string]struct{})
+
+	for env, namespace := range cfg.EnvMapping.Mappings {
+		envSet[env] = struct{}{}
+		services, err := k.DiscoverServicesFromNamespace(namespace)
+		if err != nil {
+			logrus.Errorf("发现服务失败 [%s]: %v", env, err)
+			continue
+		}
+		for _, s := range services {
+			serviceSet[s] = struct{}{}
+		}
+	}
+
+	services := make([]string, 0, len(serviceSet))
+	for s := range serviceSet {
+		services = append(services, s)
+	}
+	envs := make([]string, 0, len(envSet))
+	for e := range envSet {
+		envs = append(envs, e)
+	}
+
+	req := models.PushRequest{
+		Services:     services,
+		Environments: envs,
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"time":   time.Now().Format("2006-01-02 15:04:05"),
+		"method": "BuildPushRequest",
+		"took":   time.Since(startTime),
+		"data": logrus.Fields{
+			"service_count": len(services),
+			"env_count":     len(envs),
+		},
+	}).Infof(color.GreenString("构建完成: %d 服务, %d 环境"), len(services), len(envs))
+	return req, nil
+}
+
+// GetCurrentImage 获取当前镜像（从 Deployment/StatefulSet/DaemonSet 获取旧镜像）
+func (k *K8sClient) GetCurrentImage(service, namespace string) (string, error) {
+	ctx := context.Background()
+
+	// 1. 尝试 Deployment
+	if deploy, err := k.Clientset.AppsV1().Deployments(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
+		if len(deploy.Spec.Template.Spec.Containers) == 0 {
+			return "", fmt.Errorf("容器为空")
+		}
+		return deploy.Spec.Template.Spec.Containers[0].Image, nil
+	}
+
+	// 2. 尝试 StatefulSet
+	if sts, err := k.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
+		if len(sts.Spec.Template.Spec.Containers) == 0 {
+			return "", fmt.Errorf("容器为空")
+		}
+		return sts.Spec.Template.Spec.Containers[0].Image, nil
+	}
+
+	// 3. 尝试 DaemonSet
+	if ds, err := k.Clientset.AppsV1().DaemonSets(namespace).Get(ctx, service, metav1.GetOptions{}); err == nil {
+		if len(ds.Spec.Template.Spec.Containers) == 0 {
+			return "", fmt.Errorf("容器为空")
+		}
+		return ds.Spec.Template.Spec.Containers[0].Image, nil
+	}
+
+	return "", fmt.Errorf("未找到工作负载: %s in %s", service, namespace)
+}
 
 // DeleteOldSnapshots 删除 service+namespace 下的所有历史快照
 func (k *K8sClient) DeleteOldSnapshots(service, namespace string, mongo *client.MongoClient) error {
