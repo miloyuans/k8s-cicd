@@ -113,20 +113,35 @@ func (bm *BotManager) AddNotification(service, env, user, oldVersion, newVersion
 }
 
 // flushBuffer 刷新缓冲，合并发送
+// 文件: telegram/bot.go
+// 修改: flushBuffer 异步发送，避免阻塞 Stop
+
 func (bm *BotManager) flushBuffer() {
 	bm.buffer.mu.Lock()
-	defer bm.buffer.mu.Unlock()
-
-	for statusKey, items := range bm.buffer.buffers {
-		if len(items) == 0 {
-			continue
-		}
-		success := statusKey == "success"
-		mergedMsg := bm.generateMergedMessage(items, success)
-		bm.sendMessage(mergedMsg, "MarkdownV2")
-		bm.buffer.buffers[statusKey] = []*NotificationItem{}
+	items := make(map[string][]*NotificationItem)
+	for k, v := range bm.buffer.buffers {
+		items[k] = append([]*NotificationItem{}, v...)
+		bm.buffer.buffers[k] = []*NotificationItem{}
 	}
-	bm.buffer.mergeChan <- struct{}{}
+	bm.buffer.mu.Unlock()
+
+	// 异步发送
+	go func() {
+		for statusKey, list := range items {
+			if len(list) == 0 { continue }
+			success := statusKey == "success"
+			msg := bm.generateMergedMessage(list, success)
+			bm.sendMessage(msg, "MarkdownV2")
+		}
+	}()
+}
+
+func (bm *BotManager) Stop() {
+	if bm.buffer != nil && bm.buffer.mergeTimer != nil {
+		bm.buffer.mergeTimer.Stop()
+		bm.flushBuffer() // 异步
+	}
+	logrus.Info(color.GreenString("Telegram BotManager 停止"))
 }
 
 // generateMergedMessage 生成合并消息（5s内相同状态）

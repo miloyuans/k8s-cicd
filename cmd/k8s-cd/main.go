@@ -106,19 +106,13 @@ func main() {
 	stopStart := time.Now()
 	go func() {
 		ag.Stop()
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "main",
-			"took":   time.Since(stopStart),
-		}).Info(color.GreenString("k8s-cd Agent 关闭完成"))
+		close(done)
 	}()
 
 	select {
-	case <-ctx.Done():
-		if ctx.Err() == context.DeadlineExceeded {
-			logrus.Error(color.RedString("优雅关闭超时，强制终止进程"))
-			os.Exit(1) // 强制退出
-		}
+	case <-done:
+	case <-time.After(10 * time.Second):
+		logrus.Warn("优雅关闭超时，强制退出")
 	}
 
 	// 正常退出
