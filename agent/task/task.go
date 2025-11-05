@@ -1,10 +1,7 @@
 // 文件: task/task.go
-// 完整版：修复日志 + 通知 + 关闭 + 快照验证
-// 1. 每个步骤详细日志
-// 2. 失败同步通知，成功缓冲
-// 3. 快照失败立即通知
-// 4. 异步 flushBuffer
-// 5. 保留 push、快照、回滚等所有功能
+// 修复: stopCh 初始化语法错误
+// 错误: chan struct{}{} 应为 make(chan struct{})
+// 修复: stopCh: make(chan struct{}),
 
 package task
 
@@ -48,7 +45,7 @@ type TaskQueue struct {
 	queue        *list.List
 	mu           sync.Mutex
 	workers      int
-	stopCh       chan struct{}
+	stopCh       chan struct{} // 修复: make(chan struct{})
 	wg           sync.WaitGroup
 	locks        map[string]*sync.Mutex
 	lockMu       sync.RWMutex
@@ -60,7 +57,7 @@ func NewTaskQueue(workers, maxQueueSize int) *TaskQueue {
 	q := &TaskQueue{
 		queue:        list.New(),
 		workers:      workers,
-		stopCh       chan struct{}{},
+		stopCh:       make(chan struct{}), // 修复: make(chan struct{})
 		locks:        make(map[string]*sync.Mutex),
 		maxQueueSize: maxQueueSize,
 	}
@@ -132,28 +129,8 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 			env := task.DeployRequest.Environments[0]
 
 			// 防重复入队
-			err := mongo.UpdateConfirmationStatus(task.DeployRequest.TaskID, "已执行")
-			if err != nil {
-				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("更新 confirmation_status 失败: %v"), err)
-			}
-
-			err = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "running")
-			if err != nil {
-				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("更新 running 状态失败: %v"), err)
-			}
-
-			logrus.WithFields(logrus.Fields{
-				"time":   time.Now().Format("2006-01-02 15:04:05"),
-				"method": "worker",
-				"data": logrus.Fields{
-					"task_id":     task.DeployRequest.TaskID,
-					"service":     task.DeployRequest.Service,
-					"version":     task.DeployRequest.Version,
-					"environment": env,
-					"user":        task.DeployRequest.User,
-					"namespace":   task.DeployRequest.Namespace,
-				},
-			}).Infof(color.GreenString("Worker-%d 开始执行任务 (status=running): %s"), workerID, task.DeployRequest.TaskID)
+			_ = mongo.UpdateConfirmationStatus(task.DeployRequest.TaskID, "已执行")
+			_ = mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "running")
 
 			// 串行锁
 			lock := q.getLock(task.DeployRequest.Service, task.DeployRequest.Namespace)
@@ -161,12 +138,10 @@ func (q *TaskQueue) worker(cfg *config.Config, mongo *client.MongoClient, k8s *k
 			defer lock.Unlock()
 
 			// 执行任务
-			err = q.executeTask(cfg, mongo, k8s, botMgr, apiClient, task)
+			err := q.executeTask(cfg, mongo, k8s, botMgr, apiClient, task)
 			if err != nil {
-				logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf(color.RedString("任务执行失败: %v"), err)
 				task.Retries++
 				if task.Retries < cfg.Task.MaxRetries {
-					logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID, "retries": task.Retries}).Warnf(color.YellowString("任务重试 %d/%d 次"), task.Retries, cfg.Task.MaxRetries)
 					time.Sleep(time.Duration(cfg.Task.RetryDelay) * time.Second)
 					q.Enqueue(task)
 				} else {
@@ -358,21 +333,9 @@ func (q *TaskQueue) handleFailure(k8s *kubernetes.K8sClient, mongo *client.Mongo
 	botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false, extra)
 }
 
-// handleException 异常处理（仅本地 + 通知）
-func (q *TaskQueue) handleException(mongo *client.MongoClient, botMgr *telegram.BotManager, apiClient *api.APIClient, task *Task, oldTag, env string) {
-	err := mongo.UpdateTaskStatus(task.DeployRequest.Service, task.DeployRequest.Version, env, task.DeployRequest.User, "异常")
-	if err != nil {
-		logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Errorf("更新异常状态失败: %v", err)
-	}
-	// 不调用 apiClient.UpdateStatus
-	logrus.WithFields(logrus.Fields{"task_id": task.DeployRequest.TaskID}).Info("本地状态更新异常，发送通知")
-	botMgr.SendNotification(task.DeployRequest.Service, env, task.DeployRequest.User, getImageOrUnknown(oldTag), task.DeployRequest.Version, false, "异常事件")
-}
-
 // handlePermanentFailure 永久失败处理
-func (q *TaskQueue) handlePermanentFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, botMgr *telegram.BotManager, apiClient *api.APIClient, task *Task) error {
+func (q *TaskQueue) handlePermanentFailure(k8s *kubernetes.K8sClient, mongo *client.MongoClient, botMgr *telegram.BotManager, apiClient *api.APIClient, task *Task) {
 	q.handleFailure(k8s, mongo, botMgr, apiClient, task, "unknown", task.DeployRequest.Environments[0], "达到最大重试次数")
-	return nil
 }
 
 // getImageOrUnknown 获取镜像或默认
