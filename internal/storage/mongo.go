@@ -69,13 +69,20 @@ func NewMongoStorage(uri string, ttlHours int) (*MongoStorage, error) {
 
 // createIndexes 创建所有集合的索引，确保TTL自动过期
 func (s *MongoStorage) createIndexes(ttlHours int) error {
+	// 提前定义所有集合
 	svcColl := s.db.Collection("service_environments")
+	deployColl := s.db.Collection("deploy_queue")
+
+	// 1. service_environments 索引
 	_, err := svcColl.Indexes().CreateMany(s.ctx, []mongo.IndexModel{
 		{Keys: bson.D{{"_id", 1}}},
-		{Keys: bson.D{{"environments", 1}}},
+		{Keys: bson.D{{"environments", 1}}}, // 保持数组字段
 	})
+	if err != nil {
+		return err
+	}
 
-	// 在 createIndexes 中添加
+	// 2. deploy_queue 唯一索引：(service, environment, version) 唯一
 	_, err = deployColl.Indexes().CreateOne(s.ctx, mongo.IndexModel{
 		Keys: bson.D{
 			{"service", 1},
@@ -84,22 +91,25 @@ func (s *MongoStorage) createIndexes(ttlHours int) error {
 		},
 		Options: options.Index().SetUnique(true),
 	})
-
 	if err != nil {
 		return err
 	}
 
-	deployColl := s.db.Collection("deploy_queue")
+	// 3. deploy_queue 其他查询索引 + TTL
 	ttlSeconds := int32(ttlHours * 3600)
 	_, err = deployColl.Indexes().CreateMany(s.ctx, []mongo.IndexModel{
 		{Keys: bson.D{{"service", 1}}},
+		{Keys: bson.D{{"environment", 1}}}, // 单数
 		{Keys: bson.D{{"version", 1}}},
 		{Keys: bson.D{{"status", 1}}},
 		{Keys: bson.D{{"user", 1}}},
-		{Keys: bson.D{{"environments", 1}}},
 		{Keys: bson.D{{"created_at", 1}}, Options: options.Index().SetExpireAfterSeconds(ttlSeconds)},
 	})
-	return err
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // StoreServiceEnvironments 存储或合并服务环境，支持批量更新
