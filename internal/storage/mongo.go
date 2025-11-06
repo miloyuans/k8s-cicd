@@ -14,9 +14,10 @@ import (
 
 // DeployRequest 部署请求数据结构
 // internal/storage/mongo.go
+// DeployRequest 部署请求数据结构（内部单环境）
 type DeployRequest struct {
 	Service     string    `json:"service" bson:"service"`
-	Environment string    `json:"environment" bson:"environment"` // 改为单个
+	Environment string    `json:"environment" bson:"environment"` // 内部单数
 	Version     string    `json:"version" bson:"version"`
 	User        string    `json:"user" bson:"user"`
 	Status      string    `json:"status,omitempty" bson:"status"`
@@ -174,6 +175,7 @@ func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 }
 
 // QueryDeployQueueByServiceEnv 查询pending任务（支持多环境查询，服务精确，user可选）
+// QueryDeployQueueByServiceEnv 查询 pending 任务（单环境精确匹配）
 // QueryDeployQueueByServiceEnv 查询 pending 任务（单环境精确匹配）
 func (s *MongoStorage) QueryDeployQueueByServiceEnv(service, environment, user string) ([]DeployRequest, error) {
 	coll := s.db.Collection("deploy_queue")
