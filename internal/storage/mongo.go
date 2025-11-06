@@ -13,13 +13,14 @@ import (
 )
 
 // DeployRequest 部署请求数据结构
+// internal/storage/mongo.go
 type DeployRequest struct {
-	Service      string    `json:"service" bson:"service"`
-	Environments []string  `json:"environments" bson:"environments"`
-	Version      string    `json:"version" bson:"version"`
-	User         string    `json:"user" bson:"user"`
-	Status       string    `json:"status,omitempty" bson:"status"`
-	CreatedAt    time.Time `bson:"created_at"`
+	Service     string    `json:"service" bson:"service"`
+	Environment string    `json:"environment" bson:"environment"` // 改为单个
+	Version     string    `json:"version" bson:"version"`
+	User        string    `json:"user" bson:"user"`
+	Status      string    `json:"status,omitempty" bson:"status"`
+	CreatedAt   time.Time `bson:"created_at"`
 }
 
 // StatusRequest 状态更新请求数据结构
@@ -73,6 +74,17 @@ func (s *MongoStorage) createIndexes(ttlHours int) error {
 		{Keys: bson.D{{"_id", 1}}},
 		{Keys: bson.D{{"environments", 1}}},
 	})
+
+	// 在 createIndexes 中添加
+	_, err = deployColl.Indexes().CreateOne(s.ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{"service", 1},
+			{"environment", 1},
+			{"version", 1},
+		},
+		Options: options.Index().SetUnique(true),
+	})
+
 	if err != nil {
 		return err
 	}
@@ -152,12 +164,12 @@ func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 }
 
 // QueryDeployQueueByServiceEnv 查询pending任务（支持多环境查询，服务精确，user可选）
-func (s *MongoStorage) QueryDeployQueueByServiceEnv(service string, environments []string, user string) ([]DeployRequest, error) {
+// QueryDeployQueueByServiceEnv 查询 pending 任务（单环境精确匹配）
+func (s *MongoStorage) QueryDeployQueueByServiceEnv(service, environment, user string) ([]DeployRequest, error) {
 	coll := s.db.Collection("deploy_queue")
-	// 精确查询service，environments数组匹配任意一个，status=pending，user可选
 	filter := bson.D{
 		{"service", service},
-		{"environments", bson.D{{"$in", environments}}},
+		{"environment", environment},
 		{"status", "pending"},
 	}
 	if user != "" {
@@ -177,14 +189,15 @@ func (s *MongoStorage) QueryDeployQueueByServiceEnv(service string, environments
 }
 
 // UpdateStatus 更新任务状态（修正为匹配 pending 状态）
+// UpdateStatus 更新任务状态（单环境，assigned → final）
 func (s *MongoStorage) UpdateStatus(req StatusRequest) (bool, error) {
 	coll := s.db.Collection("deploy_queue")
 	filter := bson.D{
 		{"service", req.Service},
 		{"version", req.Version},
+		{"environment", req.Environment},
 		{"user", req.User},
-		{"environments", bson.D{{"$in", []string{req.Environment}}}},
-		{"status", "pending"}, // 修正：匹配 pending 状态
+		{"status", "assigned"}, // 必须是 assigned
 	}
 	update := bson.D{{"$set", bson.D{{"status", req.Status}}}}
 	result, err := coll.UpdateOne(s.ctx, filter, update)
@@ -200,7 +213,7 @@ func (s *MongoStorage) GetDeployByFilter(service, version, environment string) (
 	filter := bson.D{
 		{"service", service},
 		{"version", version},
-		{"environments", bson.D{{"$in", []string{environment}}}},
+		{"environment", environment},
 	}
 	cursor, err := coll.Find(s.ctx, filter)
 	if err != nil {

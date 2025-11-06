@@ -289,6 +289,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 // handleDeploy 处理部署请求（/deploy 接口，优化确认：服务单个，环境多个，版本单个，必须检查存在）
 // handleDeploy 处理部署请求（兼容旧字段：envs/username）
+// handleDeploy 处理部署请求（多环境拆分为单环境任务）
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -317,66 +318,50 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 转换为标准结构体
-	req := storage.DeployRequest{
-		Service: compatReq.Service,
-		Version: compatReq.Version,
-		Status:  "pending",
-	}
+	// 转换为标准字段
+	req := struct {
+		Service      string
+		Environments []string
+		Version      string
+		User         string
+	}{}
+	req.Service = compatReq.Service
+	req.Version = compatReq.Version
 
-	// 环境字段映射：优先新字段
-	envSource := "environments"
+	// 环境字段映射
 	if len(compatReq.Environments) > 0 {
 		req.Environments = compatReq.Environments
 	} else if len(compatReq.Envs) > 0 {
 		req.Environments = compatReq.Envs
-		envSource = "envs"
 	} else {
 		req.Environments = []string{}
 	}
 
-	// 用户字段映射：优先新字段
-	userSource := "user"
+	// 用户字段映射
 	if compatReq.User != "" {
 		req.User = compatReq.User
 	} else if compatReq.Username != "" {
 		req.User = compatReq.Username
-		userSource = "username"
 	} else {
 		req.User = "system"
-		userSource = "default(system)"
 	}
 
-	// 必填字段校验
+	// 必填校验
 	if req.Service == "" || len(req.Environments) == 0 || req.Version == "" {
 		missing := []string{}
 		if req.Service == "" {
 			missing = append(missing, "service")
 		}
 		if len(req.Environments) == 0 {
-			missing = append(missing, "environments/envs")
+			missing = append(missing, "environments")
 		}
 		if req.Version == "" {
 			missing = append(missing, "version")
 		}
-		s.logger.WithFields(logrus.Fields{
-			"missing_fields": missing,
-			"raw_request":    compatReq,
-		}).Error("缺少必填字段")
+		s.logger.WithField("missing", missing).Error("缺少必填字段")
 		http.Error(w, fmt.Sprintf("缺少必填字段: %s", strings.Join(missing, ", ")), http.StatusBadRequest)
 		return
 	}
-
-	// 记录字段来源日志
-	s.logger.WithFields(logrus.Fields{
-		"service":        req.Service,
-		"version":        req.Version,
-		"environments":   req.Environments,
-		"user":           req.User,
-		"env_source":     envSource,
-		"user_source":    userSource,
-		"using_deprecated": len(compatReq.Envs) > 0 || compatReq.Username != "",
-	}).Info("收到部署请求（字段来源已记录）")
 
 	// 检查服务是否存在
 	svcEnvs, err := s.storage.GetServiceEnvironments(req.Service)
@@ -391,7 +376,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 检查每个环境是否属于该服务
+	// 校验每个环境
 	for _, env := range req.Environments {
 		if !contains(svcEnvs, env) {
 			s.logger.Warnf("环境 %s 不存在于服务 %s", env, req.Service)
@@ -400,29 +385,35 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 异步提交部署任务
+	// 异步提交：每环境一条任务
 	wp := getGlobalWorkerPool()
-	taskID := fmt.Sprintf("deploy-%s-%s-%d", req.Service, req.Version, time.Now().UnixNano())
-	deployTask := &DeployTask{
-		Req: req,
-		ID:  taskID,
+	taskIDs := []string{}
+	for _, env := range req.Environments {
+		singleReq := storage.DeployRequest{
+			Service:     req.Service,
+			Environment: env,
+			Version:     req.Version,
+			User:        req.User,
+			Status:      "pending",
+		}
+		taskID := fmt.Sprintf("deploy-%s-%s-%s-%d", req.Service, env, req.Version, time.Now().UnixNano())
+		wp.Submit(&DeployTask{
+			Req: singleReq,
+			ID:  taskID,
+		})
+		taskIDs = append(taskIDs, taskID)
 	}
 
-	wp.Submit(deployTask)
-
-	// 响应构建
+	// 响应
 	response := map[string]interface{}{
-		"message": "部署请求已入队",
-		"task_id": taskID,
+		"message":  "部署请求已入队",
+		"task_ids": taskIDs,
+		"count":    len(taskIDs),
 	}
-
-	// 如果使用了旧字段，返回警告
 	if len(compatReq.Envs) > 0 || compatReq.Username != "" {
-		response["warning"] = "检测到使用旧字段名 (envs/username)，建议升级为 environments/user 以获得更好兼容性"
-		s.logger.Warn("客户端使用旧字段名，建议升级接口")
+		response["warning"] = "使用旧字段名 (envs/username)，建议升级为 environments/user"
 	}
 
-	// 使用标准 HTTP 状态码 202 Accepted
 	w.WriteHeader(http.StatusAccepted)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		s.logger.WithError(err).Error("响应编码失败")
@@ -430,6 +421,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleQuery 处理查询请求（支持多环境查询，服务单个，user可选）
+// handleQuery 处理查询请求（单环境精确匹配）
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -441,6 +433,13 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 查询请求结构：单环境
+	type QueryRequest struct {
+		Service     string `json:"service"`
+		Environment string `json:"environment"` // 单个环境
+		User        string `json:"user,omitempty"`
+	}
+
 	var req QueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.WithError(err).Error("解析查询请求失败")
@@ -448,100 +447,57 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 兼容单个环境
-	if len(req.Environments) == 0 && req.Environment != "" {
-		req.Environments = []string{req.Environment}
-	}
-
-	reqJSON, _ := json.Marshal(req)
-	s.logger.Infof("收到查询请求: %s", string(reqJSON))
-
-	if req.Service == "" || len(req.Environments) == 0 {
-		s.logger.Error("缺少必填字段：服务名或环境列表")
-		http.Error(w, "缺少必填字段：服务名或环境列表", http.StatusBadRequest)
+	if req.Service == "" || req.Environment == "" {
+		s.logger.Error("缺少必填字段：service 或 environment")
+		http.Error(w, "缺少必填字段：service 或 environment", http.StatusBadRequest)
 		return
 	}
 
-	// 查询pending状态的任务（服务精确匹配，environments数组匹配任意一个，status=pending，user可选）
-	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, req.Environments, req.User)
+	s.logger.Infof("收到查询请求: service=%s, environment=%s, user=%s", req.Service, req.Environment, req.User)
+
+	// 查询 pending 任务（精确匹配）
+	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, req.Environment, req.User)
 	if err != nil {
-		fmt.Printf("\033[31m[错误] 查询数据库失败: %v\033[0m\n", err) // 红色错误日志
 		s.logger.WithError(err).Error("查询数据库失败")
 		http.Error(w, "查询失败", http.StatusInternalServerError)
 		return
 	}
 
-	// 日志记录：使用ANSI颜色渲染（绿色成功，黄色信息，红色错误）
-	if len(results) > 0 {
-		dataJSON, _ := json.Marshal(results)
-		fmt.Printf("\033[32m[成功] 查询到pending任务: %s\033[0m\n", string(dataJSON)) // 绿色成功日志
-		s.logger.Infof("查询反馈数据: %s", string(dataJSON))
-
-		// 先反馈数据给外部服务
-		err = json.NewEncoder(w).Encode(results)
-		if err != nil {
-			fmt.Printf("\033[31m[错误] 反馈数据失败: %v\033[0m\n", err) // 红色错误日志
-			s.logger.WithError(err).Error("反馈数据失败")
-			return
-		}
-
-		// 反馈成功后，更新状态为assigned
-		for _, task := range results {
-			// 确定任务匹配的环境
-			var matchedEnv string
-			for _, env := range task.Environments {
-				for _, reqEnv := range req.Environments {
-					if env == reqEnv {
-						matchedEnv = env
-						break
-					}
-				}
-				if matchedEnv != "" {
-					break
-				}
-			}
-			if matchedEnv == "" {
-				fmt.Printf("\033[33m[异常] 任务 %s 未找到匹配环境\033[0m\n", task.Version) // 黄色异常日志
-				s.logger.Warnf("任务 %s 未找到匹配环境", task.Version)
-				continue
-			}
-
-			updateReq := storage.StatusRequest{
-				Service:     task.Service,
-				Version:     task.Version,
-				Environment: matchedEnv,
-				User:        task.User,
-				Status:      "assigned",
-			}
-			updated, err := s.storage.UpdateStatus(updateReq)
-			if err != nil {
-				fmt.Printf("\033[31m[错误] 更新任务 %s 到 assigned 失败: %v\033[0m\n", task.Version, err) // 红色错误日志
-				s.logger.WithError(err).Errorf("更新任务 %s 到 assigned 失败", task.Version)
-			} else if !updated {
-				fmt.Printf("\033[33m[异常] 未更新任务 %s 到 assigned (可能状态不匹配)\033[0m\n", task.Version) // 黄色异常日志
-				s.logger.Warnf("未更新任务 %s 到 assigned (可能状态不匹配)", task.Version)
-			} else {
-				// 更新成功，重新查询任务数据并打印
-				recheckedTasks, recheckErr := s.storage.GetDeployByFilter(task.Service, task.Version, matchedEnv)
-				if recheckErr != nil {
-					fmt.Printf("\033[31m[错误] 重新查询更新后任务 %s 失败: %v\033[0m\n", task.Version, recheckErr) // 红色错误日志
-					s.logger.WithError(recheckErr).Errorf("重新查询更新后任务 %s 失败", task.Version)
-				} else {
-					recheckedJSON, _ := json.Marshal(recheckedTasks)
-					fmt.Printf("\033[32m[成功] 任务 %s 更新为 assigned, 更新后数据: %s\033[0m\n", task.Version, string(recheckedJSON)) // 绿色成功日志
-					s.logger.Infof("任务 %s 更新为 assigned, 更新后数据: %s", task.Version, string(recheckedJSON))
-				}
-			}
-		}
-	} else {
-		fmt.Printf("\033[33m[信息] 查询成功但无pending任务: service=%s, environments=%v, user=%s\033[0m\n",
-			req.Service, req.Environments, req.User) // 黄色信息日志
-		s.logger.Info("查询成功但无待处理任务")
+	if len(results) == 0 {
+		s.logger.Info("无待处理任务")
 		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
+		return
 	}
+
+	// 返回任务并更新为 assigned
+	task := results[0] // 只能有一条
+	updateReq := storage.StatusRequest{
+		Service:     task.Service,
+		Version:     task.Version,
+		Environment: task.Environment,
+		User:        task.User,
+		Status:      "assigned",
+	}
+	updated, err := s.storage.UpdateStatus(updateReq)
+	if err != nil {
+		s.logger.WithError(err).Error("更新状态为 assigned 失败")
+	} else if updated {
+		s.logger.Infof("任务 %s 已分配给环境 %s", task.Version, task.Environment)
+	}
+
+	// 返回任务
+	response := map[string]interface{}{
+		"task_id":     fmt.Sprintf("deploy-%s-%s-%s", task.Service, task.Environment, task.Version),
+		"service":     task.Service,
+		"environment": task.Environment,
+		"version":     task.Version,
+		"user":        task.User,
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleStatus 处理状态更新请求
+// handleStatus 处理状态更新请求（单环境）
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -573,15 +529,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 先查询原始数据（用于日志）
+	// 查询原始数据
 	originalTasks, err := s.storage.GetDeployByFilter(req.Service, req.Version, req.Environment)
-	if err != nil {
-		s.logger.WithError(err).Error("预查询任务失败")
-		http.Error(w, "预查询失败", http.StatusInternalServerError)
+	if err != nil || len(originalTasks) == 0 {
+		s.logger.Warnf("未找到任务: %v", req)
+		json.NewEncoder(w).Encode(map[string]string{"message": "未找到匹配任务"})
 		return
 	}
 
-	// 尝试更新（UpdateStatus已内置检查status="assigned"）
+	// 更新状态（仅 assigned 可更新）
 	updated, err := s.storage.UpdateStatus(req)
 	if err != nil {
 		s.logger.WithError(err).Error("更新状态失败")
@@ -590,12 +546,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if updated {
-		// 更新成功，查询更新后数据用于日志
-		updatedTasks, _ := s.storage.GetDeployByFilter(req.Service, req.Version, req.Environment)
-		origJSON, _ := json.Marshal(originalTasks)
-		updJSON, _ := json.Marshal(updatedTasks)
-		s.logger.Infof("状态更新成功: 原始数据=%s, 更新后数据=%s", string(origJSON), string(updJSON))
-
+		s.logger.Infof("状态更新成功: %s → %s", originalTasks[0].Status, req.Status)
 		if req.Status == "success" {
 			if err := s.stats.InsertDeploySuccess(req.Service, req.Environment, req.Version); err != nil {
 				s.logger.WithError(err).Error("插入统计记录失败")
@@ -603,10 +554,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(map[string]string{"message": "状态更新成功"})
 	} else {
-		// 不匹配: 打印查询到的数据
-		dataJSON, _ := json.Marshal(originalTasks)
-		s.logger.Warnf("未找到匹配任务 (必须是assigned状态): 查询条件=service=%s, version=%s, env=%s, user=%s, 找到的数据=%s",
-			req.Service, req.Version, req.Environment, req.User, string(dataJSON))
+		s.logger.Warn("未找到可更新任务（必须为 assigned 状态）")
 		json.NewEncoder(w).Encode(map[string]string{"message": "未找到匹配任务"})
 	}
 }
