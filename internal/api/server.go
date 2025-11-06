@@ -47,6 +47,16 @@ type PushTask struct {
 	ID           string
 }
 
+// DeployRequestCompat 兼容旧字段的请求结构
+type DeployRequestCompat struct {
+	Service      string   `json:"service"`
+	Envs         []string `json:"envs"`         // 旧字段
+	Environments []string `json:"environments"` // 新字段
+	Version      string   `json:"version"`
+	Username     string   `json:"username"`     // 旧字段
+	User         string   `json:"user"`         // 新字段
+}
+
 // DeployTask 部署任务结构
 type DeployTask struct {
 	Req storage.DeployRequest
@@ -278,6 +288,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeploy 处理部署请求（/deploy 接口，优化确认：服务单个，环境多个，版本单个，必须检查存在）
+// handleDeploy 处理部署请求（兼容旧字段：envs/username）
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -289,41 +300,102 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req storage.DeployRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 兼容结构体：支持新旧字段
+	type DeployRequestCompat struct {
+		Service      string   `json:"service"`
+		Envs         []string `json:"envs"`         // 旧字段
+		Environments []string `json:"environments"` // 新字段
+		Version      string   `json:"version"`
+		Username     string   `json:"username"`     // 旧字段
+		User         string   `json:"user"`         // 新字段
+	}
+
+	var compatReq DeployRequestCompat
+	if err := json.NewDecoder(r.Body).Decode(&compatReq); err != nil {
 		s.logger.WithError(err).Error("解析部署请求失败")
-		http.Error(w, "无效的请求数据", 120) // 自定义错误码120
+		http.Error(w, "无效的请求数据", http.StatusBadRequest)
 		return
 	}
 
-	// 必须参数检查：服务单个，环境多个，版本单个
+	// 转换为标准结构体
+	req := storage.DeployRequest{
+		Service: compatReq.Service,
+		Version: compatReq.Version,
+		Status:  "pending",
+	}
+
+	// 环境字段映射：优先新字段
+	envSource := "environments"
+	if len(compatReq.Environments) > 0 {
+		req.Environments = compatReq.Environments
+	} else if len(compatReq.Envs) > 0 {
+		req.Environments = compatReq.Envs
+		envSource = "envs"
+	} else {
+		req.Environments = []string{}
+	}
+
+	// 用户字段映射：优先新字段
+	userSource := "user"
+	if compatReq.User != "" {
+		req.User = compatReq.User
+	} else if compatReq.Username != "" {
+		req.User = compatReq.Username
+		userSource = "username"
+	} else {
+		req.User = "system"
+		userSource = "default(system)"
+	}
+
+	// 必填字段校验
 	if req.Service == "" || len(req.Environments) == 0 || req.Version == "" {
-		http.Error(w, "缺少必填字段：服务名、环境、版本", 120) // 自定义错误码120
+		missing := []string{}
+		if req.Service == "" {
+			missing = append(missing, "service")
+		}
+		if len(req.Environments) == 0 {
+			missing = append(missing, "environments/envs")
+		}
+		if req.Version == "" {
+			missing = append(missing, "version")
+		}
+		s.logger.WithFields(logrus.Fields{
+			"missing_fields": missing,
+			"raw_request":    compatReq,
+		}).Error("缺少必填字段")
+		http.Error(w, fmt.Sprintf("缺少必填字段: %s", strings.Join(missing, ", ")), http.StatusBadRequest)
 		return
 	}
 
-	// 默认覆盖状态为pending
-	req.Status = "pending"
+	// 记录字段来源日志
+	s.logger.WithFields(logrus.Fields{
+		"service":        req.Service,
+		"version":        req.Version,
+		"environments":   req.Environments,
+		"user":           req.User,
+		"env_source":     envSource,
+		"user_source":    userSource,
+		"using_deprecated": len(compatReq.Envs) > 0 || compatReq.Username != "",
+	}).Info("收到部署请求（字段来源已记录）")
 
-	if req.User == "" {
-		req.User = "system" // 默认用户
-	}
-
-	// 检查服务和环境是否存在
+	// 检查服务是否存在
 	svcEnvs, err := s.storage.GetServiceEnvironments(req.Service)
 	if err != nil {
-		s.logger.WithError(err).Error("查询服务失败")
+		s.logger.WithError(err).Error("查询服务环境失败")
 		http.Error(w, "查询服务失败", http.StatusInternalServerError)
 		return
 	}
 	if svcEnvs == nil {
-		http.Error(w, fmt.Sprintf("服务 %s 不存在", req.Service), 120) // 自定义错误码120
+		s.logger.Warnf("服务 %s 不存在", req.Service)
+		http.Error(w, fmt.Sprintf("服务 %s 不存在", req.Service), http.StatusBadRequest)
 		return
 	}
 
+	// 检查每个环境是否属于该服务
 	for _, env := range req.Environments {
 		if !contains(svcEnvs, env) {
-			http.Error(w, fmt.Sprintf("环境 %s 不存在于服务 %s", env, req.Service), 120) // 自定义错误码120
+			s.logger.Warnf("环境 %s 不存在于服务 %s", env, req.Service)
+			http.Error(w, fmt.Sprintf("环境 %s 不存在于服务 %s", env, req.Service), http.StatusBadRequest)
 			return
 		}
 	}
@@ -338,12 +410,23 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	wp.Submit(deployTask)
 
-	w.WriteHeader(521) // 自定义成功码521
+	// 响应构建
 	response := map[string]interface{}{
 		"message": "部署请求已入队",
 		"task_id": taskID,
 	}
-	json.NewEncoder(w).Encode(response)
+
+	// 如果使用了旧字段，返回警告
+	if len(compatReq.Envs) > 0 || compatReq.Username != "" {
+		response["warning"] = "检测到使用旧字段名 (envs/username)，建议升级为 environments/user 以获得更好兼容性"
+		s.logger.Warn("客户端使用旧字段名，建议升级接口")
+	}
+
+	// 使用标准 HTTP 状态码 202 Accepted
+	w.WriteHeader(http.StatusAccepted)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		s.logger.WithError(err).Error("响应编码失败")
+	}
 }
 
 // handleQuery 处理查询请求（支持多环境查询，服务单个，user可选）
