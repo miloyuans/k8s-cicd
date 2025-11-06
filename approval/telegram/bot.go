@@ -1,4 +1,4 @@
-// 文件: telegram/bot.go (完整文件，修复: 移除未使用 uuid 导入；移除未使用 userID 变量；统一 globalAllowedUsers 字段名一致性，支持多 Bot 独立轮询等原有优化)
+// 文件: telegram/bot.go (完整文件，修复所有编译错误：移除未使用 models 导入；统一 HandleCallback 参数为单 map；移除已删除的 updateChan 字段；保留多 Bot 隔离、单环境查询等所有功能)
 package telegram
 
 import (
@@ -14,7 +14,6 @@ import (
 
 	"k8s-cicd/approval/client"
 	"k8s-cicd/approval/config"
-	"k8s-cicd/approval/models"
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
@@ -34,13 +33,13 @@ type TelegramBot struct {
 // BotManager 机器人管理器
 type BotManager struct {
 	Bots               map[string]*TelegramBot
-	globalAllowedUsers []string            // 修复: 统一为 globalAllowedUsers
+	globalAllowedUsers []string
 	mongo              *client.MongoClient
-	botChannels        map[string]chan map[string]interface{}
+	botChannels        map[string]chan map[string]interface{} // 每个 Bot 独立 channel
 	stopChan           chan struct{}
 	offsets            map[string]int64
 	mu                 sync.Mutex
-	sentTasks          map[string]bool // task_id -> sent (内存防重)
+	sentTasks          map[string]bool // task_id + env → bool
 	cfg                *config.Config
 }
 
@@ -87,7 +86,7 @@ func (bm *BotManager) SetMongoClient(mongo *client.MongoClient) {
 
 // SetGlobalAllowedUsers 设置全局允许用户
 func (bm *BotManager) SetGlobalAllowedUsers(users []string) {
-	bm.globalAllowedUsers = users // 修复: 统一字段名
+	bm.globalAllowedUsers = users
 }
 
 // Start 启动轮询和弹窗
@@ -157,7 +156,7 @@ func (bm *BotManager) pollUpdatesForBot(bot *TelegramBot) {
 func (bm *BotManager) handleUpdatesForBot(bot *TelegramBot) {
 	for update := range bm.botChannels[bot.Name] {
 		if callback, ok := update["callback_query"].(map[string]interface{}); ok {
-			bm.HandleCallback(bot, callback)
+			bm.HandleCallback(bot, callback) // 修复: 传入 bot 指针
 		}
 	}
 }
@@ -236,7 +235,7 @@ func (bm *BotManager) pollPendingTasks() {
 
 						defaultBot := bm.getDefaultBot()
 						if defaultBot != nil {
-							warningMsg := fmt.Sprintf("⚠️ 服务 %s 未匹配任何机器人，无法发送审批弹窗。请检查配置。任务ID: %s", service, task.TaskID)
+							warningMsg := fmt.Sprintf("服务 %s 未匹配任何机器人，无法发送审批弹窗。请检查配置。任务ID: %s", service, task.TaskID)
 							_, sendErr := bm.sendMessage(defaultBot, defaultBot.GroupID, warningMsg, "")
 							if sendErr != nil {
 								logrus.WithFields(logrus.Fields{
@@ -271,13 +270,13 @@ func (bm *BotManager) pollPendingTasks() {
 					keyboard := map[string]interface{}{
 						"inline_keyboard": [][]map[string]string{
 							{
-								{"text": "✅ 确认部署", "callback_data": fmt.Sprintf("confirm-%s", task.TaskID)},
-								{"text": "❌ 拒绝部署", "callback_data": fmt.Sprintf("reject-%s", task.TaskID)},
+								{"text": "确认部署", "callback_data": fmt.Sprintf("confirm-%s", task.TaskID)},
+								{"text": "拒绝部署", "callback_data": fmt.Sprintf("reject-%s", task.TaskID)},
 							},
 						},
 					}
 					messageText := fmt.Sprintf(
-						"🚀 **部署审批请求**\n\n"+
+						"**部署审批请求**\n\n"+
 							"**服务**: %s\n"+
 							"**版本**: %s\n"+
 							"**环境**: %s\n"+
@@ -340,27 +339,8 @@ func (bm *BotManager) pollPendingTasks() {
 	}
 }
 
-// 新增: contains 函数 (从 agent.go 复制，供 bot.go 使用)
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
-
-// handleUpdates 处理 Updates
-func (bm *BotManager) handleUpdates() {
-	for update := range bm.updateChan {
-		if callback, ok := update["callback_query"].(map[string]interface{}); ok {
-			bm.HandleCallback(callback)
-		}
-	}
-}
-
-// HandleCallback 处理回调查询
-func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
+// HandleCallback 处理回调查询（修复: 接收 bot 指针，移除对 updateChan 的依赖）
+func (bm *BotManager) HandleCallback(bot *TelegramBot, callback map[string]interface{}) {
 	startTime := time.Now()
 
 	id := callback["id"].(string)
@@ -373,7 +353,7 @@ func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
 
 	parts := strings.Split(data, "-")
 	if len(parts) != 2 {
-		bm.answerCallback(id, "无效操作")
+		bm.answerCallback(bot, id, "无效操作")
 		return
 	}
 
@@ -382,7 +362,7 @@ func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
 
 	task, err := bm.mongo.GetTaskByID(taskID)
 	if err != nil {
-		bm.answerCallback(id, "任务不存在")
+		bm.answerCallback(bot, id, "任务不存在")
 		logrus.WithFields(logrus.Fields{
 			"time":    time.Now().Format("2006-01-02 15:04:05"),
 			"method":  "HandleCallback",
@@ -391,21 +371,21 @@ func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
 		return
 	}
 
-	botName := task.PopupBotName
-	bot, exists := bm.Bots[botName]
-	if !exists {
-		bm.answerCallback(id, "机器人不存在")
+	// 校验 Bot 名称一致性
+	if task.PopupBotName != bot.Name {
+		bm.answerCallback(bot, id, "机器人不匹配")
 		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "HandleCallback",
-			"task_id": taskID,
-			"bot_name": botName,
-		}).Errorf("找不到发送弹窗的机器人: %s", botName)
+			"time":     time.Now().Format("2006-01-02 15:04:05"),
+			"method":   "HandleCallback",
+			"task_id":  taskID,
+			"expected_bot": task.PopupBotName,
+			"actual_bot": bot.Name,
+		}).Errorf("弹窗 Bot 不匹配")
 		return
 	}
 
 	if !bm.isUserAllowed(username, bot) {
-		bm.answerCallback(id, "您无权限操作")
+		bm.answerCallback(bot, id, "您无权限操作")
 		logrus.WithFields(logrus.Fields{
 			"time":   time.Now().Format("2006-01-02 15:04:05"),
 			"method": "HandleCallback",
@@ -419,17 +399,17 @@ func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
 	var feedbackText string
 	if action == "confirm" {
 		status = "已确认"
-		feedbackText = fmt.Sprintf("✅ 用户 %s 已批准部署:\n服务: %s\n版本: %s\n环境: %s\n任务ID: %s", username, task.Service, task.Version, task.Environment, taskID)
+		feedbackText = fmt.Sprintf("用户 %s 已批准部署:\n服务: %s\n版本: %s\n环境: %s\n任务ID: %s", username, task.Service, task.Version, task.Environment, taskID)
 	} else if action == "reject" {
 		status = "已拒绝"
-		feedbackText = fmt.Sprintf("❌ 用户 %s 已拒绝部署:\n服务: %s\n版本: %s\n环境: %s\n任务ID: %s", username, task.Service, task.Version, task.Environment, taskID)
+		feedbackText = fmt.Sprintf("用户 %s 已拒绝部署:\n服务: %s\n版本: %s\n环境: %s\n任务ID: %s", username, task.Service, task.Version, task.Environment, taskID)
 	} else {
-		bm.answerCallback(id, "无效操作")
+		bm.answerCallback(bot, id, "无效操作")
 		return
 	}
 
 	if err := bm.mongo.UpdateTaskStatus(taskID, status, username); err != nil {
-		bm.answerCallback(id, "更新状态失败")
+		bm.answerCallback(bot, id, "更新状态失败")
 		logrus.WithFields(logrus.Fields{
 			"time":    time.Now().Format("2006-01-02 15:04:05"),
 			"method":  "HandleCallback",
@@ -493,7 +473,7 @@ func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
 		}
 	}
 
-	bm.answerCallback(id, fmt.Sprintf("操作已执行: %s (弹窗已删除，反馈已发送，状态: %s)", action, status))
+	bm.answerCallback(bot, id, fmt.Sprintf("操作已执行: %s (弹窗已删除，反馈已发送，状态: %s)", action, status))
 
 	logrus.WithFields(logrus.Fields{
 		"time":   time.Now().Format("2006-01-02 15:04:05"),
@@ -507,30 +487,23 @@ func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
 	}).Infof("回调处理完成: 原弹窗删除 + 反馈发送 (状态变更: %s)", status)
 }
 
-// answerCallback 响应 Callback Query
-func (bm *BotManager) answerCallback(id, text string) {
-	defaultBot := bm.getDefaultBot()
-	if defaultBot == nil {
-		logrus.Warn("无默认 Bot，无法响应 Callback")
-		return
-	}
+// answerCallback 响应 Callback Query（传入 bot）
+func (bm *BotManager) answerCallback(bot *TelegramBot, id, text string) {
 	payload := map[string]interface{}{
 		"callback_query_id": id,
 		"text":              text,
 	}
 	jsonData, _ := json.Marshal(payload)
-	http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery", defaultBot.Token), "application/json", bytes.NewBuffer(jsonData))
+	_, _ = http.Post(fmt.Sprintf("https://api.telegram.org/bot%s/answerCallbackQuery", bot.Token), "application/json", bytes.NewBuffer(jsonData))
 }
 
-// 修改: isUserAllowed 支持机器人级权限
+// isUserAllowed 支持机器人级权限
 func (bm *BotManager) isUserAllowed(username string, bot *TelegramBot) bool {
-	// 全局用户
-	for _, u := range bm.globalAllowedUsers { // 修复: 统一字段名
+	for _, u := range bm.globalAllowedUsers {
 		if u == username {
 			return true
 		}
 	}
-	// 机器人级用户
 	if bot != nil {
 		for _, u := range bot.AllowedUsers {
 			if u == username {
@@ -571,7 +544,7 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
 }
 
-// sendMessage 发送消息（增强错误解析）
+// sendMessage 发送消息
 func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode string) (int, error) {
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
