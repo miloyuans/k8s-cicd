@@ -290,6 +290,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 // handleDeploy 处理部署请求（/deploy 接口，优化确认：服务单个，环境多个，版本单个，必须检查存在）
 // handleDeploy 处理部署请求（兼容旧字段：envs/username）
 // handleDeploy 处理部署请求（多环境自动拆分为单环境任务）
+// handleDeploy 处理部署请求（多环境拆分 + 查重）
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -304,11 +305,11 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	// 兼容结构体
 	type DeployRequestCompat struct {
 		Service      string   `json:"service"`
-		Envs         []string `json:"envs"`         // 旧
-		Environments []string `json:"environments"` // 新
+		Envs         []string `json:"envs"`
+		Environments []string `json:"environments"`
 		Version      string   `json:"version"`
-		Username     string   `json:"username"`     // 旧
-		User         string   `json:"user"`         // 新
+		Username     string   `json:"username"`
+		User         string   `json:"user"`
 	}
 
 	var compatReq DeployRequestCompat
@@ -366,31 +367,41 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 核心：拆分为单环境任务
+	// 异步提交：每环境一条任务
 	wp := getGlobalWorkerPool()
 	taskIDs := []string{}
+	successCount := 0
+
 	for _, env := range req.Environments {
-		// 每环境一条记录
 		singleReq := storage.DeployRequest{
 			Service:      req.Service,
-			Environments: []string{env}, // 数组只包含一个
+			Environments: []string{env}, // 单环境数组
 			Version:      req.Version,
 			User:         req.User,
 			Status:       "pending",
 		}
+
 		taskID := fmt.Sprintf("deploy-%s-%s-%s-%d", req.Service, env, req.Version, time.Now().UnixNano())
+		err := s.storage.InsertDeployRequest(singleReq)
+		if err != nil {
+			s.logger.WithError(err).Warnf("环境 %s 任务提交失败", env)
+			// 不中断，继续其他环境
+			continue
+		}
 		wp.Submit(&DeployTask{
 			Req: singleReq,
 			ID:  taskID,
 		})
 		taskIDs = append(taskIDs, taskID)
+		successCount++
 	}
 
 	// 响应
 	response := map[string]interface{}{
-		"message":  "部署请求已入队",
-		"task_ids": taskIDs,
-		"count":    len(taskIDs),
+		"message":       "部署请求已入队",
+		"task_ids":      taskIDs,
+		"success_count": successCount,
+		"total_count":   len(req.Environments),
 	}
 	if len(compatReq.Envs) > 0 || compatReq.Username != "" {
 		response["warning"] = "使用旧字段名，建议升级"

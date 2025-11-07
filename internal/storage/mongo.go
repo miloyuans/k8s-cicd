@@ -71,11 +71,13 @@ func NewMongoStorage(uri string, ttlHours int) (*MongoStorage, error) {
 
 // createIndexes 创建所有集合的索引，确保TTL自动过期
 // createIndexes 创建索引
+// createIndexes 创建所有集合的索引（移除唯一索引，改为查询索引）
 func (s *MongoStorage) createIndexes(ttlHours int) error {
+	// 提前定义集合
 	svcColl := s.db.Collection("service_environments")
 	deployColl := s.db.Collection("deploy_queue")
 
-	// service_environments 索引
+	// 1. service_environments 索引
 	_, err := svcColl.Indexes().CreateMany(s.ctx, []mongo.IndexModel{
 		{Keys: bson.D{{"_id", 1}}},
 		{Keys: bson.D{{"environments", 1}}},
@@ -84,20 +86,7 @@ func (s *MongoStorage) createIndexes(ttlHours int) error {
 		return err
 	}
 
-	// 关键：唯一索引使用 environments 数组
-	_, err = deployColl.Indexes().CreateOne(s.ctx, mongo.IndexModel{
-		Keys: bson.D{
-			{"service", 1},
-			{"environments", 1},  // 数组字段
-			{"version", 1},
-		},
-		Options: options.Index().SetUnique(true),
-	})
-	if err != nil {
-		return err
-	}
-
-	// 其他查询索引 + TTL
+	// 2. deploy_queue 查询索引（提升查重性能）
 	ttlSeconds := int32(ttlHours * 3600)
 	_, err = deployColl.Indexes().CreateMany(s.ctx, []mongo.IndexModel{
 		{Keys: bson.D{{"service", 1}}},
@@ -105,6 +94,14 @@ func (s *MongoStorage) createIndexes(ttlHours int) error {
 		{Keys: bson.D{{"version", 1}}},
 		{Keys: bson.D{{"status", 1}}},
 		{Keys: bson.D{{"user", 1}}},
+		// 复合索引：用于查重
+		{Keys: bson.D{
+			{"service", 1},
+			{"environments", 1},
+			{"version", 1},
+			{"status", 1},
+		}},
+		// TTL 索引
 		{Keys: bson.D{{"created_at", 1}}, Options: options.Index().SetExpireAfterSeconds(ttlSeconds)},
 	})
 	if err != nil {
@@ -169,24 +166,45 @@ func (s *MongoStorage) GetServiceEnvironments(service string) ([]string, error) 
 
 // InsertDeployRequest 插入部署请求，确保数据持久化避免丢失
 // InsertDeployRequest 插入前校验
+// InsertDeployRequest 插入部署请求（插入前查重，精确匹配）
 func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
+	// 参数校验
 	if len(req.Environments) == 0 {
 		return errors.New("environments 不能为空")
 	}
 	if req.Service == "" || req.Version == "" {
 		return errors.New("service 和 version 必填")
 	}
+	if req.Status == "" {
+		req.Status = "pending" // 默认状态
+	}
 
 	coll := s.db.Collection("deploy_queue")
-	req.CreatedAt = time.Now().UTC()
-	_, err := coll.InsertOne(s.ctx, req)
-	if err != nil {
-		// 捕获唯一索引冲突
-		if mongo.IsDuplicateKeyError(err) {
-			return fmt.Errorf("任务已存在: service=%s, env=%v, version=%s", req.Service, req.Environments, req.Version)
-		}
-		return err
+
+	// 查重：service + environments + version + status 完全相同
+	filter := bson.D{
+		{"service", req.Service},
+		{"environments", bson.D{{"$eq", req.Environments}}}, // 精确数组匹配
+		{"version", req.Version},
+		{"status", req.Status},
 	}
+
+	count, err := coll.CountDocuments(s.ctx, filter)
+	if err != nil {
+		return fmt.Errorf("查重失败: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("任务已存在: service=%s, env=%v, version=%s, status=%s",
+			req.Service, req.Environments, req.Version, req.Status)
+	}
+
+	// 插入新任务
+	req.CreatedAt = time.Now().UTC()
+	_, err = coll.InsertOne(s.ctx, req)
+	if err != nil {
+		return fmt.Errorf("插入任务失败: %w", err)
+	}
+
 	return nil
 }
 
