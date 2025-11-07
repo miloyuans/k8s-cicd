@@ -167,8 +167,8 @@ func (s *MongoStorage) GetServiceEnvironments(service string) ([]string, error) 
 // InsertDeployRequest 插入部署请求，确保数据持久化避免丢失
 // InsertDeployRequest 插入前校验
 // InsertDeployRequest 插入部署请求（插入前查重，精确匹配）
+// InsertDeployRequest 插入部署请求（同步查重）
 func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
-	// 参数校验
 	if len(req.Environments) == 0 {
 		return errors.New("environments 不能为空")
 	}
@@ -176,19 +176,18 @@ func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 		return errors.New("service 和 version 必填")
 	}
 	if req.Status == "" {
-		req.Status = "pending" // 默认状态
+		req.Status = "pending"
 	}
 
 	coll := s.db.Collection("deploy_queue")
 
-	// 查重：service + environments + version + status 完全相同
+	// 查重：精确匹配
 	filter := bson.D{
 		{"service", req.Service},
-		{"environments", bson.D{{"$eq", req.Environments}}}, // 精确数组匹配
+		{"environments", bson.D{{"$eq", req.Environments}}},
 		{"version", req.Version},
 		{"status", req.Status},
 	}
-
 	count, err := coll.CountDocuments(s.ctx, filter)
 	if err != nil {
 		return fmt.Errorf("查重失败: %w", err)
@@ -198,13 +197,12 @@ func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 			req.Service, req.Environments, req.Version, req.Status)
 	}
 
-	// 插入新任务
+	// 插入
 	req.CreatedAt = time.Now().UTC()
 	_, err = coll.InsertOne(s.ctx, req)
 	if err != nil {
-		return fmt.Errorf("插入任务失败: %w", err)
+		return fmt.Errorf("插入失败: %w", err)
 	}
-
 	return nil
 }
 

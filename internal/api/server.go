@@ -291,6 +291,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 // handleDeploy 处理部署请求（兼容旧字段：envs/username）
 // handleDeploy 处理部署请求（多环境自动拆分为单环境任务）
 // handleDeploy 处理部署请求（多环境拆分 + 查重）
+// handleDeploy 处理部署请求（同步查重 + 插入，避免竞态）
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -367,41 +368,47 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 异步提交：每环境一条任务
-	wp := getGlobalWorkerPool()
+	// 同步处理：查重 + 插入
 	taskIDs := []string{}
 	successCount := 0
+	failedEnvs := []string{}
 
 	for _, env := range req.Environments {
 		singleReq := storage.DeployRequest{
 			Service:      req.Service,
-			Environments: []string{env}, // 单环境数组
+			Environments: []string{env},
 			Version:      req.Version,
 			User:         req.User,
 			Status:       "pending",
 		}
 
-		taskID := fmt.Sprintf("deploy-%s-%s-%s-%d", req.Service, env, req.Version, time.Now().UnixNano())
+		// 同步插入（含查重）
 		err := s.storage.InsertDeployRequest(singleReq)
 		if err != nil {
 			s.logger.WithError(err).Warnf("环境 %s 任务提交失败", env)
-			// 不中断，继续其他环境
+			failedEnvs = append(failedEnvs, env)
 			continue
 		}
+
+		taskID := fmt.Sprintf("deploy-%s-%s-%s-%d", req.Service, env, req.Version, time.Now().UnixNano())
+		taskIDs = append(taskIDs, taskID)
+		successCount++
+
+		// 异步提交到 WorkerPool（只做日志，不插入）
+		wp := getGlobalWorkerPool()
 		wp.Submit(&DeployTask{
 			Req: singleReq,
 			ID:  taskID,
 		})
-		taskIDs = append(taskIDs, taskID)
-		successCount++
 	}
 
 	// 响应
 	response := map[string]interface{}{
-		"message":       "部署请求已入队",
-		"task_ids":      taskIDs,
-		"success_count": successCount,
-		"total_count":   len(req.Environments),
+		"message":        "部署请求已处理",
+		"task_ids":       taskIDs,
+		"success_count":  successCount,
+		"failed_count":   len(failedEnvs),
+		"failed_envs":    failedEnvs,
 	}
 	if len(compatReq.Envs) > 0 || compatReq.Username != "" {
 		response["warning"] = "使用旧字段名，建议升级"
@@ -557,30 +564,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Execute PushTask 执行方法
-func (t *PushTask) Execute(storage *storage.MongoStorage) error {
-	if storage == nil {
-		return fmt.Errorf("storage 为 nil")
-	}
-
-	start := time.Now()
-	err := storage.StoreServiceEnvironments(t.Services, t.Environments)
-	if err != nil {
-		return err
-	}
-
-	updatedServices, _ := storage.GetServices()
+// Execute DeployTask 执行方法（不再插入数据库）
+func (t *DeployTask) Execute(storage *storage.MongoStorage) error {
+	// 数据库插入已在前置完成，这里只打印日志
 	logrus.WithFields(logrus.Fields{
-		"task_id":          t.ID,
-		"updated_services": updatedServices,
-	}).Info("更新后服务列表")
-
-	logrus.WithFields(logrus.Fields{
-		"task_id":             t.ID,
-		"services_count":      len(t.Services),
-		"environments_count":  len(t.Environments),
-		"total_task_ms":       time.Since(start).Milliseconds(),
-	}).Info("推送任务执行完成")
+		"task_id":   t.ID,
+		"service":   t.Req.Service,
+		"env":       t.Req.Environments[0],
+		"version":   t.Req.Version,
+		"user":      t.Req.User,
+		"status":    t.Req.Status,
+	}).Info("部署任务已入队（持久化完成）")
 
 	return nil
 }
