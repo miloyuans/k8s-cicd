@@ -450,6 +450,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 // handleQuery 处理查询请求（单环境精确匹配）
 // handleQuery 处理查询请求（对外兼容 environments 数组，对内单环境精确匹配）
 // handleQuery 处理查询请求（保持原行为）
+// handleQuery 处理查询请求（增强日志可读性）
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -457,25 +458,35 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if r.Method != http.MethodPost {
+		s.logger.WithFields(logrus.Fields{
+			"client_ip": r.RemoteAddr,
+			"method":    r.Method,
+		}).Warn("无效请求方法")
 		http.Error(w, "仅支持 POST 方法", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req struct {
+	// 兼容结构体
+	type QueryRequestCompat struct {
 		Service      string   `json:"service"`
 		Environments []string `json:"environments"`
 		Environment  string   `json:"environment"`
-		User         string   `json:"user"`
+		User         string   `json:"user,omitempty"`
 	}
+
+	var req QueryRequestCompat
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.logger.WithError(err).Error("解析查询请求失败")
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"client_ip": r.RemoteAddr,
+		}).Error("解析查询请求失败")
 		http.Error(w, "无效的请求数据", http.StatusBadRequest)
 		return
 	}
 
-	if req.Service == "" || (len(req.Environments) == 0 && req.Environment == "") {
-		s.logger.Error("缺少必填字段")
-		http.Error(w, "缺少必填字段", http.StatusBadRequest)
+	// 必填校验 + 日志记录请求
+	if req.Service == "" {
+		s.logger.WithField("client_ip", r.RemoteAddr).Error("缺少必填字段：service")
+		http.Error(w, "缺少必填字段：service", http.StatusBadRequest)
 		return
 	}
 
@@ -484,21 +495,46 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	if req.Environment != "" && len(req.Environments) == 0 {
 		envs = []string{req.Environment}
 	}
+	if len(envs) == 0 {
+		s.logger.WithFields(logrus.Fields{
+			"client_ip": r.RemoteAddr,
+			"service":   req.Service,
+		}).Error("缺少环境字段")
+		http.Error(w, "缺少环境字段：environment 或 environments", http.StatusBadRequest)
+		return
+	}
 
-	// 查询
+	// 关键日志：清晰打印请求内容
+	s.logger.WithFields(logrus.Fields{
+		"client_ip":     r.RemoteAddr,
+		"service":       req.Service,
+		"environments":  envs,
+		"user":          req.User,
+		"env_count":     len(envs),
+	}).Info("收到查询请求")
+
+	// 查询 pending 任务
 	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, envs, req.User)
 	if err != nil {
-		s.logger.WithError(err).Error("查询失败")
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"service":      req.Service,
+			"environments": envs,
+		}).Error("查询数据库失败")
 		http.Error(w, "查询失败", http.StatusInternalServerError)
 		return
 	}
 
 	if len(results) == 0 {
+		s.logger.WithFields(logrus.Fields{
+			"service":      req.Service,
+			"environments": envs,
+			"user":         req.User,
+		}).Info("无待处理任务")
 		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
 		return
 	}
 
-	// 取第一条（原逻辑）
+	// 取第一条任务
 	task := results[0]
 	matchedEnv := ""
 	for _, e := range task.Environments {
@@ -521,12 +557,38 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		User:        task.User,
 		Status:      "assigned",
 	}
-	s.storage.UpdateStatus(updateReq)
+	updated, err := s.storage.UpdateStatus(updateReq)
+	if err != nil {
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"version": task.Version,
+			"env":     matchedEnv,
+		}).Error("更新状态为 assigned 失败")
+	} else if updated {
+		s.logger.WithFields(logrus.Fields{
+			"task_id":      fmt.Sprintf("deploy-%s-%s-%s", task.Service, matchedEnv, task.Version),
+			"service":      task.Service,
+			"environment":  matchedEnv,
+			"version":      task.Version,
+			"from_status":  "pending",
+			"to_status":    "assigned",
+		}).Info("任务已分配")
+	}
 
-	// 响应
-	dataJSON, _ := json.Marshal(results)
-	s.logger.Infof("查询反馈: %s", string(dataJSON))
-	json.NewEncoder(w).Encode(results)
+	// 响应 + 详细日志
+	responseData := map[string]interface{}{
+		"task_id":      fmt.Sprintf("deploy-%s-%s-%s", task.Service, matchedEnv, task.Version),
+		"service":      task.Service,
+		"environment":  matchedEnv,
+		"version":      task.Version,
+		"user":         task.User,
+		"status":       "assigned",
+	}
+	s.logger.WithFields(logrus.Fields{
+		"response":     responseData,
+		"client_ip":    r.RemoteAddr,
+	}).Info("查询成功并返回任务")
+
+	json.NewEncoder(w).Encode(responseData)
 }
 
 // handleStatus 处理状态更新请求
