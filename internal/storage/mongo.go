@@ -14,10 +14,10 @@ import (
 
 // DeployRequest 部署请求数据结构
 // internal/storage/mongo.go
-// DeployRequest 部署请求数据结构（保持数组，兼容旧接口）
+// DeployRequest 部署请求数据结构（只保留 environments 数组）
 type DeployRequest struct {
 	Service      string    `json:"service" bson:"service"`
-	Environments []string  `json:"environments" bson:"environments"` // 保持数组
+	Environments []string  `json:"environments" bson:"environments"` // 必须有，至少1个
 	Version      string    `json:"version" bson:"version"`
 	User         string    `json:"user" bson:"user"`
 	Status       string    `json:"status,omitempty" bson:"status"`
@@ -69,25 +69,25 @@ func NewMongoStorage(uri string, ttlHours int) (*MongoStorage, error) {
 }
 
 // createIndexes 创建所有集合的索引，确保TTL自动过期
+// createIndexes 创建索引
 func (s *MongoStorage) createIndexes(ttlHours int) error {
-	// 提前定义所有集合
 	svcColl := s.db.Collection("service_environments")
 	deployColl := s.db.Collection("deploy_queue")
 
-	// 1. service_environments 索引
+	// service_environments 索引
 	_, err := svcColl.Indexes().CreateMany(s.ctx, []mongo.IndexModel{
 		{Keys: bson.D{{"_id", 1}}},
-		{Keys: bson.D{{"environments", 1}}}, // 保持数组字段
+		{Keys: bson.D{{"environments", 1}}},
 	})
 	if err != nil {
 		return err
 	}
 
-	// 2. deploy_queue 唯一索引：(service, environment, version) 唯一
+	// 关键：唯一索引使用 environments 数组
 	_, err = deployColl.Indexes().CreateOne(s.ctx, mongo.IndexModel{
 		Keys: bson.D{
 			{"service", 1},
-			{"environment", 1},
+			{"environments", 1},  // 数组字段
 			{"version", 1},
 		},
 		Options: options.Index().SetUnique(true),
@@ -96,11 +96,11 @@ func (s *MongoStorage) createIndexes(ttlHours int) error {
 		return err
 	}
 
-	// 3. deploy_queue 其他查询索引 + TTL
+	// 其他查询索引 + TTL
 	ttlSeconds := int32(ttlHours * 3600)
 	_, err = deployColl.Indexes().CreateMany(s.ctx, []mongo.IndexModel{
 		{Keys: bson.D{{"service", 1}}},
-		{Keys: bson.D{{"environment", 1}}}, // 单数
+		{Keys: bson.D{{"environments", 1}}},
 		{Keys: bson.D{{"version", 1}}},
 		{Keys: bson.D{{"status", 1}}},
 		{Keys: bson.D{{"user", 1}}},
@@ -167,11 +167,26 @@ func (s *MongoStorage) GetServiceEnvironments(service string) ([]string, error) 
 }
 
 // InsertDeployRequest 插入部署请求，确保数据持久化避免丢失
+// InsertDeployRequest 插入前校验
 func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
+	if len(req.Environments) == 0 {
+		return errors.New("environments 不能为空")
+	}
+	if req.Service == "" || req.Version == "" {
+		return errors.New("service 和 version 必填")
+	}
+
 	coll := s.db.Collection("deploy_queue")
 	req.CreatedAt = time.Now().UTC()
 	_, err := coll.InsertOne(s.ctx, req)
-	return err
+	if err != nil {
+		// 捕获唯一索引冲突
+		if mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("任务已存在: service=%s, env=%v, version=%s", req.Service, req.Environments, req.Version)
+		}
+		return err
+	}
+	return nil
 }
 
 // QueryDeployQueueByServiceEnv 查询pending任务（支持多环境查询，服务精确，user可选）
