@@ -40,13 +40,6 @@ type Task interface {
 	GetID() string
 }
 
-// PushTask 推送任务结构
-type PushTask struct {
-	Services     []string
-	Environments []string
-	ID           string
-}
-
 // DeployRequestCompat 兼容旧字段的请求结构
 type DeployRequestCompat struct {
     Service      string   `json:"service"`
@@ -141,6 +134,43 @@ type QueryRequest struct {
 	Environment  string   `json:"environment"`  // 单个环境（可选，与environments互斥）
 	User         string   `json:"user"`         // 用户名（可选）
 }
+
+// PushTask 推送任务结构
+type PushTask struct {
+	Services     []string
+	Environments []string
+	ID           string
+}
+
+// Execute PushTask 执行方法（必须实现 Task 接口）
+func (t *PushTask) Execute(storage *storage.MongoStorage) error {
+	if storage == nil {
+		return fmt.Errorf("storage 为 nil")
+	}
+
+	start := time.Now()
+	err := storage.StoreServiceEnvironments(t.Services, t.Environments)
+	if err != nil {
+		return err
+	}
+
+	updatedServices, _ := storage.GetServices()
+	logrus.WithFields(logrus.Fields{
+		"task_id":          t.ID,
+		"updated_services": updatedServices,
+	}).Info("更新后服务列表")
+
+	logrus.WithFields(logrus.Fields{
+		"task_id":             t.ID,
+		"services_count":      len(t.Services),
+		"environments_count":  len(t.Environments),
+		"total_task_ms":       time.Since(start).Milliseconds(),
+	}).Info("推送任务执行完成")
+
+	return nil
+}
+
+func (t *PushTask) GetID() string { return t.ID }
 
 // NewServer 创建 Server 实例
 func NewServer(mongoStorage *storage.MongoStorage, statsStorage *storage.StatsStorage, cfg *config.Config) *Server {
@@ -275,15 +305,13 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		ID:           taskID,
 	}
 
-	wp.Submit(pushTask)
+	wp.Submit(pushTask) // 现在可以编译！
 
-	w.WriteHeader(http.StatusOK) // 200 OK
+	w.WriteHeader(http.StatusOK)
 	response := map[string]interface{}{
 		"message": "推送请求已入队",
 		"task_id": taskID,
 	}
-	respJSON, _ := json.Marshal(response)
-	s.logger.Infof("推送响应: %s", string(respJSON))
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -564,7 +592,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Execute DeployTask 执行方法（不再插入数据库）
+// Execute DeployTask 执行方法（只保留一个！）
 func (t *DeployTask) Execute(storage *storage.MongoStorage) error {
 	// 数据库插入已在前置完成，这里只打印日志
 	logrus.WithFields(logrus.Fields{
@@ -577,27 +605,6 @@ func (t *DeployTask) Execute(storage *storage.MongoStorage) error {
 	}).Info("部署任务已入队（持久化完成）")
 
 	return nil
-}
-
-func (t *PushTask) GetID() string { return t.ID }
-
-// Execute DeployTask 执行方法
-func (t *DeployTask) Execute(storage *storage.MongoStorage) error {
-	if storage == nil {
-		return fmt.Errorf("storage 为 nil")
-	}
-
-	start := time.Now()
-	err := storage.InsertDeployRequest(t.Req)
-
-	logrus.WithFields(logrus.Fields{
-		"task_id":   t.ID,
-		"service":   t.Req.Service,
-		"version":   t.Req.Version,
-		"total_ms":  time.Since(start).Milliseconds(),
-	}).Info("部署任务入队完成")
-
-	return err
 }
 
 func (t *DeployTask) GetID() string { return t.ID }
