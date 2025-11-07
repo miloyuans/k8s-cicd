@@ -289,7 +289,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 // handleDeploy 处理部署请求（/deploy 接口，优化确认：服务单个，环境多个，版本单个，必须检查存在）
 // handleDeploy 处理部署请求（兼容旧字段：envs/username）
-// handleDeploy 处理部署请求（多环境拆分为单环境任务）
+// handleDeploy 处理部署请求（多环境自动拆分为单环境任务）
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -301,14 +301,14 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 兼容结构体：支持新旧字段
+	// 兼容结构体
 	type DeployRequestCompat struct {
 		Service      string   `json:"service"`
-		Envs         []string `json:"envs"`         // 旧字段
-		Environments []string `json:"environments"` // 新字段
+		Envs         []string `json:"envs"`         // 旧
+		Environments []string `json:"environments"` // 新
 		Version      string   `json:"version"`
-		Username     string   `json:"username"`     // 旧字段
-		User         string   `json:"user"`         // 新字段
+		Username     string   `json:"username"`     // 旧
+		User         string   `json:"user"`         // 新
 	}
 
 	var compatReq DeployRequestCompat
@@ -318,7 +318,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 转换为标准字段
+	// 字段映射
 	req := struct {
 		Service      string
 		Environments []string
@@ -328,7 +328,6 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	req.Service = compatReq.Service
 	req.Version = compatReq.Version
 
-	// 环境字段映射
 	if len(compatReq.Environments) > 0 {
 		req.Environments = compatReq.Environments
 	} else if len(compatReq.Envs) > 0 {
@@ -337,7 +336,6 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		req.Environments = []string{}
 	}
 
-	// 用户字段映射
 	if compatReq.User != "" {
 		req.User = compatReq.User
 	} else if compatReq.Username != "" {
@@ -348,53 +346,37 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	// 必填校验
 	if req.Service == "" || len(req.Environments) == 0 || req.Version == "" {
-		missing := []string{}
-		if req.Service == "" {
-			missing = append(missing, "service")
-		}
-		if len(req.Environments) == 0 {
-			missing = append(missing, "environments")
-		}
-		if req.Version == "" {
-			missing = append(missing, "version")
-		}
-		s.logger.WithField("missing", missing).Error("缺少必填字段")
-		http.Error(w, fmt.Sprintf("缺少必填字段: %s", strings.Join(missing, ", ")), http.StatusBadRequest)
+		s.logger.Error("缺少必填字段")
+		http.Error(w, "缺少必填字段", http.StatusBadRequest)
 		return
 	}
 
-	// 检查服务是否存在
+	// 校验服务和环境
 	svcEnvs, err := s.storage.GetServiceEnvironments(req.Service)
-	if err != nil {
-		s.logger.WithError(err).Error("查询服务环境失败")
-		http.Error(w, "查询服务失败", http.StatusInternalServerError)
+	if err != nil || svcEnvs == nil {
+		s.logger.WithError(err).Error("服务不存在")
+		http.Error(w, "服务不存在", http.StatusBadRequest)
 		return
 	}
-	if svcEnvs == nil {
-		s.logger.Warnf("服务 %s 不存在", req.Service)
-		http.Error(w, fmt.Sprintf("服务 %s 不存在", req.Service), http.StatusBadRequest)
-		return
-	}
-
-	// 校验每个环境
 	for _, env := range req.Environments {
 		if !contains(svcEnvs, env) {
-			s.logger.Warnf("环境 %s 不存在于服务 %s", env, req.Service)
-			http.Error(w, fmt.Sprintf("环境 %s 不存在于服务 %s", env, req.Service), http.StatusBadRequest)
+			s.logger.Warnf("环境 %s 不存在", env)
+			http.Error(w, fmt.Sprintf("环境 %s 不存在", env), http.StatusBadRequest)
 			return
 		}
 	}
 
-	// 异步提交：每环境一条任务
+	// 核心：拆分为单环境任务
 	wp := getGlobalWorkerPool()
 	taskIDs := []string{}
 	for _, env := range req.Environments {
+		// 每环境一条记录
 		singleReq := storage.DeployRequest{
-			Service:     req.Service,
-			Environment: env,
-			Version:     req.Version,
-			User:        req.User,
-			Status:      "pending",
+			Service:      req.Service,
+			Environments: []string{env}, // 数组只包含一个
+			Version:      req.Version,
+			User:         req.User,
+			Status:       "pending",
 		}
 		taskID := fmt.Sprintf("deploy-%s-%s-%s-%d", req.Service, env, req.Version, time.Now().UnixNano())
 		wp.Submit(&DeployTask{
@@ -411,18 +393,17 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		"count":    len(taskIDs),
 	}
 	if len(compatReq.Envs) > 0 || compatReq.Username != "" {
-		response["warning"] = "使用旧字段名 (envs/username)，建议升级为 environments/user"
+		response["warning"] = "使用旧字段名，建议升级"
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.WithError(err).Error("响应编码失败")
-	}
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleQuery 处理查询请求（支持多环境查询，服务单个，user可选）
 // handleQuery 处理查询请求（单环境精确匹配）
 // handleQuery 处理查询请求（对外兼容 environments 数组，对内单环境精确匹配）
+// handleQuery 处理查询请求（保持原行为）
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -434,95 +415,72 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 兼容结构体：支持 environments 数组
-	type QueryRequestCompat struct {
+	var req struct {
 		Service      string   `json:"service"`
-		Environments []string `json:"environments"` // 兼容旧字段
-		Environment  string   `json:"environment"`  // 可选新字段
-		User         string   `json:"user,omitempty"`
+		Environments []string `json:"environments"`
+		Environment  string   `json:"environment"`
+		User         string   `json:"user"`
 	}
-
-	var req QueryRequestCompat
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.WithError(err).Error("解析查询请求失败")
 		http.Error(w, "无效的请求数据", http.StatusBadRequest)
 		return
 	}
 
-	// 必填校验
-	if req.Service == "" {
-		s.logger.Error("缺少必填字段：service")
-		http.Error(w, "缺少必填字段：service", http.StatusBadRequest)
+	if req.Service == "" || (len(req.Environments) == 0 && req.Environment == "") {
+		s.logger.Error("缺少必填字段")
+		http.Error(w, "缺少必填字段", http.StatusBadRequest)
 		return
 	}
 
-	// 环境字段处理：优先 environment，其次 environments[0]
-	var targetEnv string
-	if req.Environment != "" {
-		targetEnv = req.Environment
-		s.logger.Info("使用 environment 字段查询")
-	} else if len(req.Environments) > 0 {
-		if len(req.Environments) > 1 {
-			s.logger.Warn("environments 数组包含多个值，仅取第一个")
-			// 可选：返回 400 强制单环境
-			// http.Error(w, "environments 仅支持单个值", http.StatusBadRequest); return
-		}
-		targetEnv = req.Environments[0]
-		s.logger.Info("使用 environments[0] 字段查询（兼容旧版本）")
-	} else {
-		s.logger.Error("缺少环境字段：environment 或 environments")
-		http.Error(w, "缺少环境字段：environment 或 environments", http.StatusBadRequest)
-		return
+	// 合并环境
+	envs := req.Environments
+	if req.Environment != "" && len(req.Environments) == 0 {
+		envs = []string{req.Environment}
 	}
 
-	s.logger.Infof("收到查询请求: service=%s, environment=%s, user=%s", req.Service, targetEnv, req.User)
-
-	// 查询 pending 任务（精确匹配）
-	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, targetEnv, req.User)
+	// 查询
+	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, envs, req.User)
 	if err != nil {
-		s.logger.WithError(err).Error("查询数据库失败")
+		s.logger.WithError(err).Error("查询失败")
 		http.Error(w, "查询失败", http.StatusInternalServerError)
 		return
 	}
 
 	if len(results) == 0 {
-		s.logger.Info("无待处理任务")
 		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
 		return
 	}
 
-	// 取第一条任务（唯一索引保证）
+	// 取第一条（原逻辑）
 	task := results[0]
+	matchedEnv := ""
+	for _, e := range task.Environments {
+		for _, q := range envs {
+			if e == q {
+				matchedEnv = e
+				break
+			}
+		}
+		if matchedEnv != "" {
+			break
+		}
+	}
 
 	// 更新为 assigned
 	updateReq := storage.StatusRequest{
 		Service:     task.Service,
 		Version:     task.Version,
-		Environment: task.Environment,
+		Environment: matchedEnv,
 		User:        task.User,
 		Status:      "assigned",
 	}
-	updated, err := s.storage.UpdateStatus(updateReq)
-	if err != nil {
-		s.logger.WithError(err).Error("更新状态为 assigned 失败")
-	} else if updated {
-		s.logger.Infof("任务 %s 已分配给环境 %s", task.Version, task.Environment)
-	}
+	s.storage.UpdateStatus(updateReq)
 
-	// 响应（保持旧格式兼容）
-	response := map[string]interface{}{
-		"task_id":     fmt.Sprintf("deploy-%s-%s-%s", task.Service, task.Environment, task.Version),
-		"service":     task.Service,
-		"environment": task.Environment,
-		"version":     task.Version,
-		"user":        task.User,
-	}
-	// 兼容旧客户端：返回 environments 数组
-	if len(req.Environments) > 0 {
-		response["environments"] = []string{task.Environment}
-	}
-
-	json.NewEncoder(w).Encode(response)
+	// 响应
+	dataJSON, _ := json.Marshal(results)
+	s.logger.Infof("查询反馈: %s", string(dataJSON))
+	json.NewEncoder(w).Encode(results)
 }
 
 // handleStatus 处理状态更新请求

@@ -14,14 +14,14 @@ import (
 
 // DeployRequest 部署请求数据结构
 // internal/storage/mongo.go
-// DeployRequest 部署请求数据结构（内部单环境）
+// DeployRequest 部署请求数据结构（保持数组，兼容旧接口）
 type DeployRequest struct {
-	Service     string    `json:"service" bson:"service"`
-	Environment string    `json:"environment" bson:"environment"` // 内部单数
-	Version     string    `json:"version" bson:"version"`
-	User        string    `json:"user" bson:"user"`
-	Status      string    `json:"status,omitempty" bson:"status"`
-	CreatedAt   time.Time `bson:"created_at"`
+	Service      string    `json:"service" bson:"service"`
+	Environments []string  `json:"environments" bson:"environments"` // 保持数组
+	Version      string    `json:"version" bson:"version"`
+	User         string    `json:"user" bson:"user"`
+	Status       string    `json:"status,omitempty" bson:"status"`
+	CreatedAt    time.Time `bson:"created_at"`
 }
 
 // StatusRequest 状态更新请求数据结构
@@ -175,13 +175,12 @@ func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 }
 
 // QueryDeployQueueByServiceEnv 查询pending任务（支持多环境查询，服务精确，user可选）
-// QueryDeployQueueByServiceEnv 查询 pending 任务（单环境精确匹配）
-// QueryDeployQueueByServiceEnv 查询 pending 任务（单环境精确匹配）
-func (s *MongoStorage) QueryDeployQueueByServiceEnv(service, environment, user string) ([]DeployRequest, error) {
+// QueryDeployQueueByServiceEnv 查询 pending 任务（environments 数组包含指定环境）
+func (s *MongoStorage) QueryDeployQueueByServiceEnv(service string, environments []string, user string) ([]DeployRequest, error) {
 	coll := s.db.Collection("deploy_queue")
 	filter := bson.D{
 		{"service", service},
-		{"environment", environment},
+		{"environments", bson.D{{"$in", environments}}}, // 数组包含任意一个
 		{"status", "pending"},
 	}
 	if user != "" {
@@ -202,14 +201,15 @@ func (s *MongoStorage) QueryDeployQueueByServiceEnv(service, environment, user s
 
 // UpdateStatus 更新任务状态（修正为匹配 pending 状态）
 // UpdateStatus 更新任务状态（单环境，assigned → final）
+// UpdateStatus 更新任务状态（精确匹配 environment）
 func (s *MongoStorage) UpdateStatus(req StatusRequest) (bool, error) {
 	coll := s.db.Collection("deploy_queue")
 	filter := bson.D{
 		{"service", req.Service},
 		{"version", req.Version},
-		{"environment", req.Environment},
+		{"environments", req.Environment}, // 精确匹配
 		{"user", req.User},
-		{"status", "assigned"}, // 必须是 assigned
+		{"status", "pending"},
 	}
 	update := bson.D{{"$set", bson.D{{"status", req.Status}}}}
 	result, err := coll.UpdateOne(s.ctx, filter, update)
