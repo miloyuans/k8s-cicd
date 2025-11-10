@@ -310,7 +310,62 @@ func (m *MongoClient) StoreTask(task *models.DeployRequest, isConfirmEnv bool) e
 	return nil
 }
 
-// UpdateTaskStatus 更新状态（支持 env + popup_sent）
+// GetPendingTasks 查询待确认任务
+func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error) {
+	coll := m.GetTaskCollection(env)
+	ctx := context.Background()
+	cursor, err := coll.Find(ctx, bson.M{
+		"confirmation_status": "待确认",
+		"popup_sent":          bson.M{"$ne": true},
+	}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var tasks []models.DeployRequest
+	for cursor.Next(ctx) {
+		var task models.DeployRequest
+		if err := cursor.Decode(&task); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+// MarkPopupSent 标记弹窗已发送（支持 env）
+func (m *MongoClient) MarkPopupSent(taskID string, messageID int, botName, env string) error {
+	ctx := context.Background()
+	coll := m.GetTaskCollection(env)
+
+	update := bson.M{
+		"$set": bson.M{
+			"popup_sent":       true,
+			"popup_message_id": messageID,
+			"popup_sent_at":    time.Now(),
+			"popup_bot_name":   botName,
+		},
+	}
+	_, err := coll.UpdateOne(ctx, bson.M{"task_id": taskID}, update)
+	if err != nil {
+		return err
+	}
+
+	// 插入 popup_data 记录
+	popupColl := m.client.Database("cicd").Collection("popup_data")
+	_, err = popupColl.InsertOne(ctx, bson.M{
+		"task_id":    taskID,
+		"message_id": messageID,
+		"sent_at":    time.Now(),
+	})
+	return err
+}
+
+// UpdateTaskStatus 支持 env + popup_sent
 func (m *MongoClient) UpdateTaskStatus(taskID, status, user, env string, popupSent *bool) error {
 	startTime := time.Now()
 	ctx := context.Background()
@@ -355,7 +410,7 @@ func (m *MongoClient) UpdateTaskStatus(taskID, status, user, env string, popupSe
 	return nil
 }
 
-// GetTaskByID 按 env 查询任务
+// GetTaskByID 按 env 查询
 func (m *MongoClient) GetTaskByID(taskID, env string) (*models.DeployRequest, error) {
 	coll := m.GetTaskCollection(env)
 	var task models.DeployRequest
@@ -367,61 +422,6 @@ func (m *MongoClient) GetTaskByID(taskID, env string) (*models.DeployRequest, er
 		return nil, err
 	}
 	return &task, nil
-}
-
-// GetPendingTasks 查询待确认任务
-func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error) {
-	coll := m.GetTaskCollection(env)
-	ctx := context.Background()
-	cursor, err := coll.Find(ctx, bson.M{
-		"confirmation_status": "待确认",
-		"popup_sent":          bson.M{"$ne": true},
-	}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}))
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(ctx)
-
-	var tasks []models.DeployRequest
-	for cursor.Next(ctx) {
-		var task models.DeployRequest
-		if err := cursor.Decode(&task); err != nil {
-			return nil, err
-		}
-		tasks = append(tasks, task)
-	}
-	if err := cursor.Err(); err != nil {
-		return nil, err
-	}
-	return tasks, nil
-}
-
-// MarkPopupSent 标记弹窗已发送
-func (m *MongoClient) MarkPopupSent(taskID, messageID int, botName, env string) error {
-	ctx := context.Background()
-	coll := m.GetTaskCollection(env)
-
-	update := bson.M{
-		"$set": bson.M{
-			"popup_sent":      true,
-			"popup_message_id": messageID,
-			"popup_sent_at":   time.Now(),
-			"popup_bot_name":  botName,
-		},
-	}
-	_, err := coll.UpdateOne(ctx, bson.M{"task_id": taskID}, update)
-	if err != nil {
-		return err
-	}
-
-	// 插入 popup_data 记录
-	popupColl := m.client.Database("cicd").Collection("popup_data")
-	_, err = popupColl.InsertOne(ctx, bson.M{
-		"task_id":    taskID,
-		"message_id": messageID,
-		"sent_at":    time.Now(),
-	})
-	return err
 }
 
 // DeleteTask 删除任务

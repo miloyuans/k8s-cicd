@@ -362,163 +362,170 @@ func (bm *BotManager) handleUpdates() {
 
 // HandleCallback 处理回调查询（优化: 从任务获取 PopupBotName 获取 Bot，用于 DeleteMessage 和 sendMessage；调整状态、反馈消息，并添加立即删除操作）
 // 文件: telegram/bot.go 中的 HandleCallback 函数完整代码（变更：将 chatID 从 string 断言改为 float64 转 string，以修复 interface conversion panic；messageID 已正确处理）
-func (bm *BotManager) HandleCallback(callback map[string]interface{}) {
+// sendPendingTaskPopup 发送弹窗
+func (bm *BotManager) sendPendingTaskPopup(task models.DeployRequest, bot *TelegramBot) {
 	startTime := time.Now()
+	chatID := bot.GroupID
 
-	id := callback["id"].(string)
-	data := callback["data"].(string)
-	user := callback["from"].(map[string]interface{})
-	username := user["username"].(string)
-	userID := int(user["id"].(float64))
-	message := callback["message"].(map[string]interface{})
+	// 构建消息
+	text := fmt.Sprintf(
+		"部署审批请求\n\n服务: %s\n环境: %s\n版本: %s\n操作人: %s\n\n请确认部署",
+		task.Service, task.Environment, task.Version, task.User,
+	)
 
-	// 变更: chatID 从 float64 转为 string，避免类型断言 panic
-	chatMap := message["chat"].(map[string]interface{})
-	chatIDFloat := chatMap["id"].(float64)
-	chatID := fmt.Sprintf("%d", int(chatIDFloat))
+	// 键盘
+	keyboard := map[string]interface{}{
+		"inline_keyboard": [][]map[string]string{
+			{
+				{"text": "批准", "callback_data": fmt.Sprintf("approve:%s", task.TaskID)},
+				{"text": "拒绝", "callback_data": fmt.Sprintf("reject:%s", task.TaskID)},
+			},
+		},
+	}
 
-	messageID := int(message["message_id"].(float64))
+	// 发送
+	messageID, err := bm.sendMessageWithKeyboard(bot, chatID, text, keyboard, "Markdown")
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "sendPendingTaskPopup",
+			"task_id": task.TaskID,
+			"env":     task.Environment,
+		}).Errorf("发送弹窗失败: %v", err)
+		return
+	}
 
-	parts := strings.Split(data, "-")
+	// 标记已发送（新增 env 参数）
+	if err := bm.mongo.MarkPopupSent(task.TaskID, messageID, bot.Name, task.Environment); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"time":    time.Now().Format("2006-01-02 15:04:05"),
+			"method":  "sendPendingTaskPopup",
+			"task_id": task.TaskID,
+			"env":     task.Environment,
+		}).Errorf("标记 popup_sent 失败: %v", err)
+	}
+
+	// 内存防重
+	bm.mu.Lock()
+	bm.sentTasks[task.TaskID] = true
+	bm.mu.Unlock()
+
+	logrus.WithFields(logrus.Fields{
+		"time":       time.Now().Format("2006-01-02 15:04:05"),
+		"method":     "sendPendingTaskPopup",
+		"task_id":    task.TaskID,
+		"env":        task.Environment,
+		"message_id": messageID,
+		"bot":        bot.Name,
+		"took":       time.Since(startTime),
+	}).Info("弹窗发送成功")
+}
+
+// HandleCallback 处理回调
+func (bm *BotManager) HandleCallback(update map[string]interface{}) {
+	startTime := time.Now()
+	callbackQuery, ok := update["callback_query"].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	data, _ := callbackQuery["data"].(string)
+	message, _ := callbackQuery["message"].(map[string]interface{})
+	chat, _ := message["chat"].(map[string]interface{})
+	chatID := fmt.Sprintf("%.0f", chat["id"].(float64))
+	from, _ := callbackQuery["from"].(map[string]interface{})
+	userID := fmt.Sprintf("%.0f", from["id"].(float64))
+	username := ""
+	if u, ok := from["username"].(string); ok {
+		username = u
+	}
+	id := callbackQuery["id"].(string)
+
+	// 解析动作
+	parts := strings.SplitN(data, ":", 2)
 	if len(parts) != 2 {
 		bm.answerCallback(id, "无效操作")
 		return
 	}
-
 	action := parts[0]
 	taskID := parts[1]
 
-	task, err := bm.mongo.GetTaskByID(taskID)
-	if err != nil {
-		bm.answerCallback(id, "任务不存在")
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "HandleCallback",
-			"task_id": taskID,
-		}).Errorf("获取任务失败: %v", err)
-		return
-	}
-
-	// 从任务获取 PopupBotName 获取 Bot
-	botName := task.PopupBotName
-	bot, exists := bm.Bots[botName]
-	if !exists {
-		bm.answerCallback(id, "机器人不存在")
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "HandleCallback",
-			"task_id": taskID,
-			"bot_name": botName,
-		}).Errorf("找不到发送弹窗的机器人: %s", botName)
-		return
-	}
-
-	if !bm.isUserAllowed(username, bot) {
-		bm.answerCallback(id, "您无权限操作")
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "HandleCallback",
-			"user":   username,
-			"user_id": userID,
-			"task_id": taskID,
-		}).Warnf("用户无权限操作")
-		return
-	}
-
-	var status string
-	var feedbackText string
-	if action == "confirm" {
-		status = "已确认"
-		feedbackText = fmt.Sprintf("✅ 用户 %s 已批准部署:\n服务: %s\n版本: %s\n环境: %s\n任务ID: %s", username, task.Service, task.Version, task.Environment, taskID)
-	} else if action == "reject" {
-		status = "已拒绝"
-		feedbackText = fmt.Sprintf("❌ 用户 %s 已拒绝部署:\n服务: %s\n版本: %s\n环境: %s\n任务ID: %s", username, task.Service, task.Version, task.Environment, taskID)
-	} else {
-		bm.answerCallback(id, "无效操作")
-		return
-	}
-
-	if err := bm.mongo.UpdateTaskStatus(taskID, status, username); err != nil {
-		bm.answerCallback(id, "更新状态失败")
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "HandleCallback",
-			"task_id": taskID,
-			"status":  status,
-		}).Errorf("更新任务状态失败: %v", err)
-		return
-	}
-
-	// 删除原弹窗消息
-	if err := bm.DeleteMessage(bot, chatID, messageID); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "HandleCallback",
-			"task_id": taskID,
-			"msg_id":  messageID,
-		}).Errorf("删除弹窗失败: %v", err)
-	} else {
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "HandleCallback",
-			"task_id": taskID,
-			"msg_id":  messageID,
-		}).Infof("已删除原弹窗消息")
-	}
-
-	// 发送反馈消息到群组
-	if _, err := bm.sendMessage(bot, bot.GroupID, feedbackText, ""); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "HandleCallback",
-			"task_id": taskID,
-		}).Errorf("发送反馈消息失败: %v", err)
-	} else {
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "HandleCallback",
-			"task_id": taskID,
-		}).Infof("已发送反馈消息 (操作: %s)", action)
-	}
-
-	// 拒绝时立即删除任务 + 打印完整任务数据
-	if action == "reject" {
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "HandleCallback",
-			"task_id": taskID,
-			"full_task": fmt.Sprintf("%+v", task), // 完整任务数据日志
-		}).Infof("用户 %s 拒绝部署，准备删除任务 (状态: %s)", username, status)
-
-		if err := bm.mongo.DeleteTask(taskID); err != nil {
-			logrus.WithFields(logrus.Fields{
-				"time":    time.Now().Format("2006-01-02 15:04:05"),
-				"method":  "HandleCallback",
-				"task_id": taskID,
-			}).Errorf("立即删除任务失败: %v", err)
-		} else {
-			logrus.WithFields(logrus.Fields{
-				"time":    time.Now().Format("2006-01-02 15:04:05"),
-				"method":  "HandleCallback",
-				"task_id": taskID,
-				"full_task": fmt.Sprintf("%+v", task),
-			}).Infof("已立即删除 已拒绝 任务")
+	// 获取任务（新增 env 查询）
+	var task models.DeployRequest
+	var env string
+	var bot *TelegramBot
+	found := false
+	for _, b := range bm.Bots {
+		t, err := bm.mongo.GetTaskByID(taskID, b.Name) // 假设 bot.Name 可作为 env fallback
+		if err == nil {
+			task = *t
+			env = task.Environment
+			bot = b
+			found = true
+			break
 		}
 	}
+	if !found {
+		// 跨环境搜索（fallback）
+		for envName := range bm.mongo.GetEnvMappings() {
+			t, err := bm.mongo.GetTaskByID(taskID, envName)
+			if err == nil {
+				task = *t
+				env = task.Environment
+				bot = bm.getDefaultBot()
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		bm.answerCallback(id, "任务不存在或已过期")
+		return
+	}
 
-	bm.answerCallback(id, fmt.Sprintf("操作已执行: %s (弹窗已删除，反馈已发送，状态: %s)", action, status))
+	// 权限检查
+	if !bm.isUserAllowed(username, bot) {
+		bm.answerCallback(id, "无权限操作")
+		return
+	}
+
+	// 执行操作
+	status := "已确认"
+	if action == "reject" {
+		status = "已拒绝"
+	}
+
+	// 更新状态（新增 env + popup_sent）
+	popupSent := true
+	if err := bm.mongo.UpdateTaskStatus(taskID, status, username, env, &popupSent); err != nil {
+		bm.answerCallback(id, "操作失败")
+		logrus.Errorf("更新任务状态失败: %v", err)
+		return
+	}
+
+	// 删除原弹窗
+	if msg, ok := message["message_id"].(float64); ok {
+		bm.DeleteMessage(bot, chatID, int(msg))
+	}
+
+	// 发送反馈
+	feedback := fmt.Sprintf("部署已%s\n\n服务: %s\n环境: %s\n版本: %s\n操作人: %s",
+		status, task.Service, task.Environment, task.Version, task.User)
+	bm.sendMessage(bot, chatID, feedback, "")
+
+	bm.answerCallback(id, fmt.Sprintf("操作已执行: %s", status))
 
 	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "HandleCallback",
-		"user":   username,
+		"time":    time.Now().Format("2006-01-02 15:04:05"),
+		"method":  "HandleCallback",
+		"user":    username,
 		"user_id": userID,
-		"action": action,
+		"action":  action,
 		"task_id": taskID,
-		"status": status,
-		"bot":    bot.Name,
-		"took":   time.Since(startTime),
-	}).Infof("回调处理完成: 原弹窗删除 + 反馈发送 (状态变更: %s)", status)
+		"status":  status,
+		"bot":     bot.Name,
+		"took":    time.Since(startTime),
+	}).Infof("回调处理完成")
 }
 
 // 修改: isUserAllowed 支持机器人级权限
