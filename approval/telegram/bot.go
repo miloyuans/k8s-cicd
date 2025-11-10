@@ -13,7 +13,7 @@ import (
 
 	"k8s-cicd/approval/client"
 	"k8s-cicd/approval/config"
-	"k8s-cicd/approval/models" // 修复：导入 models 包
+	"k8s-cicd/approval/models" // 修复：导入 models
 
 	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
@@ -21,13 +21,13 @@ import (
 
 // TelegramBot 单个机器人配置
 type TelegramBot struct {
-	Name         string              // 机器人名称
-	Token        string              // Bot Token
-	GroupID      string              // 群组ID
-	Services     map[string][]string // 服务匹配规则
-	RegexMatch   bool                // 是否使用正则匹配
-	IsEnabled    bool                // 是否启用
-	AllowedUsers []string            // 允许操作的用户
+	Name         string
+	Token        string
+	GroupID      string
+	Services     map[string][]string
+	RegexMatch   bool
+	IsEnabled    bool
+	AllowedUsers []string
 }
 
 // BotManager 机器人管理器
@@ -37,9 +37,9 @@ type BotManager struct {
 	mongo              *client.MongoClient
 	updateChan         chan map[string]interface{}
 	stopChan           chan struct{}
-	offsets            map[string]int64 // per Bot offset
+	offsets            map[string]int64
 	mu                 sync.Mutex
-	sentTasks          map[string]bool // task_id -> sent (内存防重)
+	sentTasks          map[string]bool
 	cfg                *config.Config
 }
 
@@ -201,10 +201,10 @@ func (bm *BotManager) pollPendingTasks() {
 			}
 
 			logrus.WithFields(logrus.Fields{
-				"time":      time.Now().Format("2006-01-02 15:04:05"),
-				"method":    "pollPendingTasks",
-				"sent":      totalSent,
-				"interval":  bm.cfg.API.QueryInterval,
+				"time":     time.Now().Format("2006-01-02 15:04:05"),
+				"method":   "pollPendingTasks",
+				"sent":     totalSent,
+				"interval": bm.cfg.API.QueryInterval,
 			}).Infof("本轮发送 %d 个弹窗", totalSent)
 		case <-bm.stopChan:
 			return
@@ -304,13 +304,12 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}) {
 	action := parts[0]
 	taskID := parts[1]
 
-	// 修复：使用 models.DeployRequest
 	var task models.DeployRequest
 	var env string
 	var bot *TelegramBot
 	found := false
 
-	// 优先按 Bot 名查找（bot.Name 可能与 env 不一致，fallback 跨环境）
+	// 优先按 Bot 名查找
 	for botName := range bm.Bots {
 		t, err := bm.mongo.GetTaskByID(taskID, botName)
 		if err == nil {
@@ -349,7 +348,6 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}) {
 		status = "已拒绝"
 	}
 
-	// 修复：补全 env 和 popup_sent
 	popupSent := true
 	if err := bm.mongo.UpdateTaskStatus(taskID, status, username, env, &popupSent); err != nil {
 		bm.answerCallback(id, "操作失败")
@@ -380,6 +378,33 @@ func (bm *BotManager) HandleCallback(update map[string]interface{}) {
 	}).Infof("回调处理完成")
 }
 
+// getDefaultBot 获取默认机器人
+func (bm *BotManager) getDefaultBot() *TelegramBot {
+	for _, bot := range bm.Bots {
+		if bot.IsEnabled {
+			return bot
+		}
+	}
+	return nil
+}
+
+// isUserAllowed 检查用户权限
+func (bm *BotManager) isUserAllowed(username string, bot *TelegramBot) bool {
+	for _, u := range bm.globalAllowedUsers {
+		if u == username {
+			return true
+		}
+	}
+	if bot != nil {
+		for _, u := range bot.AllowedUsers {
+			if u == username {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // getBotForService 服务匹配机器人
 func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 	for _, bot := range bm.Bots {
@@ -400,7 +425,7 @@ func (bm *BotManager) getBotForService(service string) (*TelegramBot, error) {
 	return nil, fmt.Errorf("服务 %s 未匹配任何机器人", service)
 }
 
-// sendMessage 发送消息（增强错误解析）
+// sendMessage 发送消息
 func (bm *BotManager) sendMessage(bot *TelegramBot, chatID, text, parseMode string) (int, error) {
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
@@ -490,7 +515,7 @@ func (bm *BotManager) DeleteMessage(bot *TelegramBot, chatID string, messageID i
 	return err
 }
 
-// answerCallback 响应 Callback Query（新增实现，使用默认 Bot）
+// answerCallback 响应 Callback Query
 func (bm *BotManager) answerCallback(id, text string) {
 	defaultBot := bm.getDefaultBot()
 	if defaultBot == nil {
@@ -506,7 +531,9 @@ func (bm *BotManager) answerCallback(id, text string) {
 	if err != nil {
 		logrus.Errorf("响应 Callback 失败: %v", err)
 	}
-	defer resp.Body.Close()
+	if resp != nil {
+		resp.Body.Close()
+	}
 }
 
 // Stop 停止
