@@ -434,79 +434,127 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 }
 
 // StoreTask 存储任务（支持 upsert，避免重复）
-func (m *MongoClient) StoreTask(task *models.DeployRequest) error {
-	startTime := time.Now()
-	ctx := context.Background()
+// ---------------------------------------------------------------
+// 1. StoreTask – 现在接受 isConfirmEnv 参数，决定初始 popup_sent
+// ---------------------------------------------------------------
+func (m *MongoClient) StoreTask(task *models.DeployRequest, isConfirmEnv bool) error {
+    startTime := time.Now()
+    ctx := context.Background()
 
-	if task.TaskID == "" {
-		task.TaskID = uuid.New().String()
-	}
-	task.CreatedAt = time.Now()
+    // ---------- 1. 基础字段 ----------
+    task.ConfirmationStatus = "待确认"
+    task.PopupSent = !isConfirmEnv // 关键：非确认环境直接标记已发送
+    task.PopupSentAt = time.Time{}
+    task.PopupMessageID = 0
+    task.PopupBotName = ""
 
-	// 根据 environment 获取集合
-	env := task.Environment
-	if env == "" && len(task.Environments) > 0 {
-		env = task.Environments[0]
-	}
-	collection := m.GetTaskCollection(env)
+    // ---------- 2. 生成唯一 task_id ----------
+    if task.TaskID == "" {
+        task.TaskID = uuid.New().String()
+        logrus.WithFields(logrus.Fields{
+            "time":     time.Now().Format("2006-01-02 15:04:05"),
+            "method":   "StoreTask",
+            "service":  task.Service,
+            "env":      task.Environment,
+            "version":  task.Version,
+            "task_id":  task.TaskID,
+        }).Debugf("生成新 TaskID: %s", task.TaskID)
+    }
 
-	filter := bson.M{
-		"service":     task.Service,
-		"version":     task.Version,
-		"environment": task.Environment,
-	}
-	update := bson.M{
-		"$setOnInsert": bson.M{
-			"task_id":           task.TaskID,
-			"service":           task.Service,
-			"environments":      task.Environments,
-			"environment":       task.Environment,
-			"namespace":         task.Namespace,
-			"user":              task.User,
-			"created_at":        task.CreatedAt,
-			"confirmation_status": task.ConfirmationStatus,
-			"popup_sent":        task.PopupSent,
-			"popup_message_id":  task.PopupMessageID,
-			"popup_sent_at":     task.PopupSentAt,
-		},
-	}
+    // ---------- 3. 环境映射 ----------
+    if ns, ok := m.cfg.EnvMapping.Mappings[task.Environment]; ok {
+        task.Namespace = ns
+    } else {
+        task.Namespace = task.Environment // fallback
+    }
 
-	opts := options.Update().SetUpsert(true)
-	result, err := collection.UpdateOne(ctx, filter, update, opts)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "StoreTask",
-			"task_id": task.TaskID,
-			"env":     env,
-			"coll_name": collection.Name(),
-		}).Errorf("存储任务失败: %v", err)
-		return err
-	}
+    // ---------- 4. 集合 ----------
+    coll := m.GetTaskCollection(task.Environment)
 
-	if result.UpsertedCount > 0 {
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "StoreTask",
-			"task_id": task.TaskID,
-			"env":     env,
-			"coll_name": collection.Name(),
-			"upserted": true,
-			"took":    time.Since(startTime),
-		}).Infof("新任务存储成功 (upsert)")
-	} else {
-		logrus.WithFields(logrus.Fields{
-			"time":    time.Now().Format("2006-01-02 15:04:05"),
-			"method":  "StoreTask",
-			"task_id": task.TaskID,
-			"env":     env,
-			"coll_name": collection.Name(),
-			"matched":  result.MatchedCount,
-			"modified": result.ModifiedCount,
-			"took":    time.Since(startTime),
-		}).Debugf("任务已存在，无需 upsert")
-	}
-	return nil
+    // ---------- 5. Upsert ----------
+    filter := bson.M{
+        "service":     task.Service,
+        "environment": task.Environment,
+        "version":     task.Version,
+    }
+    update := bson.M{"$set": task, "$setOnInsert": bson.M{"created_at": time.Now()}}
+    opts := options.Update().SetUpsert(true)
+
+    result, err := coll.UpdateOne(ctx, filter, update, opts)
+    if err != nil {
+        return fmt.Errorf("upsert 失败: %v", err)
+    }
+
+    // ---------- 6. 日志 ----------
+    if result.UpsertedCount > 0 {
+        logrus.WithFields(logrus.Fields{
+            "time":       time.Now().Format("2006-01-02 15:04:05"),
+            "method":     "StoreTask",
+            "coll_name":  coll.Name(),
+            "env":        task.Environment,
+            "task_id":    task.TaskID,
+            "took":       time.Since(startTime),
+        }).Info("新任务存储成功 (upsert)")
+    } else if result.MatchedCount > 0 && result.ModifiedCount == 0 {
+        logrus.WithFields(logrus.Fields{
+            "time":       time.Now().Format("2006-01-02 15:04:05"),
+            "method":     "StoreTask",
+            "coll_name":  coll.Name(),
+            "env":        task.Environment,
+            "task_id":    task.TaskID,
+            "matched":    result.MatchedCount,
+            "modified":   result.ModifiedCount,
+            "took":       time.Since(startTime),
+        }).Debug("任务已存在，无需 upsert")
+    }
+    return nil
+}
+
+// ---------------------------------------------------------------
+// 2. UpdateTaskStatus – 支持同时更新 popup_sent
+// ---------------------------------------------------------------
+func (m *MongoClient) UpdateTaskStatus(taskID, status, user string, popupSent *bool, env string) error {
+    startTime := time.Now()
+    ctx := context.Background()
+
+    // 使用传入的 env 直接定位集合（不再遍历所有 env）
+    coll := m.GetTaskCollection(env)
+
+    update := bson.M{
+        "$set": bson.M{
+            "confirmation_status": status,
+            "updated_at":          time.Now(),
+            "updated_by":          user,
+        },
+    }
+    if popupSent != nil {
+        update["$set"].(bson.M)["popup_sent"] = *popupSent
+    }
+
+    result, err := coll.UpdateOne(ctx, bson.M{"task_id": taskID}, update)
+    if err != nil {
+        return fmt.Errorf("mongo update error: %v", err)
+    }
+    if result.MatchedCount == 0 {
+        logrus.WithFields(logrus.Fields{
+            "time":    time.Now().Format("2006-01-02 15:04:05"),
+            "method":  "UpdateTaskStatus",
+            "task_id": taskID,
+            "took":    time.Since(startTime),
+        }).Warnf("未找到任务以更新状态 task_id=%s", taskID)
+        return fmt.Errorf("task not found")
+    }
+
+    logrus.WithFields(logrus.Fields{
+        "time":   time.Now().Format("2006-01-02 15:04:05"),
+        "method": "UpdateTaskStatus",
+        "status": status,
+        "user":   user,
+        "task_id": taskID,
+        "env":    env,
+        "took":   time.Since(startTime),
+    }).Infof("任务状态更新成功: %s by %s", status, user)
+    return nil
 }
 
 // GetPendingTasks 获取待确认任务（popup_sent=false）
@@ -532,21 +580,20 @@ func (m *MongoClient) GetPendingTasks(env string) ([]models.DeployRequest, error
 }
 
 // GetTaskByID 根据 task_id 获取任务（跨环境搜索）
-func (m *MongoClient) GetTaskByID(taskID string) (*models.DeployRequest, error) {
-	ctx := context.Background()
-	for env := range m.cfg.EnvMapping.Mappings {
-		collection := m.GetTaskCollection(env)
-		var task models.DeployRequest
-		err := collection.FindOne(ctx, bson.M{"task_id": taskID}).Decode(&task)
-		if err == nil {
-			return &task, nil
-		}
-		if err == mongo.ErrNoDocuments {
-			continue
-		}
-		return nil, err
-	}
-	return nil, mongo.ErrNoDocuments
+// ---------------------------------------------------------------
+// 3. GetTaskByID – 按 env 直接查询（不再遍历）
+// ---------------------------------------------------------------
+func (m *MongoClient) GetTaskByID(taskID, env string) (*models.DeployRequest, error) {
+    coll := m.GetTaskCollection(env)
+    var task models.DeployRequest
+    err := coll.FindOne(context.Background(), bson.M{"task_id": taskID}).Decode(&task)
+    if err != nil {
+        if err == mongo.ErrNoDocuments {
+            return nil, fmt.Errorf("task not found")
+        }
+        return nil, err
+    }
+    return &task, nil
 }
 
 // GetPushedServicesAndEnvs 从 push_data 获取唯一服务和环境列表

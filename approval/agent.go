@@ -196,7 +196,7 @@ func (a *Approval) periodicQueryAndSync() {
 				taskCopy.Environment = subEnv
 				taskCopy.TaskID = uuid.New().String()
 
-				if err := a.mongo.StoreTask(&taskCopy); err != nil {
+				if err := a.mongo.StoreTask(&taskCopy, isSubConfirm); err != nil {
 					logrus.WithFields(logrus.Fields{
 						"time":   time.Now().Format("2006-01-02 15:04:05"),
 						"method": "periodicQueryAndSync",
@@ -258,90 +258,87 @@ func (a *Approval) dedupeTasks(tasks []models.DeployRequest) []models.DeployRequ
 // 新增: handleStoredTask 统一处理存储后验证 (提取复用)
 // 完善: handleStoredTask 支持动态验证 (基于 isConfirmEnv 检查状态正确性)
 func (a *Approval) handleStoredTask(taskID, env string, isConfirmEnv bool) {
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "handleStoredTask",
-		"task_id": taskID,
-		"env":     env,
-		"is_confirm_env": isConfirmEnv,
-	}).Info("=== 开始存储后状态更新和验证 (动态基于 confirm_envs) ===")
+    logrus.WithFields(logrus.Fields{
+        "time":            time.Now().Format("2006-01-02 15:04:05"),
+        "method":          "handleStoredTask",
+        "task_id":         taskID,
+        "env":             env,
+        "is_confirm_env":  isConfirmEnv,
+    }).Info("=== 开始存储后状态更新和验证 (动态基于 confirm_envs) ===")
 
-	expectedStatus := "待确认"
-	expectedPopupSent := false
-	if !isConfirmEnv {
-		expectedStatus = "已确认"
-		expectedPopupSent = true
-	}
+    expectedStatus := "待确认"
+    expectedPopupSent := false
+    if !isConfirmEnv {
+        expectedStatus = "已确认"
+        expectedPopupSent = true
+    }
 
-	// 立即更新状态为预期值（冗余确保）
-	updateErr := a.mongo.UpdateTaskStatus(taskID, expectedStatus, "system")
-	if updateErr != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "handleStoredTask",
-			"task_id": taskID,
-			"env":     env,
-			"expected_status": expectedStatus,
-		}).Errorf("存储后更新状态为 %s 失败: %v", expectedStatus, updateErr)
-	} else {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "handleStoredTask",
-			"task_id": taskID,
-			"env":     env,
-			"expected_status": expectedStatus,
-		}).Infof("状态更新为 %s 成功", expectedStatus)
-	}
+    // ---------- 1. 直接使用新方法更新 ----------
+    popupSent := expectedPopupSent
+    if err := a.mongo.UpdateTaskStatus(taskID, expectedStatus, "system", &popupSent, env); err != nil {
+        logrus.WithFields(logrus.Fields{
+            "time":            time.Now().Format("2006-01-02 15:04:05"),
+            "method":          "handleStoredTask",
+            "task_id":         taskID,
+            "env":             env,
+            "expected_status": expectedStatus,
+        }).Errorf("存储后更新状态为 %s 失败: %v", expectedStatus, err)
+    } else {
+        logrus.WithFields(logrus.Fields{
+            "time":            time.Now().Format("2006-01-02 15:04:05"),
+            "method":          "handleStoredTask",
+            "task_id":         taskID,
+            "env":             env,
+            "expected_status": expectedStatus,
+        }).Infof("状态更新为 %s 成功", expectedStatus)
+    }
 
-	// 查询最新数据验证
-	latestTask, queryErr := a.mongo.GetTaskByID(taskID)
-	if queryErr != nil {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "handleStoredTask",
-			"task_id": taskID,
-			"env":     env,
-		}).Errorf("存储后查询最新任务失败: %v", queryErr)
-		return
-	}
-	if latestTask.ConfirmationStatus != expectedStatus || latestTask.PopupSent != expectedPopupSent {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "handleStoredTask",
-			"task_id": taskID,
-			"env":     env,
-			"current_status": latestTask.ConfirmationStatus,
-			"current_popup_sent": latestTask.PopupSent,
-			"expected_status": expectedStatus,
-			"expected_popup_sent": expectedPopupSent,
-		}).Errorf("最新状态不匹配预期，强制更新")
-		// 强制重新更新
-		a.mongo.UpdateTaskStatus(taskID, expectedStatus, "system")
-		// 更新 PopupSent (使用 GetTaskCollection)
-		coll := a.mongo.GetTaskCollection(env)
-		ctx := context.Background()
-		coll.UpdateOne(ctx, bson.M{"task_id": taskID}, bson.M{"$set": bson.M{"popup_sent": expectedPopupSent}})
-		latestTask, _ = a.mongo.GetTaskByID(taskID)
-	} else {
-		logrus.WithFields(logrus.Fields{
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
-			"method": "handleStoredTask",
-			"task_id": taskID,
-			"env":     env,
-		}).Infof("状态验证成功: %s (popup_sent=%t)", latestTask.ConfirmationStatus, latestTask.PopupSent)
-	}
+    // ---------- 2. 查询最新任务验证 ----------
+    latestTask, queryErr := a.mongo.GetTaskByID(taskID, env)
+    if queryErr != nil {
+        logrus.WithFields(logrus.Fields{
+            "time":    time.Now().Format("2006-01-02 15:04:05"),
+            "method":  "handleStoredTask",
+            "task_id": taskID,
+            "env":     env,
+        }).Errorf("存储后查询最新任务失败: %v", queryErr)
+        return
+    }
 
-	logrus.WithFields(logrus.Fields{
-		"time":   time.Now().Format("2006-01-02 15:04:05"),
-		"method": "handleStoredTask",
-		"task_id": taskID,
-		"env":     env,
-		"is_confirm_env": isConfirmEnv,
-		"latest_task_status": latestTask.ConfirmationStatus,
-		"latest_task_popup_sent": latestTask.PopupSent,
-		"latest_task_full": fmt.Sprintf("%+v", latestTask),
-	}).Infof("=== 子任务存储成功，状态变更完成 (%s): status=%s, popup_sent=%t ===\nFull Latest Data: %+v",
-		map[bool]string{true: "待确认", false: "已确认"}[isConfirmEnv], latestTask.ConfirmationStatus, latestTask.PopupSent, latestTask)
+    if latestTask.ConfirmationStatus != expectedStatus || latestTask.PopupSent != expectedPopupSent {
+        // 记录异常但不再强制更新（防止循环）
+        logrus.WithFields(logrus.Fields{
+            "time":               time.Now().Format("2006-01-02 15:04:05"),
+            "method":             "handleStoredTask",
+            "task_id":            taskID,
+            "env":                env,
+            "current_status":     latestTask.ConfirmationStatus,
+            "current_popup_sent": latestTask.PopupSent,
+            "expected_status":    expectedStatus,
+            "expected_popup_sent": expectedPopupSent,
+        }).Warn("最新状态不匹配预期，已记录但不再强制更新")
+    } else {
+        logrus.WithFields(logrus.Fields{
+            "time":    time.Now().Format("2006-01-02 15:04:05"),
+            "method":  "handleStoredTask",
+            "task_id": taskID,
+            "env":     env,
+        }).Infof("状态验证成功: %s (popup_sent=%t)", latestTask.ConfirmationStatus, latestTask.PopupSent)
+    }
+
+    // ---------- 3. 最终日志 ----------
+    logrus.WithFields(logrus.Fields{
+        "time":               time.Now().Format("2006-01-02 15:04:05"),
+        "method":             "handleStoredTask",
+        "task_id":            taskID,
+        "env":                env,
+        "is_confirm_env":     isConfirmEnv,
+        "latest_task_status": latestTask.ConfirmationStatus,
+        "latest_task_popup_sent": latestTask.PopupSent,
+        "latest_task_full":   fmt.Sprintf("%+v", latestTask),
+    }).Infof("=== 子任务存储成功，状态变更完成 (%s): status=%s, popup_sent=%t ===\nFull Latest Data: %+v",
+        map[bool]string{true: "待确认", false: "已确认"}[isConfirmEnv],
+        latestTask.ConfirmationStatus, latestTask.PopupSent, latestTask)
 }
 
 func (a *Approval) Stop() {
