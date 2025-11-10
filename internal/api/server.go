@@ -287,7 +287,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// ========== 替换 handleDeploy ==========
+// handleDeploy 处理部署请求（多环境拆分）
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -384,7 +384,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// ========== 替换 handleQuery ==========
+// handleQuery 处理查询（返回单任务 + 补全 environments）
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -461,7 +461,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// ========== 替换 handleStatus ==========
+// handleStatus 更新状态
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -561,16 +561,6 @@ func (t *DeployTask) Execute(storage *storage.MongoStorage) error {
 func (t *DeployTask) GetID() string { return t.ID }
 
 // contains 检查切片是否包含元素（仅定义一次！）
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
-
-// 辅助函数
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
