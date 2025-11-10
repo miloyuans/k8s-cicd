@@ -47,6 +47,12 @@ type PushTask struct {
 	ID           string
 }
 
+// DeployTask 部署任务结构（支持单环境）
+type DeployTask struct {
+	Req storage.DeployRequest // 单环境
+	ID  string
+}
+
 // DeployRequestCompat 兼容旧客户端返回格式
 type DeployRequestCompat struct {
 	Service      string   `json:"service"`
@@ -55,12 +61,6 @@ type DeployRequestCompat struct {
 	User         string   `json:"user"`
 	Status       string   `json:"status,omitempty"`
 	CreatedAt    string   `json:"created_at,omitempty"`
-}
-
-// DeployTask 部署任务结构
-type DeployTask struct {
-	Req storage.DeployRequest
-	ID  string
 }
 
 // WorkerPool 工作池，用于异步任务处理，支持并发
@@ -287,7 +287,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleDeploy 处理部署请求（多环境拆分）
+// ========== 替换 handleDeploy ==========
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -371,8 +371,8 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	// 响应
 	response := map[string]interface{}{
-		"message":  "部署请求已入队",
-		"task_id":  groupID,
+		"message": "部署请求已入队",
+		"task_id": groupID,
 	}
 
 	if len(compatReq.Envs) > 0 || compatReq.Username != "" {
@@ -384,7 +384,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleQuery 处理查询（返回单任务 + 补全 environments）
+// ========== 替换 handleQuery ==========
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -461,7 +461,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// handleStatus 更新状态
+// ========== 替换 handleStatus ==========
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -542,12 +542,7 @@ func (t *PushTask) Execute(storage *storage.MongoStorage) error {
 
 func (t *PushTask) GetID() string { return t.ID }
 
-// DeployTask 部署任务结构（支持单环境）
-type DeployTask struct {
-	Req storage.DeployRequest // 单环境
-	ID  string
-}
-
+// Execute DeployTask 执行方法
 func (t *DeployTask) Execute(storage *storage.MongoStorage) error {
 	if storage == nil {
 		return fmt.Errorf("storage 为 nil")
@@ -565,7 +560,7 @@ func (t *DeployTask) Execute(storage *storage.MongoStorage) error {
 
 func (t *DeployTask) GetID() string { return t.ID }
 
-// contains 检查切片是否包含元素
+// contains 检查切片是否包含元素（仅定义一次！）
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
