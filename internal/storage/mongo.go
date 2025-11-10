@@ -151,6 +151,31 @@ func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 	return err
 }
 
+// QueryPendingTasksByEnvs 查询多个环境的所有 pending 任务
+func (s *MongoStorage) QueryPendingTasksByEnvs(service string, environments []string, user string) ([]DeployRequest, error) {
+	coll := s.db.Collection("deploy_queue")
+	filter := bson.D{
+		{"service", service},
+		{"environment", bson.D{{"$in", environments}}},
+		{"status", "pending"},
+	}
+	if user != "" {
+		filter = append(filter, bson.E{"user", user})
+	}
+
+	cursor, err := coll.Find(s.ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(s.ctx)
+
+	var results []DeployRequest
+	if err := cursor.All(s.ctx, &results); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 // QuerySinglePendingTask 查询单条 pending 任务（单环境）
 func (s *MongoStorage) QuerySinglePendingTask(service string, environments []string, user string) (*DeployRequest, error) {
 	coll := s.db.Collection("deploy_queue")

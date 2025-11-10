@@ -384,7 +384,8 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleQuery 处理查询（返回单任务 + 补全 environments）
+// handleQuery 处理查询（返回单任务 + 补全 environments + 明确 environment）
+// handleQuery 处理查询（支持多环境查询，返回单环境任务，不包含 environments）
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -403,6 +404,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 兼容单环境字段
 	if len(req.Environments) == 0 && req.Environment != "" {
 		req.Environments = []string{req.Environment}
 	}
@@ -413,52 +415,68 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 查询单条 pending 任务
-	task, err := s.storage.QuerySinglePendingTask(req.Service, req.Environments, req.User)
+	// 查询所有 pending 任务（支持多环境）
+	tasks, err := s.storage.QueryPendingTasksByEnvs(req.Service, req.Environments, req.User)
 	if err != nil {
-		s.logger.WithError(err).Error("查询失败")
+		s.logger.WithError(err).Error("批量查询失败")
 		http.Error(w, "查询失败", http.StatusInternalServerError)
 		return
 	}
 
-	if task == nil {
+	if len(tasks) == 0 {
 		s.logger.Info("无待处理任务")
 		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
 		return
 	}
 
-	// 补全 environments 数组
-	groupEnvs, _ := s.storage.GetGroupEnvironments(task.TaskGroupID)
+	// 构造响应：仅返回当前 environment，不返回 environments
+	var response []struct {
+		Service     string `json:"service"`
+		Environment string `json:"environment"` // 当前领取的环境
+		Version     string `json:"version"`
+		User        string `json:"user"`
+		Status      string `json:"status,omitempty"`
+		CreatedAt   string `json:"created_at,omitempty"`
+	}
 
-	// 构造兼容响应
-	compatTask := DeployRequestCompat{
-		Service:      task.Service,
-		Environments: groupEnvs,
-		Version:      task.Version,
-		User:         task.User,
-		Status:       task.Status,
-		CreatedAt:    task.CreatedAt.Format(time.RFC3339),
+	for _, task := range tasks {
+		response = append(response, struct {
+			Service     string `json:"service"`
+			Environment string `json:"environment"`
+			Version     string `json:"version"`
+			User        string `json:"user"`
+			Status      string `json:"status,omitempty"`
+			CreatedAt   string `json:"created_at,omitempty"`
+		}{
+			Service:     task.Service,
+			Environment: task.Environment,
+			Version:     task.Version,
+			User:        task.User,
+			Status:      task.Status,
+			CreatedAt:   task.CreatedAt.Format(time.RFC3339),
+		})
 	}
 
 	// 返回数组格式（兼容旧客户端）
-	json.NewEncoder(w).Encode([]DeployRequestCompat{compatTask})
+	json.NewEncoder(w).Encode(response)
 
-	// 后台更新为 assigned
-	go func() {
-		updateReq := storage.StatusRequest{
-			Service:     task.Service,
-			Version:     task.Version,
-			Environment: task.Environment,
-			User:        task.User,
-			Status:      "assigned",
+	// 后台异步更新所有任务为 assigned
+	go func(tasks []storage.DeployRequest) {
+		for _, task := range tasks {
+			updateReq := storage.StatusRequest{
+				Service:     task.Service,
+				Version:     task.Version,
+				Environment: task.Environment,
+				User:        task.User,
+				Status:      "assigned",
+			}
+			if updated, err := s.storage.UpdateStatus(updateReq); err != nil || !updated {
+				s.logger.WithError(err).Warnf("更新任务 %s (env: %s) 到 assigned 失败", task.Version, task.Environment)
+			} else {
+				s.logger.Infof("任务 %s 已领取 (env: %s)", task.Version, task.Environment)
+			}
 		}
-		updated, err := s.storage.UpdateStatus(updateReq)
-		if err != nil || !updated {
-			s.logger.WithError(err).Warnf("更新任务 %s 到 assigned 失败", task.Version)
-		} else {
-			s.logger.Infof("任务 %s 已领取 (env: %s)", task.Version, task.Environment)
-		}
-	}()
+	}(tasks)
 }
 
 // handleStatus 更新状态
