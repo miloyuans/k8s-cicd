@@ -4,7 +4,6 @@ package storage
 import (
 	"context"
 	"errors"
-	//"regexp"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -12,17 +11,18 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// DeployRequest 部署请求数据结构
+// DeployRequest 单环境部署请求（新结构）
 type DeployRequest struct {
 	Service      string    `json:"service" bson:"service"`
-	Environments []string  `json:"environments" bson:"environments"`
+	Environment  string    `json:"environment" bson:"environment"`   // 单环境
 	Version      string    `json:"version" bson:"version"`
 	User         string    `json:"user" bson:"user"`
 	Status       string    `json:"status,omitempty" bson:"status"`
+	TaskGroupID  string    `json:"task_group_id" bson:"task_group_id"` // 关联组
 	CreatedAt    time.Time `bson:"created_at"`
 }
 
-// StatusRequest 状态更新请求数据结构
+// StatusRequest 状态更新请求
 type StatusRequest struct {
 	Service     string `json:"service" bson:"service"`
 	Version     string `json:"version" bson:"version"`
@@ -31,7 +31,7 @@ type StatusRequest struct {
 	Status      string `json:"status" bson:"status"`
 }
 
-// MongoStorage 封装主 MongoDB 操作，支持并发查询
+// MongoStorage 封装主 MongoDB 操作
 type MongoStorage struct {
 	client *mongo.Client
 	db     *mongo.Database
@@ -66,7 +66,7 @@ func NewMongoStorage(uri string, ttlHours int) (*MongoStorage, error) {
 	return s, nil
 }
 
-// createIndexes 创建所有集合的索引，确保TTL自动过期
+// createIndexes 创建索引
 func (s *MongoStorage) createIndexes(ttlHours int) error {
 	svcColl := s.db.Collection("service_environments")
 	_, err := svcColl.Indexes().CreateMany(s.ctx, []mongo.IndexModel{
@@ -82,15 +82,16 @@ func (s *MongoStorage) createIndexes(ttlHours int) error {
 	_, err = deployColl.Indexes().CreateMany(s.ctx, []mongo.IndexModel{
 		{Keys: bson.D{{"service", 1}}},
 		{Keys: bson.D{{"version", 1}}},
+		{Keys: bson.D{{"environment", 1}}},  // 新增
 		{Keys: bson.D{{"status", 1}}},
 		{Keys: bson.D{{"user", 1}}},
-		{Keys: bson.D{{"environments", 1}}},
+		{Keys: bson.D{{"task_group_id", 1}}}, // 新增
 		{Keys: bson.D{{"created_at", 1}}, Options: options.Index().SetExpireAfterSeconds(ttlSeconds)},
 	})
 	return err
 }
 
-// StoreServiceEnvironments 存储或合并服务环境，支持批量更新
+// StoreServiceEnvironments 存储服务环境
 func (s *MongoStorage) StoreServiceEnvironments(services, environments []string) error {
 	if len(services) == 0 || len(environments) == 0 {
 		return errors.New("服务名和环境必须存在")
@@ -109,7 +110,7 @@ func (s *MongoStorage) StoreServiceEnvironments(services, environments []string)
 	return nil
 }
 
-// GetServices 获取所有服务列表
+// GetServices 获取所有服务
 func (s *MongoStorage) GetServices() ([]string, error) {
 	coll := s.db.Collection("service_environments")
 	cursor, err := coll.Distinct(s.ctx, "_id", bson.D{})
@@ -123,11 +124,10 @@ func (s *MongoStorage) GetServices() ([]string, error) {
 			services = append(services, str)
 		}
 	}
-
 	return services, nil
 }
 
-// GetServiceEnvironments 获取指定服务的环境列表
+// GetServiceEnvironments 获取服务环境
 func (s *MongoStorage) GetServiceEnvironments(service string) ([]string, error) {
 	coll := s.db.Collection("service_environments")
 	var result struct {
@@ -143,7 +143,7 @@ func (s *MongoStorage) GetServiceEnvironments(service string) ([]string, error) 
 	return result.Environments, nil
 }
 
-// InsertDeployRequest 插入部署请求，确保数据持久化避免丢失
+// InsertDeployRequest 插入单环境任务
 func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 	coll := s.db.Collection("deploy_queue")
 	req.CreatedAt = time.Now().UTC()
@@ -151,40 +151,39 @@ func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 	return err
 }
 
-// QueryDeployQueueByServiceEnv 查询pending任务（支持多环境查询，服务精确，user可选）
-func (s *MongoStorage) QueryDeployQueueByServiceEnv(service string, environments []string, user string) ([]DeployRequest, error) {
+// QuerySinglePendingTask 查询单条 pending 任务（单环境）
+func (s *MongoStorage) QuerySinglePendingTask(service string, environments []string, user string) (*DeployRequest, error) {
 	coll := s.db.Collection("deploy_queue")
-	// 精确查询service，environments数组匹配任意一个，status=pending，user可选
 	filter := bson.D{
 		{"service", service},
-		{"environments", bson.D{{"$in", environments}}},
+		{"environment", bson.D{{"$in", environments}}},
 		{"status", "pending"},
 	}
 	if user != "" {
 		filter = append(filter, bson.E{"user", user})
 	}
-	cursor, err := coll.Find(s.ctx, filter)
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(s.ctx)
 
-	var results []DeployRequest
-	if err := cursor.All(s.ctx, &results); err != nil {
+	opts := options.FindOne()
+	var result DeployRequest
+	err := coll.FindOne(s.ctx, filter, opts).Decode(&result)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
 		return nil, err
 	}
-	return results, nil
+	return &result, nil
 }
 
-// UpdateStatus 更新任务状态（修正为匹配 pending 状态）
+// UpdateStatus 更新单环境任务状态
 func (s *MongoStorage) UpdateStatus(req StatusRequest) (bool, error) {
 	coll := s.db.Collection("deploy_queue")
 	filter := bson.D{
 		{"service", req.Service},
 		{"version", req.Version},
+		{"environment", req.Environment},
 		{"user", req.User},
-		{"environments", bson.D{{"$in", []string{req.Environment}}}},
-		{"status", "pending"}, // 修正：匹配 pending 状态
+		{"status", "assigned"},
 	}
 	update := bson.D{{"$set", bson.D{{"status", req.Status}}}}
 	result, err := coll.UpdateOne(s.ctx, filter, update)
@@ -194,13 +193,13 @@ func (s *MongoStorage) UpdateStatus(req StatusRequest) (bool, error) {
 	return result.ModifiedCount > 0, nil
 }
 
-// GetDeployByFilter 获取匹配的部署请求（用于日志）
+// GetDeployByFilter 获取任务（用于日志）
 func (s *MongoStorage) GetDeployByFilter(service, version, environment string) ([]DeployRequest, error) {
 	coll := s.db.Collection("deploy_queue")
 	filter := bson.D{
 		{"service", service},
 		{"version", version},
-		{"environments", bson.D{{"$in", []string{environment}}}},
+		{"environment", environment},
 	}
 	cursor, err := coll.Find(s.ctx, filter)
 	if err != nil {
@@ -213,4 +212,29 @@ func (s *MongoStorage) GetDeployByFilter(service, version, environment string) (
 		return nil, err
 	}
 	return results, nil
+}
+
+// GetGroupEnvironments 获取同组所有环境
+func (s *MongoStorage) GetGroupEnvironments(groupID string) ([]string, error) {
+	coll := s.db.Collection("deploy_queue")
+	filter := bson.D{{"task_group_id", groupID}}
+	cursor, err := coll.Find(s.ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(s.ctx)
+
+	envs := make([]string, 0)
+	seen := make(map[string]bool)
+	for cursor.Next(s.ctx) {
+		var t DeployRequest
+		if err := cursor.Decode(&t); err != nil {
+			continue
+		}
+		if !seen[t.Environment] {
+			envs = append(envs, t.Environment)
+			seen[t.Environment] = true
+		}
+	}
+	return envs, nil
 }
