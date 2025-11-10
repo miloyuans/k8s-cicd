@@ -183,7 +183,7 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 		cleanEnv := strings.ReplaceAll(env, "-", "_")
 		collection := client.Database("cicd").Collection(fmt.Sprintf("tasks_%s", cleanEnv))
 
-		// 唯一索引: service + environment + version + created_at
+		// 唯一索引
 		uniqueKeys := bson.D{
 			{Key: "service", Value: 1},
 			{Key: "environment", Value: 1},
@@ -202,12 +202,12 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 			return fmt.Errorf("创建唯一索引失败 [%s]: %v", env, err)
 		}
 
-		// TTL 索引: created_at
+		// TTL 索引
 		ttlKeys := bson.D{{Key: "created_at", Value: 1}}
 		if err := dropIndexByKeys(ctx, collection, ttlKeys, "ttl"); err != nil {
 			return err
 		}
-		ttlOpts := options.Index().SetExpireAfterSeconds(int64(cfg.TTL.Seconds()))
+		ttlOpts := options.Index().SetExpireAfterSeconds(int32(cfg.TTL.Seconds())) // 修复
 		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
 			Keys:    ttlKeys,
 			Options: ttlOpts,
@@ -217,7 +217,7 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 		}
 	}
 
-	// 2. popup_data TTL 索引
+	// 2. popup_data TTL
 	popupColl := client.Database("cicd").Collection("popup_data")
 	ttlKey := bson.D{{Key: "sent_at", Value: 1}}
 	if err := dropIndexByKeys(ctx, popupColl, ttlKey, "ttl"); err != nil {
@@ -225,7 +225,7 @@ func createIndexes(client *mongo.Client, cfg *config.MongoConfig) error {
 	}
 	_, err := popupColl.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    ttlKey,
-		Options: options.Index().SetExpireAfterSeconds(7*24*3600), // 7天
+		Options: options.Index().SetExpireAfterSeconds(7 * 24 * 3600), // 7天
 	})
 	if err != nil {
 		return fmt.Errorf("创建 popup_data TTL 索引失败: %v", err)
