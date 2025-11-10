@@ -275,7 +275,7 @@ func (a *Approval) handleStoredTask(taskID, env string, isConfirmEnv bool) {
 
     // ---------- 1. 直接使用新方法更新 ----------
     popupSent := expectedPopupSent
-    if err := a.mongo.UpdateTaskStatus(taskID, expectedStatus, "system", &popupSent, env); err != nil {
+    if err := a.mongo.UpdateTaskStatus(taskID, expectedStatus, "system", env, &popupSent); err != nil {
         logrus.WithFields(logrus.Fields{
             "time":            time.Now().Format("2006-01-02 15:04:05"),
             "method":          "handleStoredTask",
