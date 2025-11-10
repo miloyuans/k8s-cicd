@@ -172,11 +172,11 @@ done
 ```bash
 # 部署成功
 curl -X POST http://localhost:8080/status -H "Content-Type: application/json" -d '{
-  "service": "API",
-  "version": "v1.0.0",
-  "environment": "PROD",
-  "user": "deployer",
-  "status": "success"
+  "service": "international-es-data",
+  "version": "2025.1.0.0",
+  "environment": "eks-test",
+  "user": "ceshi",
+  "status": "no_action"
 }'
 ```
 
