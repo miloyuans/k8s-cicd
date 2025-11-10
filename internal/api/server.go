@@ -386,6 +386,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 // handleQuery 处理查询（返回单任务 + 补全 environments + 明确 environment）
 // handleQuery 处理查询（支持多环境查询，返回单环境任务，不包含 environments）
+// handleQuery 处理查询：返回数组格式，所有任务状态为 pending
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -415,7 +416,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 查询所有 pending 任务（支持多环境）
+	// 查询所有 pending 任务（多环境）
 	tasks, err := s.storage.QueryPendingTasksByEnvs(req.Service, req.Environments, req.User)
 	if err != nil {
 		s.logger.WithError(err).Error("批量查询失败")
@@ -423,44 +424,46 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(tasks) == 0 {
-		s.logger.Info("无待处理任务")
-		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
-		return
+	// 强制过滤：仅保留 status == "pending" 的任务
+	var pendingTasks []storage.DeployRequest
+	for _, task := range tasks {
+		if task.Status == "pending" {
+			pendingTasks = append(pendingTasks, task)
+		}
 	}
 
-	// 构造响应：仅返回当前 environment，不返回 environments
+	// 构造响应：始终返回数组（即使为空）
 	var response []struct {
 		Service     string `json:"service"`
-		Environment string `json:"environment"` // 当前领取的环境
+		Environment string `json:"environment"`
 		Version     string `json:"version"`
 		User        string `json:"user"`
-		Status      string `json:"status,omitempty"`
-		CreatedAt   string `json:"created_at,omitempty"`
+		Status      string `json:"status"`
+		CreatedAt   string `json:"created_at"`
 	}
 
-	for _, task := range tasks {
+	for _, task := range pendingTasks {
 		response = append(response, struct {
 			Service     string `json:"service"`
 			Environment string `json:"environment"`
 			Version     string `json:"version"`
 			User        string `json:"user"`
-			Status      string `json:"status,omitempty"`
-			CreatedAt   string `json:"created_at,omitempty"`
+			Status      string `json:"status"`
+			CreatedAt   string `json:"created_at"`
 		}{
 			Service:     task.Service,
 			Environment: task.Environment,
 			Version:     task.Version,
 			User:        task.User,
-			Status:      task.Status,
+			Status:      task.Status, // 固定为 "pending"
 			CreatedAt:   task.CreatedAt.Format(time.RFC3339),
 		})
 	}
 
-	// 返回数组格式（兼容旧客户端）
+	// 始终返回数组（即使为空）
 	json.NewEncoder(w).Encode(response)
 
-	// 后台异步更新所有任务为 assigned
+	// 后台异步更新所有 pending 任务为 assigned
 	go func(tasks []storage.DeployRequest) {
 		for _, task := range tasks {
 			updateReq := storage.StatusRequest{
@@ -476,7 +479,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 				s.logger.Infof("任务 %s 已领取 (env: %s)", task.Version, task.Environment)
 			}
 		}
-	}(tasks)
+	}(pendingTasks)
 }
 
 // handleStatus 更新状态
