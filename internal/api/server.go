@@ -479,12 +479,37 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(results) > 0 {
-		dataJSON, _ := json.Marshal(results)
+		// 构造响应：强制补全 environment 字段
+		var response []map[string]interface{}
+		for _, task := range results {
+			// 提取 environment：优先 task.Environment，其次 task.Environments[0]
+			env := ""
+			if len(task.Environments) > 0 {
+				env = task.Environments[0]
+			}
+			if env == "" {
+				s.logger.Warnf("任务 %s environments 为空，跳过响应", task.Version)
+				fmt.Printf("\033[33m[异常] 任务 %s environments 为空，跳过\033[0m\n", task.Version)
+				continue
+			}
+
+			respTask := map[string]interface{}{
+				"service":       task.Service,
+				"environments":  task.Environments,
+				"environment":   env,  // 关键：强制补全
+				"version":       task.Version,
+				"user":          task.User,
+				"created_at":    task.CreatedAt,
+			}
+			response = append(response, respTask)
+		}
+
+		dataJSON, _ := json.MarshalIndent(response, "", "  ")
 		s.logger.Infof("查询反馈数据: %s", string(dataJSON))
-		fmt.Printf("\033[32m[成功] 查询到 %d 条 pending 任务:\n%s\033[0m\n", len(results), string(dataJSON))
+		fmt.Printf("\033[32m[成功] 查询到 %d 条 pending 任务:\n%s\033[0m\n", len(response), string(dataJSON))
 
 		// 先反馈数据给外部服务
-		err = json.NewEncoder(w).Encode(results)
+		err = json.NewEncoder(w).Encode(response)
 		if err != nil {
 			s.logger.WithError(err).Error("反馈数据失败")
 			fmt.Printf("\033[31m[错误] 反馈数据失败: %v\033[0m\n", err)
@@ -496,18 +521,10 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		s.logger.Info("开始更新任务状态为 assigned")
 
 		for _, task := range results {
-			// 确定任务匹配的环境
-			var matchedEnv string
-			for _, env := range task.Environments {
-				for _, reqEnv := range req.Environments {
-					if env == reqEnv {
-						matchedEnv = env
-						break
-					}
-				}
-				if matchedEnv != "" {
-					break
-				}
+			// 确定任务匹配的环境：优先 environment，其次 environments[0]
+			matchedEnv := ""
+			if len(task.Environments) > 0 {
+				matchedEnv = task.Environments[0]
 			}
 			if matchedEnv == "" {
 				s.logger.Warnf("任务 %s 未找到匹配环境", task.Version)
@@ -537,7 +554,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 					s.logger.WithError(recheckErr).Errorf("重新查询更新后任务 %s 失败", task.Version)
 					fmt.Printf("\033[31m[错误] 重新查询更新后任务 %s 失败: %v\033[0m\n", task.Version, recheckErr)
 				} else {
-					recheckedJSON, _ := json.Marshal(recheckedTasks)
+					recheckedJSON, _ := json.MarshalIndent(recheckedTasks, "", "  ")
 					s.logger.Infof("任务 %s 更新为 assigned, 更新后数据: %s", task.Version, string(recheckedJSON))
 					fmt.Printf("\033[32m[成功] 任务 %s 更新为 assigned, 更新后数据:\n%s\033[0m\n", task.Version, string(recheckedJSON))
 				}
