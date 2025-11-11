@@ -13,13 +13,14 @@ import (
 )
 
 // DeployRequest 部署请求数据结构
+// DeployRequest 结构体（用于查询返回）
 type DeployRequest struct {
 	Service      string    `json:"service" bson:"service"`
-	Environments []string  `json:"environments" bson:"environments"`
+	Environments []string  `json:"environments" bson:"environments"` // 长度为1
 	Version      string    `json:"version" bson:"version"`
 	User         string    `json:"user" bson:"user"`
 	Status       string    `json:"status,omitempty" bson:"status"`
-	CreatedAt    time.Time `bson:"created_at"`
+	CreatedAt    time.Time `bson:"created_at" json:"created_at"`
 }
 
 // StatusRequest 状态更新请求数据结构
@@ -144,17 +145,42 @@ func (s *MongoStorage) GetServiceEnvironments(service string) ([]string, error) 
 }
 
 // InsertDeployRequest 插入部署请求，确保数据持久化避免丢失
+// InsertDeployRequest 插入部署请求：拆分为单环境记录（仅存 environments 数组，长度1）
 func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 	coll := s.db.Collection("deploy_queue")
-	req.CreatedAt = time.Now().UTC()
-	_, err := coll.InsertOne(s.ctx, req)
+
+	now := time.Now().UTC()
+	var docs []interface{}
+
+	for _, env := range req.Environments {
+		if env == "" {
+			continue
+		}
+
+		doc := bson.M{
+			"service":      req.Service,
+			"environments": []string{env},  // 单元素数组
+			"version":      req.Version,
+			"user":        req.User,
+			"status":       "pending",
+			"created_at":   now,
+		}
+		docs = append(docs, doc)
+	}
+
+	if len(docs) == 0 {
+		return errors.New("environments 数组为空")
+	}
+
+	_, err := coll.InsertMany(s.ctx, docs)
 	return err
 }
 
 // QueryDeployQueueByServiceEnv 查询pending任务（支持多环境查询，服务精确，user可选）
+// QueryDeployQueueByServiceEnv 查询pending任务
 func (s *MongoStorage) QueryDeployQueueByServiceEnv(service string, environments []string, user string) ([]DeployRequest, error) {
 	coll := s.db.Collection("deploy_queue")
-	// 精确查询service，environments数组匹配任意一个，status=pending，user可选
+
 	filter := bson.D{
 		{"service", service},
 		{"environments", bson.D{{"$in", environments}}},
@@ -163,6 +189,7 @@ func (s *MongoStorage) QueryDeployQueueByServiceEnv(service string, environments
 	if user != "" {
 		filter = append(filter, bson.E{"user", user})
 	}
+
 	cursor, err := coll.Find(s.ctx, filter)
 	if err != nil {
 		return nil, err
