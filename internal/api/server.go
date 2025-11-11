@@ -431,65 +431,124 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 // handleQuery 处理查询请求（支持多环境查询，服务单个，user可选）
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func() {
+		s.logger.WithField("total_duration_ms", time.Since(start).Milliseconds()).Info("handleQuery 执行完成")
+	}()
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "仅支持 POST 方法", http.StatusMethodNotAllowed)
+		return
+	}
+
 	var req QueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logger.WithError(err).Error("解析查询请求失败")
+		fmt.Printf("\033[31m[错误] 解析查询请求失败: %v\033[0m\n", err)
 		http.Error(w, "无效的请求数据", http.StatusBadRequest)
 		return
 	}
 
-	if req.Service == "" {
-		s.logger.Error("缺少服务名")
-		http.Error(w, "缺少服务名", http.StatusBadRequest)
+	// 兼容单个环境
+	if len(req.Environments) == 0 && req.Environment != "" {
+		req.Environments = []string{req.Environment}
+	}
+
+	reqJSON, _ := json.Marshal(req)
+	s.logger.Infof("收到查询请求: %s", string(reqJSON))
+	fmt.Printf("\033[32m[成功] 收到查询请求: %s\033[0m\n", string(reqJSON))
+
+	if req.Service == "" || len(req.Environments) == 0 {
+		s.logger.Error("缺少必填字段：服务名或环境列表")
+		fmt.Printf("\033[31m[错误] 缺少必填字段：service=%s, environments=%v\033[0m\n", req.Service, req.Environments)
+		http.Error(w, "缺少必填字段：服务名或环境列表", http.StatusBadRequest)
 		return
 	}
 
-	var envs []string
-	if len(req.Environments) > 0 {
-		envs = req.Environments
-	} else if req.Environment != "" {
-		envs = []string{req.Environment}
-	}
-	if len(envs) == 0 {
-		s.logger.Error("缺少环境参数")
-		http.Error(w, "缺少环境参数", http.StatusBadRequest)
-		return
-	}
+	// 查询pending状态的任务
+	fmt.Printf("\033[32m[成功] 开始查询 MongoDB: service=%s, environments=%v, user=%s\033[0m\n",
+		req.Service, req.Environments, req.User)
+	s.logger.Infof("开始查询: service=%s, environments=%v, user=%s", req.Service, req.Environments, req.User)
 
-	// 查询原始数据（environments 长度为1）
-	tasks, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, envs, req.User)
+	results, err := s.storage.QueryDeployQueueByServiceEnv(req.Service, req.Environments, req.User)
 	if err != nil {
-		s.logger.WithError(err).Error("查询部署队列失败")
+		s.logger.WithError(err).Error("查询数据库失败")
+		fmt.Printf("\033[31m[错误] 查询数据库失败: %v\033[0m\n", err)
 		http.Error(w, "查询失败", http.StatusInternalServerError)
 		return
 	}
 
-	if len(tasks) == 0 {
+	if len(results) > 0 {
+		dataJSON, _ := json.Marshal(results)
+		s.logger.Infof("查询反馈数据: %s", string(dataJSON))
+		fmt.Printf("\033[32m[成功] 查询到 %d 条 pending 任务:\n%s\033[0m\n", len(results), string(dataJSON))
+
+		// 先反馈数据给外部服务
+		err = json.NewEncoder(w).Encode(results)
+		if err != nil {
+			s.logger.WithError(err).Error("反馈数据失败")
+			fmt.Printf("\033[31m[错误] 反馈数据失败: %v\033[0m\n", err)
+			return
+		}
+
+		// 反馈成功后，更新状态为 assigned
+		fmt.Printf("\033[32m[成功] 开始更新任务状态为 assigned\033[0m\n")
+		s.logger.Info("开始更新任务状态为 assigned")
+
+		for _, task := range results {
+			// 确定任务匹配的环境
+			var matchedEnv string
+			for _, env := range task.Environments {
+				for _, reqEnv := range req.Environments {
+					if env == reqEnv {
+						matchedEnv = env
+						break
+					}
+				}
+				if matchedEnv != "" {
+					break
+				}
+			}
+			if matchedEnv == "" {
+				s.logger.Warnf("任务 %s 未找到匹配环境", task.Version)
+				fmt.Printf("\033[33m[异常] 任务 %s 未找到匹配环境\033[0m\n", task.Version)
+				continue
+			}
+
+			updateReq := storage.StatusRequest{
+				Service:     task.Service,
+				Version:     task.Version,
+				Environment: matchedEnv,
+				User:        task.User,
+				Status:      "assigned",
+			}
+
+			updated, err := s.storage.UpdateStatus(updateReq)
+			if err != nil {
+				s.logger.WithError(err).Errorf("更新任务 %s 到 assigned 失败", task.Version)
+				fmt.Printf("\033[31m[错误] 更新任务 %s 到 assigned 失败: %v\033[0m\n", task.Version, err)
+			} else if !updated {
+				s.logger.Warnf("未更新任务 %s 到 assigned (可能状态不匹配)", task.Version)
+				fmt.Printf("\033[33m[异常] 未更新任务 %s 到 assigned (可能状态不匹配)\033[0m\n", task.Version)
+			} else {
+				// 更新成功，重新查询验证
+				recheckedTasks, recheckErr := s.storage.GetDeployByFilter(task.Service, task.Version, matchedEnv)
+				if recheckErr != nil {
+					s.logger.WithError(recheckErr).Errorf("重新查询更新后任务 %s 失败", task.Version)
+					fmt.Printf("\033[31m[错误] 重新查询更新后任务 %s 失败: %v\033[0m\n", task.Version, recheckErr)
+				} else {
+					recheckedJSON, _ := json.Marshal(recheckedTasks)
+					s.logger.Infof("任务 %s 更新为 assigned, 更新后数据: %s", task.Version, string(recheckedJSON))
+					fmt.Printf("\033[32m[成功] 任务 %s 更新为 assigned, 更新后数据:\n%s\033[0m\n", task.Version, string(recheckedJSON))
+				}
+			}
+		}
+	} else {
+		s.logger.Info("查询成功但无待处理任务")
+		fmt.Printf("\033[33m[信息] 查询成功但无pending任务: service=%s, environments=%v, user=%s\033[0m\n",
+			req.Service, req.Environments, req.User)
 		json.NewEncoder(w).Encode(map[string]string{"message": "暂无待处理任务"})
-		return
 	}
-
-	// 构造兼容 k8s-approval 的响应：补全 environment 字段
-	var response []map[string]interface{}
-	for _, task := range tasks {
-		if len(task.Environments) != 1 {
-			s.logger.Warnf("environments 长度异常: %v", task.Environments)
-			continue
-		}
-		env := task.Environments[0]
-
-		respTask := map[string]interface{}{
-			"service":       task.Service,
-			"environments":  task.Environments,
-			"environment":   env,                    // 关键：补全字段
-			"version":       task.Version,
-			"user":          task.User,
-			"created_at":    task.CreatedAt,
-		}
-		response = append(response, respTask)
-	}
-
-	json.NewEncoder(w).Encode(response)
 }
 
 // handleStatus 处理状态更新请求

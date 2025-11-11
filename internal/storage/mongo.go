@@ -13,14 +13,13 @@ import (
 )
 
 // DeployRequest 部署请求数据结构
-// DeployRequest 结构体（用于查询返回）
 type DeployRequest struct {
 	Service      string    `json:"service" bson:"service"`
-	Environments []string  `json:"environments" bson:"environments"` // 长度为1
+	Environments []string  `json:"environments" bson:"environments"`
 	Version      string    `json:"version" bson:"version"`
 	User         string    `json:"user" bson:"user"`
 	Status       string    `json:"status,omitempty" bson:"status"`
-	CreatedAt    time.Time `bson:"created_at" json:"created_at"`
+	CreatedAt    time.Time `bson:"created_at"`
 }
 
 // StatusRequest 状态更新请求数据结构
@@ -145,31 +144,49 @@ func (s *MongoStorage) GetServiceEnvironments(service string) ([]string, error) 
 }
 
 // InsertDeployRequest 插入部署请求，确保数据持久化避免丢失
-// InsertDeployRequest 插入部署请求：拆分为单环境记录（仅存 environments 数组，长度1）
+// InsertDeployRequest 智能插入：
+// - 单环境 → 直接存
+// - 多环境 → 拆分为单环境记录（environments 长度为1）
 func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 	coll := s.db.Collection("deploy_queue")
-
 	now := time.Now().UTC()
 	var docs []interface{}
 
-	for _, env := range req.Environments {
-		if env == "" {
-			continue
+	// 智能判断：是否为多环境
+	if len(req.Environments) <= 1 {
+		// 单环境或空：直接存储
+		if len(req.Environments) == 0 {
+			return errors.New("environments 数组为空")
 		}
-
 		doc := bson.M{
 			"service":      req.Service,
-			"environments": []string{env},  // 单元素数组
+			"environments": req.Environments, // 原始数组
 			"version":      req.Version,
-			"user":        req.User,
+			"user":         req.User,
 			"status":       "pending",
 			"created_at":   now,
 		}
 		docs = append(docs, doc)
+	} else {
+		// 多环境：拆分为单环境记录
+		for _, env := range req.Environments {
+			if env == "" {
+				continue
+			}
+			doc := bson.M{
+				"service":      req.Service,
+				"environments": []string{env}, // 单元素数组
+				"version":      req.Version,
+				"user":         req.User,
+				"status":       "pending",
+				"created_at":   now,
+			}
+			docs = append(docs, doc)
+		}
 	}
 
 	if len(docs) == 0 {
-		return errors.New("environments 数组为空")
+		return errors.New("无有效环境数据")
 	}
 
 	_, err := coll.InsertMany(s.ctx, docs)
@@ -177,10 +194,9 @@ func (s *MongoStorage) InsertDeployRequest(req DeployRequest) error {
 }
 
 // QueryDeployQueueByServiceEnv 查询pending任务（支持多环境查询，服务精确，user可选）
-// QueryDeployQueueByServiceEnv 查询pending任务
 func (s *MongoStorage) QueryDeployQueueByServiceEnv(service string, environments []string, user string) ([]DeployRequest, error) {
 	coll := s.db.Collection("deploy_queue")
-
+	// 精确查询service，environments数组匹配任意一个，status=pending，user可选
 	filter := bson.D{
 		{"service", service},
 		{"environments", bson.D{{"$in", environments}}},
@@ -189,7 +205,6 @@ func (s *MongoStorage) QueryDeployQueueByServiceEnv(service string, environments
 	if user != "" {
 		filter = append(filter, bson.E{"user", user})
 	}
-
 	cursor, err := coll.Find(s.ctx, filter)
 	if err != nil {
 		return nil, err
